@@ -347,7 +347,8 @@ fn logged_in(account: &Account) -> Option<String> {
     }
 }
 
-fn whole_seconds(delay: Duration) -> u64 {
+/// Rounds `delay` up to whole seconds, for a `retry_after` or `retry_in` an agent can poll on.
+pub(crate) fn whole_seconds(delay: Duration) -> u64 {
     delay.as_secs() + u64::from(delay.subsec_nanos() > 0)
 }
 

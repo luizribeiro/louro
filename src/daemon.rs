@@ -5,7 +5,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
 use serde::Serialize;
@@ -14,13 +14,15 @@ use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, mpsc};
+use tokio::time::Instant;
 
-use crate::config::{Config, Grants};
+use crate::config::{Config, Grants, Limit, Limits};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE};
 use crate::irc::{
     self, History, HistoryQuery, Incoming, Irc, Member, Outgoing, Secret, Sender, Typing, Update,
+    whole_seconds,
 };
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -56,8 +58,48 @@ struct Problem {
     message: String,
 }
 
+/// Sliding windows of recent attempts, one deque per lowercased key (a send/react target, or a
+/// fixed key for a limit that isn't per-target), trimmed to the window on every check.
+#[derive(Default)]
+struct RateWindows(Mutex<HashMap<String, VecDeque<Instant>>>);
+
+impl RateWindows {
+    /// `None` if `key` is under `limit` (never, for [`Limit::Off`]); otherwise the whole
+    /// seconds, rounded up, until the oldest entry leaves the window. Stale entries are
+    /// trimmed either way, but only a `None` here should be followed by [`Self::record`].
+    fn peek(&self, key: &str, limit: Limit, now: Instant) -> Option<u64> {
+        let Limit::Window { count, seconds } = limit else {
+            return None;
+        };
+        let window = Duration::from_secs(seconds);
+        let mut windows = self.0.lock().unwrap();
+        let entries = windows.entry(key.to_ascii_lowercase()).or_default();
+        while entries.front().is_some_and(|&t| now - t >= window) {
+            entries.pop_front();
+        }
+        (entries.len() >= count as usize).then(|| {
+            let elapsed = now - *entries.front().unwrap();
+            whole_seconds(window.saturating_sub(elapsed))
+        })
+    }
+
+    /// A no-op for [`Limit::Off`], which `peek` never stores entries for either.
+    fn record(&self, key: &str, limit: Limit, now: Instant) {
+        if !matches!(limit, Limit::Window { .. }) {
+            return;
+        }
+        self.0
+            .lock()
+            .unwrap()
+            .entry(key.to_ascii_lowercase())
+            .or_default()
+            .push_back(now);
+    }
+}
+
 struct Daemon<I> {
     grants: Grants,
+    limits: Limits,
     /// Kept so `send` can refuse to post it.
     password: Option<Secret>,
     irc: I,
@@ -69,13 +111,18 @@ struct Daemon<I> {
     /// Set from a disconnect until the next registration, so the agent hears of each outage once.
     offline: AtomicBool,
     quit: Notify,
+    send_windows: RateWindows,
+    send_total: RateWindows,
+    react_windows: RateWindows,
 }
 
 /// Serves requests on `listener` and buffers chat from `updates` until a `quit`
 /// request or `stop`, then quits IRC and removes the socket at `socket_path`. Fails once papo
 /// gives up reconnecting, so a supervisor can restart louro.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     grants: Grants,
+    limits: Limits,
     password: Option<Secret>,
     irc: impl Irc,
     mut updates: mpsc::Receiver<Update>,
@@ -85,6 +132,7 @@ pub async fn run(
 ) -> io::Result<()> {
     let daemon = Arc::new(Daemon {
         grants,
+        limits,
         password,
         irc,
         inbox: Inbox::default(),
@@ -93,6 +141,9 @@ pub async fn run(
         last_error: Mutex::default(),
         offline: AtomicBool::new(false),
         quit: Notify::new(),
+        send_windows: RateWindows::default(),
+        send_total: RateWindows::default(),
+        react_windows: RateWindows::default(),
     });
     tokio::pin!(stop);
     let outcome = loop {
@@ -121,7 +172,11 @@ pub async fn start(
     config: Config,
     password: Option<Secret>,
 ) -> Result<impl Future<Output = io::Result<()>>> {
-    let Config { server, grants, .. } = config;
+    let Config {
+        server,
+        grants,
+        limits,
+    } = config;
     let socket = resolve_socket_path(server.socket.as_deref())?;
     create_runtime_dir(&socket)?;
     let lock = lock_session(&socket)?;
@@ -138,7 +193,10 @@ pub async fn start(
     })));
     Ok(async move {
         let _lock = lock;
-        run(grants, password, irc, updates, listener, &socket, stop).await
+        run(
+            grants, limits, password, irc, updates, listener, &socket, stop,
+        )
+        .await
     })
 }
 
@@ -357,6 +415,7 @@ impl<I: Irc> Daemon<I> {
     fn status(&self) -> Value {
         let mut status = json!(self.irc.status());
         status["grants"] = json!(self.grants);
+        status["limits"] = json!(self.limits);
         status["last_error"] = json!(*self.last_error.lock().unwrap());
         status
     }
@@ -392,8 +451,20 @@ impl<I: Irc> Daemon<I> {
             .check_also(&self.grants.irc.react, "irc.react", target, &dm)?;
         text::check_msgid(msgid)?;
         text::check_reaction(reaction)?;
+        self.check_react_budget(target)?;
         self.irc.react(target, msgid, reaction, remove).await?;
         Ok(json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove}))
+    }
+
+    /// `Err` once `target` has reached `limits.react` within its window; a refused attempt
+    /// never touches the budget.
+    fn check_react_budget(&self, target: &str) -> Result<()> {
+        let now = Instant::now();
+        if let Some(retry_after) = self.react_windows.peek(target, self.limits.react, now) {
+            return Err(rate_limited("react", retry_after));
+        }
+        self.react_windows.record(target, self.limits.react, now);
+        Ok(())
     }
 
     /// Never touches the inbox, so `wait`'s cursor stays where it was.
@@ -453,6 +524,7 @@ impl<I: Irc> Daemon<I> {
             text: text::clean_lines(&message.text)?,
             ..message
         };
+        self.check_send_budget(&message.target)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let is_reply = message.reply_to.is_some();
         let sent = self.irc.send(message).await?;
@@ -466,6 +538,34 @@ impl<I: Irc> Daemon<I> {
         }
         Ok(result)
     }
+
+    /// `Err` once `target` has reached `limits.send`, or any target has reached
+    /// `limits.send_total`, within its window; a refused send never touches either budget.
+    fn check_send_budget(&self, target: &str) -> Result<()> {
+        let now = Instant::now();
+        let refused = self
+            .send_windows
+            .peek(target, self.limits.send, now)
+            .or_else(|| self.send_total.peek(TOTAL, self.limits.send_total, now));
+        if let Some(retry_after) = refused {
+            return Err(rate_limited("send", retry_after));
+        }
+        self.send_windows.record(target, self.limits.send, now);
+        self.send_total.record(TOTAL, self.limits.send_total, now);
+        Ok(())
+    }
+}
+
+/// The one key `send_total`'s [`RateWindows`] ever uses: it isn't per-target.
+const TOTAL: &str = "";
+
+fn rate_limited(action: &str, retry_after: u64) -> Error {
+    Error::new(
+        Code::RateLimited,
+        format!("too many {action}s in this window"),
+    )
+    .with_hint(format!("wait {retry_after} seconds, or don't {action}"))
+    .with_retry_after(retry_after)
 }
 
 fn now() -> String {
@@ -651,6 +751,10 @@ mod tests {
     }
 
     fn launch(grants: Grants) -> Running {
+        launch_with(grants, Limits::default())
+    }
+
+    fn launch_with(grants: Grants, limits: Limits) -> Running {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("louro.sock");
         let irc = Arc::new(FakeIrc::default());
@@ -665,7 +769,10 @@ mod tests {
             };
             async move {
                 let listener = UnixListener::bind(&socket)?;
-                run(grants, password, irc, receiver, listener, &socket, stopped).await
+                run(
+                    grants, limits, password, irc, receiver, listener, &socket, stopped,
+                )
+                .await
             }
         });
         Running {
@@ -759,6 +866,7 @@ mod tests {
                     "redact": true,
                     "quit": false
                 }},
+                "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s"},
                 "last_error": null
             }})
         );
@@ -979,6 +1087,138 @@ mod tests {
         let elsewhere = daemon.call(send_request("#lounge", "hi all")).await;
         assert_eq!(elsewhere["Err"]["code"], "not_allowed");
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
+    fn rate_limited_grants() -> Grants {
+        toml::from_str(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.send = ["#bots", "#lounge"]
+            "##,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_targets_default_send_limit_allows_three_then_refuses_until_the_window_passes() {
+        let daemon = launch(grants());
+        for n in 0..3 {
+            let reply = daemon
+                .call(send_request("#bots", &format!("quick {n}")))
+                .await;
+            assert!(reply["Ok"].is_object(), "{n}: {reply:?}");
+        }
+        let refused = daemon.call(send_request("#bots", "one too many")).await;
+        assert_eq!(refused["Err"]["code"], "rate_limited");
+        assert_eq!(refused["Err"]["retry_after"], 10);
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let reply = daemon.call(send_request("#bots", "fits now")).await;
+        assert!(reply["Ok"].is_object());
+    }
+
+    #[tokio::test]
+    async fn each_target_has_its_own_send_budget() {
+        let limits = Limits {
+            send: Limit::Window {
+                count: 1,
+                seconds: 10,
+            },
+            ..Limits::default()
+        };
+        let daemon = launch_with(rate_limited_grants(), limits);
+        assert!(daemon.call(send_request("#bots", "hi")).await["Ok"].is_object());
+        let refused = daemon.call(send_request("#bots", "again")).await;
+        assert_eq!(refused["Err"]["code"], "rate_limited");
+        assert!(daemon.call(send_request("#lounge", "hi")).await["Ok"].is_object());
+    }
+
+    #[tokio::test]
+    async fn send_total_limits_across_every_target_even_with_room_to_spare_per_target() {
+        let limits = Limits {
+            send: Limit::Off,
+            send_total: Limit::Window {
+                count: 2,
+                seconds: 10,
+            },
+            ..Limits::default()
+        };
+        let daemon = launch_with(rate_limited_grants(), limits);
+        assert!(daemon.call(send_request("#bots", "one")).await["Ok"].is_object());
+        assert!(daemon.call(send_request("#lounge", "two")).await["Ok"].is_object());
+        let refused = daemon.call(send_request("#bots", "three")).await;
+        assert_eq!(refused["Err"]["code"], "rate_limited");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_send_does_not_count_toward_its_targets_budget() {
+        let limits = Limits {
+            send: Limit::Window {
+                count: 1,
+                seconds: 10,
+            },
+            ..Limits::default()
+        };
+        let daemon = launch_with(grants(), limits);
+        assert!(daemon.call(send_request("#bots", "first")).await["Ok"].is_object());
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let refused = daemon.call(send_request("#bots", "too soon")).await;
+        assert_eq!(refused["Err"]["code"], "rate_limited");
+
+        // If the refusal above had wrongly recorded an entry, "first"'s window would not have
+        // opened up again yet.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let reply = daemon.call(send_request("#bots", "right on time")).await;
+        assert!(reply["Ok"].is_object(), "{reply:?}");
+    }
+
+    #[test]
+    fn an_off_limit_never_stores_an_entry() {
+        let windows = RateWindows::default();
+        let now = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(windows.peek("#bots", Limit::Off, now), None);
+            windows.record("#bots", Limit::Off, now);
+        }
+        assert!(windows.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn react_has_its_own_budget_independent_of_send() {
+        let limits = Limits {
+            react: Limit::Window {
+                count: 1,
+                seconds: 10,
+            },
+            ..Limits::default()
+        };
+        let daemon = launch_with(grants(), limits);
+        assert!(daemon.call(react_request("#bots", "👍", false)).await["Ok"].is_object());
+        let refused = daemon.call(react_request("#bots", "👍", true)).await;
+        assert_eq!(refused["Err"]["code"], "rate_limited");
+        assert!(daemon.call(send_request("#bots", "hi")).await["Ok"].is_object());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_react_does_not_count_toward_its_targets_budget() {
+        let limits = Limits {
+            react: Limit::Window {
+                count: 1,
+                seconds: 10,
+            },
+            ..Limits::default()
+        };
+        let daemon = launch_with(grants(), limits);
+        assert!(daemon.call(react_request("#bots", "👍", false)).await["Ok"].is_object());
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let refused = daemon.call(react_request("#bots", "👍", true)).await;
+        assert_eq!(refused["Err"]["code"], "rate_limited");
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let reply = daemon.call(react_request("#bots", "👍", true)).await;
+        assert!(reply["Ok"].is_object(), "{reply:?}");
     }
 
     fn react_request(target: &str, reaction: &str, remove: bool) -> Value {

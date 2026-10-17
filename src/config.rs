@@ -25,8 +25,6 @@ pub struct Config {
     pub server: Server,
     #[serde(default)]
     pub grants: Grants,
-    // Read by daemon.rs once enforcement lands in the next commit.
-    #[allow(dead_code)]
     #[serde(default)]
     pub limits: Limits,
 }
