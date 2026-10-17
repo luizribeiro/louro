@@ -15,6 +15,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154" }
 tokio = { version = "1.53.3", features = ["net", "io-util", "macros", "rt", "sync", "time"] }
+rpassword = "7.5.4"
 
 [lints.rust]
 unsafe_code = "forbid"
