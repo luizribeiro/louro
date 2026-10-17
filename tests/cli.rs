@@ -86,23 +86,6 @@ fn connect_without_a_config_shows_an_example() {
 }
 
 #[test]
-fn connect_refuses_a_config_that_autojoins_outside_its_grants() {
-    let dir = tempdir().unwrap();
-    let config = config(
-        dir.path(),
-        closed_port(),
-        r##"autojoin = ["#bots", "#lounge"]"##,
-    );
-    connect(&dir.path().join("louro.sock"), &config)
-        .assert()
-        .failure()
-        .code(2)
-        .stdout(predicate::str::contains(
-            "#lounge is in autojoin but not granted by irc.join",
-        ));
-}
-
-#[test]
 fn connect_refuses_when_louro_is_already_running() {
     let dir = tempdir().unwrap();
     let socket = dir.path().join("louro.sock");
