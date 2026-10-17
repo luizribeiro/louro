@@ -29,6 +29,10 @@ pub struct Args {
     /// Config file [default: louro/louro.toml in the XDG config dir, ~/.config]
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Unix socket to listen on [default: `socket` in louro.toml, else `LOURO_SOCKET`, else one in
+    /// the runtime dir]
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
     /// Run in this terminal instead of in the background
     #[arg(long)]
     pub foreground: bool,
@@ -38,14 +42,14 @@ pub struct Args {
 }
 
 impl Args {
-    pub async fn run(self, socket: Option<&Path>) -> ExitCode {
-        self.connect(socket)
+    pub async fn run(self) -> ExitCode {
+        self.connect()
             .await
             .unwrap_or_else(|err| output::emit::<()>(Err(err)))
     }
 
-    async fn connect(self, socket: Option<&Path>) -> Result<ExitCode> {
-        let config = config::load(self.config.as_deref(), socket)?;
+    async fn connect(self) -> Result<ExitCode> {
+        let config = config::load(self.config.as_deref(), self.socket.as_deref())?;
         if is_running(config.server.socket.as_deref()).await {
             return Err(daemon::already_running());
         }

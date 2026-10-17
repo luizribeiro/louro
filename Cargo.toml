@@ -11,7 +11,7 @@ description = "Let any coding agent act as an IRC bot"
 humantime = "2.4.0"
 # cargo-deny counts a git dependency without a version as a wildcard.
 papo = { version = "=0.0.0", git = "https://github.com/luizribeiro/papo", rev = "7d93346618c1e28e2ba9db2301551fa008daf397" }
-clap = { version = "4.6.7", features = ["derive", "env"] }
+clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154" }
 tokio = { version = "1.53.3", features = ["net", "io-util", "macros", "rt", "signal", "sync", "time"] }

@@ -1,5 +1,4 @@
 use std::io;
-use std::path::Path;
 use std::process::ExitCode;
 
 use serde_json::Value;
@@ -27,11 +26,11 @@ pub struct Args {
 }
 
 impl Args {
-    pub async fn run(self, socket: Option<&Path>) -> ExitCode {
-        output::emit(self.send(socket).await)
+    pub async fn run(self) -> ExitCode {
+        output::emit(self.send().await)
     }
 
-    async fn send(self, socket: Option<&Path>) -> Result<Value> {
+    async fn send(self) -> Result<Value> {
         let kind = match (self.notice, self.action) {
             (true, _) => Kind::Notice,
             (_, true) => Kind::Action,
@@ -43,7 +42,7 @@ impl Args {
             text: read_text(self.text)?,
             reply_to: self.reply_to,
         };
-        socket::request(socket, Op::Send(message)).await
+        socket::request(Op::Send(message)).await
     }
 }
 

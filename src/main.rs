@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -74,10 +73,6 @@ Run `louro <command> --help` for a command's flags.
     color = clap::ColorChoice::Never
 )]
 struct Cli {
-    /// Unix socket to the daemon
-    #[arg(long, global = true, env = "LOURO_SOCKET", value_name = "PATH")]
-    socket: Option<PathBuf>,
-
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -97,5 +92,5 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
-    commands::dispatch(command, cli.socket.as_deref()).await
+    commands::dispatch(command).await
 }

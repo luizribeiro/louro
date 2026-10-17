@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Subcommand;
@@ -19,18 +18,18 @@ pub enum Command {
     Request(Op),
 }
 
-pub async fn dispatch(command: Command, socket: Option<&Path>) -> ExitCode {
+pub async fn dispatch(command: Command) -> ExitCode {
     match command {
-        Command::Send(args) => args.run(socket).await,
-        Command::Connect(args) => args.run(socket).await,
-        Command::Request(op @ Op::Wait { .. }) => wait(socket, op).await,
-        Command::Request(op) => output::emit(socket::request(socket, op).await),
+        Command::Send(args) => args.run().await,
+        Command::Connect(args) => args.run().await,
+        Command::Request(op @ Op::Wait { .. }) => wait(op).await,
+        Command::Request(op) => output::emit(socket::request(op).await),
     }
 }
 
 /// Acks only after printing, so the daemon never drops events the agent didn't see.
-async fn wait(socket: Option<&Path>, op: Op) -> ExitCode {
-    let mut connection = match Connection::connect(socket).await {
+async fn wait(op: Op) -> ExitCode {
+    let mut connection = match Connection::connect(None).await {
         Ok(connection) => connection,
         Err(err) => return output::emit::<()>(Err(err)),
     };

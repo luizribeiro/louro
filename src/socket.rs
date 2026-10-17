@@ -158,8 +158,8 @@ impl Connection {
 }
 
 /// One-shot request/response for commands that don't need to keep the connection open.
-pub async fn request(socket: Option<&Path>, op: Op) -> Result<Value> {
-    Connection::connect(socket).await?.request(op).await
+pub async fn request(op: Op) -> Result<Value> {
+    Connection::connect(None).await?.request(op).await
 }
 
 fn no_session(path: &Path, err: impl Display) -> Error {
@@ -176,10 +176,17 @@ fn louro_stopped(err: impl Display) -> Error {
         .with_hint("run `louro status`; if louro isn't running, ask your operator to start it")
 }
 
-/// `--socket`, else `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`.
+/// `explicit` (only `connect` has one), else `$LOURO_SOCKET`, else
+/// `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`. The agent-facing
+/// commands take no path, so the agent can't point louro at another socket.
 pub fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
+    let chosen = explicit.map(Path::to_path_buf).or_else(|| {
+        env::var_os("LOURO_SOCKET")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    });
+    if let Some(path) = chosen {
+        return Ok(path);
     }
     if let Some(dir) = env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
         return Ok(PathBuf::from(dir).join("louro/louro.sock"));

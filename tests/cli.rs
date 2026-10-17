@@ -32,6 +32,19 @@ fn a_bad_flag_is_a_json_usage_error_with_exit_code_two() {
 }
 
 #[test]
+fn agent_commands_take_no_socket_path() {
+    for command in ["status", "wait", "quit"] {
+        louro()
+            .arg(command)
+            .arg("--socket")
+            .arg("/run/docker.sock")
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains(r#""code":"usage""#));
+    }
+}
+
+#[test]
 fn bare_invocation_and_help_print_the_primer_with_the_untrusted_sentence() {
     for args in [&[][..], &["--help"]] {
         louro()
@@ -61,9 +74,9 @@ fn config(dir: &Path, port: u16, extra: &str) -> PathBuf {
 fn connect(socket: &Path, config: &Path) -> Command {
     let mut louro = louro();
     louro
+        .arg("connect")
         .arg("--socket")
         .arg(socket)
-        .arg("connect")
         .arg("--config")
         .arg(config);
     louro
@@ -303,8 +316,7 @@ fn wait_acks_the_daemon_only_after_a_successful_response() {
     );
 
     louro()
-        .arg("--socket")
-        .arg(&socket)
+        .env("LOURO_SOCKET", &socket)
         .arg("wait")
         .assert()
         .success()
@@ -331,8 +343,7 @@ fn wait_does_not_ack_after_a_daemon_error() {
     );
 
     louro()
-        .arg("--socket")
-        .arg(&socket)
+        .env("LOURO_SOCKET", &socket)
         .arg("wait")
         .assert()
         .failure()
@@ -357,8 +368,7 @@ fn wait_reports_not_connected_when_louro_stops_mid_wait() {
     });
 
     louro()
-        .arg("--socket")
-        .arg(&socket)
+        .env("LOURO_SOCKET", &socket)
         .arg("wait")
         .assert()
         .failure()
