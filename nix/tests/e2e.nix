@@ -18,6 +18,7 @@ pkgs.testers.runNixOSTest (
       };
       humans = {
         luiz = "luiz-password";
+        mallory = "mallory-password";
       };
     };
     humanService =
