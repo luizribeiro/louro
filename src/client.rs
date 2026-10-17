@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Display;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,7 @@ impl Connection {
         let path = resolve_socket_path(socket)?;
         let stream = UnixStream::connect(&path)
             .await
-            .map_err(|err| no_session(&path, &err))?;
+            .map_err(|err| no_session(&path, err))?;
         Ok(Self {
             socket: BufReader::new(stream),
         })
@@ -30,14 +31,12 @@ impl Connection {
     pub async fn request(&mut self, op: Op) -> Result<Value> {
         protocol::write_line(&mut self.socket, &Request::new(op))
             .await
-            .map_err(|err| broken_connection(&err))?;
+            .map_err(broken_connection)?;
         protocol::read_line(&mut self.socket)
             .await
-            .map_err(|err| broken_connection(&err))?
+            .map_err(broken_connection)?
             .ok_or_else(|| {
-                broken_connection(&std::io::Error::other(
-                    "the daemon closed the connection without answering",
-                ))
+                broken_connection("the daemon closed the connection without answering")
             })?
     }
 
@@ -46,11 +45,11 @@ impl Connection {
     pub async fn ack(&mut self) -> Result<()> {
         protocol::write_line(&mut self.socket, &Ack { ack: true })
             .await
-            .map_err(|err| broken_connection(&err))
+            .map_err(broken_connection)
     }
 }
 
-fn no_session(path: &Path, err: &std::io::Error) -> Error {
+fn no_session(path: &Path, err: impl Display) -> Error {
     Error::new(
         Code::NoSession,
         format!("could not reach louro at {} ({err})", path.display()),
@@ -58,7 +57,7 @@ fn no_session(path: &Path, err: &std::io::Error) -> Error {
     .with_hint("louro isn't running; ask your operator to start it")
 }
 
-fn broken_connection(err: &std::io::Error) -> Error {
+fn broken_connection(err: impl Display) -> Error {
     Error::new(
         Code::Internal,
         format!("lost the connection to louro: {err}"),
