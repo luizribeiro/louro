@@ -1,15 +1,147 @@
-//! The IRC side of the daemon, over one papo client.
+//! The IRC side of the daemon: one papo client, with its chat forwarded as [`Incoming`].
 
 use std::future;
+use std::time::SystemTime;
 
-use papo::Client;
+use papo::{
+    Client, ConnectErrorKind, Endpoint, Event, Events, MessageEvent, MessageKind,
+    RegistrationError, Sasl, State,
+};
+use tokio::sync::mpsc;
 
-use crate::daemon::{Irc, IrcStatus, Outgoing};
+use crate::daemon::{Incoming, Irc, IrcStatus, Outgoing, Sender};
 use crate::error::{Code, Error, Result};
 use crate::protocol::Kind;
 
+const INCOMING_CAPACITY: usize = 256;
+
+/// Where and how the bot connects. `password`, when set, is used for SASL.
+pub struct ConnectOptions {
+    pub server: String,
+    pub port: u16,
+    pub tls: bool,
+    pub nick: String,
+    pub sasl_user: Option<String>,
+    pub password: Option<String>,
+    pub channels: Vec<String>,
+}
+
 pub struct PapoIrc {
     client: Client,
+}
+
+/// Connects, registers, and forwards chat from the joined channels and DMs.
+///
+/// # Errors
+///
+/// Fails with `auth_failed`, `tls` or `connect_failed` when papo can't register.
+pub async fn connect(options: ConnectOptions) -> Result<(PapoIrc, mpsc::Receiver<Incoming>)> {
+    let endpoint = if options.tls {
+        Endpoint::tls(options.server, options.port)
+    } else {
+        Endpoint::plaintext(options.server, options.port)
+    };
+    let mut builder = Client::builder(endpoint)
+        .nick(&options.nick)
+        .bot()
+        .autojoin(options.channels);
+    if let Some(password) = options.password {
+        let user = options.sasl_user.unwrap_or(options.nick);
+        builder = builder.sasl(Sasl::any(user, password));
+    }
+    let (client, events) = builder
+        .connect()
+        .await
+        .map_err(|error| Error::new(connect_code(&error), error.to_string()))?;
+    let (chat, incoming) = mpsc::channel(INCOMING_CAPACITY);
+    tokio::spawn(forward(client.clone(), events, chat));
+    Ok((PapoIrc { client }, incoming))
+}
+
+fn connect_code(error: &papo::Error) -> Code {
+    match error {
+        papo::Error::Registration(
+            RegistrationError::Sasl { .. }
+            | RegistrationError::SaslUnavailable
+            | RegistrationError::PasswordIncorrect,
+        ) => Code::AuthFailed,
+        papo::Error::Connect(failure)
+            if matches!(
+                failure.kind(),
+                ConnectErrorKind::Tls | ConnectErrorKind::Certificate | ConnectErrorKind::TlsConfig
+            ) =>
+        {
+            Code::Tls
+        }
+        _ => Code::ConnectFailed,
+    }
+}
+
+async fn forward(client: Client, mut events: Events, chat: mpsc::Sender<Incoming>) {
+    while let Some(event) = events.next().await {
+        let Event::Message(message) = event else {
+            continue;
+        };
+        let Some(incoming) = to_incoming(&message, &client.state()) else {
+            continue;
+        };
+        if chat.send(incoming).await.is_err() {
+            return;
+        }
+    }
+}
+
+fn to_incoming(message: &MessageEvent, state: &State) -> Option<Incoming> {
+    if !message.is_live() {
+        return None;
+    }
+    let kind = chat_kind(message.kind())?;
+    let nick = sender_nick(message.as_ref().raw_source()?)?;
+    let private = state.is_me(message.target());
+    if !private && state.channel(message.target()).is_none() {
+        return None;
+    }
+    Some(Incoming {
+        kind,
+        time: timestamp(message.time()),
+        msgid: message.msgid().map(str::to_owned),
+        target: message.reply_target().to_owned(),
+        private,
+        from: Sender {
+            nick: nick.to_owned(),
+            account: message.account().map(str::to_owned),
+            bot: message.is_bot(),
+        },
+        text: message.text().to_owned(),
+        mentions_me: private || mentions(message.text(), state.nick()),
+        reply_to: message.reply_to().map(str::to_owned),
+    })
+}
+
+fn chat_kind(kind: MessageKind<'_>) -> Option<Kind> {
+    match kind {
+        MessageKind::Privmsg => Some(Kind::Message),
+        MessageKind::Notice => Some(Kind::Notice),
+        MessageKind::Action => Some(Kind::Action),
+        _ => None,
+    }
+}
+
+/// papo doesn't export its parsed `Source` yet, so this mirrors its rule: a bare name with a
+/// `.` is a server, whose notices aren't chat.
+fn sender_nick(source: &str) -> Option<&str> {
+    if !source.contains(['!', '@']) && source.contains('.') {
+        return None;
+    }
+    source.split(['!', '@']).next()
+}
+
+fn mentions(text: &str, nick: &str) -> bool {
+    text.to_lowercase().contains(&nick.to_lowercase())
+}
+
+fn timestamp(time: SystemTime) -> String {
+    humantime::format_rfc3339_millis(time).to_string()
 }
 
 impl Irc for PapoIrc {
@@ -65,6 +197,8 @@ fn send_code(error: &papo::Error) -> Code {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use papo::{DisconnectCause, Disconnected, InvalidInput};
 
     use super::*;
@@ -91,5 +225,58 @@ mod tests {
             Code::Usage
         );
         assert_eq!(send_code(&papo::Error::RequestLimit), Code::Internal);
+    }
+
+    #[test]
+    fn connect_failures_map_to_louro_codes() {
+        let rejected = RegistrationError::Sasl {
+            message: "Invalid account credentials".into(),
+        };
+        for auth in [
+            rejected,
+            RegistrationError::SaslUnavailable,
+            RegistrationError::PasswordIncorrect,
+        ] {
+            assert_eq!(
+                connect_code(&papo::Error::Registration(auth)),
+                Code::AuthFailed
+            );
+        }
+        let taken = papo::Error::Registration(RegistrationError::NickUnavailable);
+        assert_eq!(connect_code(&taken), Code::ConnectFailed);
+        assert_eq!(connect_code(&connection_lost()), Code::ConnectFailed);
+    }
+
+    #[test]
+    fn keeps_chat_and_drops_other_ctcp() {
+        assert_eq!(chat_kind(MessageKind::Privmsg), Some(Kind::Message));
+        assert_eq!(chat_kind(MessageKind::Notice), Some(Kind::Notice));
+        assert_eq!(chat_kind(MessageKind::Action), Some(Kind::Action));
+        assert_eq!(chat_kind(MessageKind::Ctcp("VERSION")), None);
+    }
+
+    #[test]
+    fn takes_the_nick_from_a_source() {
+        assert_eq!(sender_nick("maria!~maria@weblounge/maria"), Some("maria"));
+        assert_eq!(sender_nick("joao@203.0.113.7"), Some("joao"));
+        assert_eq!(sender_nick("joao"), Some("joao"));
+    }
+
+    #[test]
+    fn a_server_is_not_a_sender() {
+        assert_eq!(sender_nick("irc.weblounge.org"), None);
+    }
+
+    #[test]
+    fn a_mention_ignores_case() {
+        assert!(mentions("Louro: does ergo support chathistory?", "louro"));
+        assert!(mentions("thanks LOURO", "Louro"));
+        assert!(!mentions("does ergo support chathistory?", "louro"));
+    }
+
+    #[test]
+    fn times_are_utc_rfc3339_with_millis() {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_millis(1_792_184_651_392);
+        assert_eq!(timestamp(time), "2026-10-16T21:04:11.392Z");
     }
 }
