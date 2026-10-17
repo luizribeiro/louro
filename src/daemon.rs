@@ -121,7 +121,7 @@ pub async fn start(
     config: Config,
     password: Option<Secret>,
 ) -> Result<impl Future<Output = io::Result<()>>> {
-    let Config { server, grants } = config;
+    let Config { server, grants, .. } = config;
     let socket = resolve_socket_path(server.socket.as_deref())?;
     create_runtime_dir(&socket)?;
     let lock = lock_session(&socket)?;

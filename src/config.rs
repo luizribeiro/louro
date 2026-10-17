@@ -1,4 +1,5 @@
-//! `louro.toml`: `[server]` says what the bot connects as, `[grants]` what the agent may do.
+//! `louro.toml`: `[server]` says what the bot connects as, `[grants]` what the agent may do,
+//! `[limits]` how much.
 
 use std::env;
 use std::fs;
@@ -24,6 +25,10 @@ pub struct Config {
     pub server: Server,
     #[serde(default)]
     pub grants: Grants,
+    // Read by daemon.rs once enforcement lands in the next commit.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +88,92 @@ pub struct Dm {
     pub read: Selector,
     /// Whom it may DM.
     pub send: Selector,
+}
+
+/// A sliding-window rate: `count` within `seconds`, or [`Limit::Off`] for no limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum Limit {
+    Off,
+    Window { count: u32, seconds: u64 },
+}
+
+impl Limit {
+    const FORMAT: &'static str =
+        r#"want "N/<duration>" like "3/10s" (duration: s, m or h; N at least 1), or "off""#;
+
+    fn parse(raw: &str) -> Result<Self, &'static str> {
+        if raw == "off" {
+            return Ok(Self::Off);
+        }
+        let (count, duration) = raw.split_once('/').ok_or(Self::FORMAT)?;
+        let count: u32 = count.parse().map_err(|_| Self::FORMAT)?;
+        if count == 0 {
+            return Err(Self::FORMAT);
+        }
+        let mut units = duration.chars();
+        let seconds_per_unit = match units.next_back() {
+            Some('s') => 1,
+            Some('m') => 60,
+            Some('h') => 3600,
+            _ => return Err(Self::FORMAT),
+        };
+        let magnitude: u64 = units.as_str().parse().map_err(|_| Self::FORMAT)?;
+        let seconds = magnitude
+            .checked_mul(seconds_per_unit)
+            .ok_or(Self::FORMAT)?;
+        Ok(Self::Window { count, seconds })
+    }
+}
+
+impl TryFrom<String> for Limit {
+    type Error = &'static str;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::parse(&raw)
+    }
+}
+
+impl From<Limit> for String {
+    fn from(limit: Limit) -> Self {
+        match limit {
+            Limit::Off => "off".into(),
+            Limit::Window { count, seconds } => format!("{count}/{seconds}s"),
+        }
+    }
+}
+
+/// Rate limits, a backstop against runaway loops, retries and prompt-injected spam. Checked in
+/// daemon memory, after grants and before the op reaches IRC; a refused op touches no budget.
+/// `status` shows the effective values.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Limits {
+    /// Per target (channel or nick).
+    pub send: Limit,
+    /// Across every target.
+    pub send_total: Limit,
+    /// Per target; `typing` has no limit.
+    pub react: Limit,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            send: Limit::Window {
+                count: 3,
+                seconds: 10,
+            },
+            send_total: Limit::Window {
+                count: 10,
+                seconds: 60,
+            },
+            react: Limit::Window {
+                count: 10,
+                seconds: 60,
+            },
+        }
+    }
 }
 
 /// `true` for everyone, or a list of names, each matched case-insensitively and allowed one
@@ -227,8 +318,12 @@ mod tests {
     }
 
     #[test]
-    fn a_minimal_config_grants_nothing() {
-        let Config { server, grants } = parse(MINIMAL).unwrap();
+    fn a_minimal_config_grants_nothing_and_defaults_its_limits() {
+        let Config {
+            server,
+            grants,
+            limits,
+        } = parse(MINIMAL).unwrap();
         assert_eq!(server.nick, "louro");
         assert_eq!(server.sasl_username(), None);
         assert!(server.autojoin.is_empty());
@@ -244,6 +339,27 @@ mod tests {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
         assert!(!irc.redact && !irc.quit);
+        assert_eq!(
+            limits.send,
+            Limit::Window {
+                count: 3,
+                seconds: 10
+            }
+        );
+        assert_eq!(
+            limits.send_total,
+            Limit::Window {
+                count: 10,
+                seconds: 60
+            }
+        );
+        assert_eq!(
+            limits.react,
+            Limit::Window {
+                count: 10,
+                seconds: 60
+            }
+        );
     }
 
     #[test]
@@ -309,5 +425,72 @@ mod tests {
         }
         assert!(Selector::All(true).matches("maria"));
         assert!(!Selector::All(false).matches("maria"));
+    }
+
+    #[test]
+    fn a_limit_parses_its_count_and_duration_or_refuses_a_bad_one() {
+        for (raw, parsed) in [
+            ("off", Limit::Off),
+            (
+                "3/10s",
+                Limit::Window {
+                    count: 3,
+                    seconds: 10,
+                },
+            ),
+            (
+                "5/2m",
+                Limit::Window {
+                    count: 5,
+                    seconds: 120,
+                },
+            ),
+            (
+                "1/2h",
+                Limit::Window {
+                    count: 1,
+                    seconds: 7200,
+                },
+            ),
+        ] {
+            assert_eq!(Limit::parse(raw), Ok(parsed), "{raw}");
+        }
+        for bad in [
+            "3/10x",
+            "3/10",
+            "3",
+            "3/",
+            "/10s",
+            "",
+            "0/10s",
+            "off/10s",
+            "1/99999999999999999h",
+        ] {
+            assert_eq!(Limit::parse(bad), Err(Limit::FORMAT), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_limits_table_fills_in_only_the_keys_it_leaves_out() {
+        let Config { limits, .. } = parse(&format!("{MINIMAL}[limits]\nsend = \"1/1s\"")).unwrap();
+        assert_eq!(
+            limits.send,
+            Limit::Window {
+                count: 1,
+                seconds: 1
+            }
+        );
+        assert_eq!(limits.send_total, Limits::default().send_total);
+        assert_eq!(limits.react, Limits::default().react);
+    }
+
+    #[test]
+    fn a_limits_table_refuses_an_unknown_key_or_a_bad_value_without_quoting_it() {
+        let unknown = refusal(&format!("{MINIMAL}[limits]\nreact_total = \"1/1s\""));
+        assert!(unknown.contains("unknown field `react_total`"), "{unknown}");
+
+        let bad_value = refusal(&format!("{MINIMAL}[limits]\nsend = \"0/1s\""));
+        assert!(bad_value.ends_with(Limit::FORMAT), "{bad_value}");
+        assert!(!bad_value.contains("0/1s"), "{bad_value}");
     }
 }
