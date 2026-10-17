@@ -221,6 +221,16 @@ impl Config {
                 "{target} is not one of the bot's channels"
             )));
         }
+        if target.starts_with(['@', '%', '~']) {
+            return Err(not_allowed(format!(
+                "{target} is a status message to a channel, not a nick"
+            )));
+        }
+        if target.starts_with(':') {
+            return Err(not_allowed(format!(
+                "{target} is not a valid message target"
+            )));
+        }
         if !self.allow_dm {
             return Err(not_allowed("direct messages are off"));
         }
@@ -558,6 +568,11 @@ mod tests {
             (&dm_on, "!ABCDEops"),
             (&dm_off, "maria"),
             (&dm_on, "maria,#lounge"),
+            (&dm_on, "@#lounge"),
+            (&dm_on, "+#bots"),
+            (&dm_on, "~#lounge"),
+            (&dm_on, "%#lounge"),
+            (&dm_on, ":evil"),
         ] {
             assert_eq!(
                 refused(config, target, "hi").code,
