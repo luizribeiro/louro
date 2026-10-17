@@ -71,7 +71,10 @@ impl Event {
 }
 
 fn sanitize(text: &str) -> (String, bool) {
-    let mut clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let mut clean: String = text
+        .chars()
+        .filter(|&c| c == '\n' || !c.is_control())
+        .collect();
     match clean.char_indices().nth(MAX_TEXT_CHARS) {
         Some((cut, _)) => {
             clean.truncate(cut);
@@ -556,6 +559,14 @@ mod tests {
         assert_eq!(
             clean("hi\0 there\x7f\x07 friend\x1b[31m"),
             "hi there friend[31m"
+        );
+    }
+
+    #[test]
+    fn keeps_newlines_in_multiline_text() {
+        assert_eq!(
+            clean("line one\nline two\0\nline three"),
+            "line one\nline two\nline three"
         );
     }
 
