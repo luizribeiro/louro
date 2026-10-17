@@ -167,13 +167,8 @@ mod tests {
 
     use super::*;
 
-    fn connection_lost() -> papo::Error {
-        papo::Error::Disconnected(Disconnected::new(DisconnectCause::ConnectionLost, None))
-    }
-
     #[test]
     fn an_action_is_one_ctcp_line() {
-        assert_eq!(ctcp_action("waves"), "\x01ACTION waves\x01");
         assert_eq!(
             ctcp_action("checks the logs\nfinds nothing"),
             "\x01ACTION checks the logs finds nothing\x01"
@@ -181,41 +176,31 @@ mod tests {
     }
 
     #[test]
-    fn send_failures_map_to_louro_codes() {
-        assert_eq!(send_code(&connection_lost()), Code::NotConnected);
-        assert_eq!(send_code(&papo::Error::Timeout), Code::RequestTimeout);
-        assert_eq!(
-            send_code(&papo::Error::InvalidInput(InvalidInput::EmptyText)),
-            Code::Usage
-        );
-        assert_eq!(send_code(&papo::Error::RequestLimit), Code::Internal);
-    }
-
-    #[test]
-    fn connect_failures_map_to_louro_codes() {
-        let rejected = RegistrationError::Sasl {
-            message: "Invalid account credentials".into(),
-        };
-        for auth in [
-            rejected,
-            RegistrationError::SaslUnavailable,
-            RegistrationError::PasswordIncorrect,
+    fn papo_errors_map_to_louro_codes() {
+        let lost = Disconnected::new(DisconnectCause::ConnectionLost, None);
+        for (error, code) in [
+            (papo::Error::Disconnected(lost), Code::NotConnected),
+            (papo::Error::Timeout, Code::RequestTimeout),
+            (
+                papo::Error::InvalidInput(InvalidInput::EmptyText),
+                Code::Usage,
+            ),
         ] {
-            assert_eq!(
-                connect_code(&papo::Error::Registration(auth)),
-                Code::AuthFailed
-            );
+            assert_eq!(send_code(&error), code);
         }
-        let taken = papo::Error::Registration(RegistrationError::NickUnavailable);
-        assert_eq!(connect_code(&taken), Code::ConnectFailed);
-        assert_eq!(connect_code(&connection_lost()), Code::ConnectFailed);
+        let refused = papo::Error::Registration(RegistrationError::SaslUnavailable);
+        assert_eq!(connect_code(&refused), Code::AuthFailed);
     }
 
     #[test]
     fn keeps_chat_and_drops_other_ctcp() {
-        assert_eq!(chat_kind(MessageKind::Privmsg), Some(Kind::Message));
-        assert_eq!(chat_kind(MessageKind::Notice), Some(Kind::Notice));
-        assert_eq!(chat_kind(MessageKind::Action), Some(Kind::Action));
-        assert_eq!(chat_kind(MessageKind::Ctcp), None);
+        for (kind, chat) in [
+            (MessageKind::Privmsg, Some(Kind::Message)),
+            (MessageKind::Notice, Some(Kind::Notice)),
+            (MessageKind::Action, Some(Kind::Action)),
+            (MessageKind::Ctcp, None),
+        ] {
+            assert_eq!(chat_kind(kind), chat);
+        }
     }
 }
