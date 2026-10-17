@@ -1,4 +1,7 @@
-//! The IRC side of the daemon: one papo client, with its chat forwarded as [`Incoming`].
+//! The IRC side of the daemon: one papo client, with its chat and connection changes forwarded
+//! as [`Update`]s.
+
+use std::time::Duration;
 
 use papo::{
     Client, ConnectErrorKind, Endpoint, Event, Events, Message, MessageKind, RegistrationError,
@@ -12,8 +15,18 @@ pub use papo::Secret;
 use crate::config::Server;
 use crate::error::{Code, Error, Result};
 
-const INCOMING_CAPACITY: usize = 256;
+const UPDATES_CAPACITY: usize = 256;
 const CTCP_VERSION: &str = concat!("louro ", env!("CARGO_PKG_VERSION"), " (papo)");
+
+pub enum Update {
+    Chat(Incoming),
+    /// The connection dropped; `retry_in` (whole seconds) is `None` once papo has stopped
+    /// reconnecting.
+    Disconnected {
+        cause: String,
+        retry_in: Option<u64>,
+    },
+}
 
 #[derive(Clone, Serialize)]
 pub struct Incoming {
@@ -74,7 +87,7 @@ pub struct PapoIrc {
 pub async fn connect(
     server: &Server,
     password: Option<Secret>,
-) -> Result<(PapoIrc, mpsc::Receiver<Incoming>)> {
+) -> Result<(PapoIrc, mpsc::Receiver<Update>)> {
     let mut builder = Client::builder(endpoint(&server.address)?)
         .nick(&server.nick)
         .alt_nicks(server.alt_nicks.clone())
@@ -94,9 +107,9 @@ pub async fn connect(
         .connect()
         .await
         .map_err(|error| Error::new(connect_code(&error), error.to_string()))?;
-    let (chat, incoming) = mpsc::channel(INCOMING_CAPACITY);
-    tokio::spawn(forward(client.clone(), events, chat));
-    Ok((PapoIrc { client }, incoming))
+    let (sender, updates) = mpsc::channel(UPDATES_CAPACITY);
+    tokio::spawn(forward(client.clone(), events, sender));
+    Ok((PapoIrc { client }, updates))
 }
 
 /// papo's builder takes a bare host or an `Endpoint`, but has no public parser for `irc://` and
@@ -164,18 +177,30 @@ fn connect_code(error: &papo::Error) -> Code {
     }
 }
 
-async fn forward(client: Client, mut events: Events, chat: mpsc::Sender<Incoming>) {
+async fn forward(client: Client, mut events: Events, updates: mpsc::Sender<Update>) {
     while let Some(event) = events.next().await {
-        let Event::Message(message) = event else {
+        let Some(update) = to_update(event, &client.state()) else {
             continue;
         };
-        let Some(incoming) = to_incoming(&message, &client.state()) else {
-            continue;
-        };
-        if chat.send(incoming).await.is_err() {
+        if updates.send(update).await.is_err() {
             return;
         }
     }
+}
+
+fn to_update(event: Event, state: &State) -> Option<Update> {
+    match event {
+        Event::Message(message) => to_incoming(&message, state).map(Update::Chat),
+        Event::Disconnected(disconnected) => Some(Update::Disconnected {
+            cause: disconnected.cause.to_string(),
+            retry_in: disconnected.retry_in.map(whole_seconds),
+        }),
+        _ => None,
+    }
+}
+
+fn whole_seconds(delay: Duration) -> u64 {
+    delay.as_secs() + u64::from(delay.subsec_nanos() > 0)
 }
 
 fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
@@ -267,6 +292,19 @@ mod tests {
     use papo::{DisconnectCause, Disconnected, InvalidInput};
 
     use super::*;
+
+    #[test]
+    fn a_retry_delay_rounds_up_to_whole_seconds() {
+        for (delay, seconds) in [
+            (Duration::ZERO, 0),
+            (Duration::from_millis(1), 1),
+            (Duration::from_secs(1), 1),
+            (Duration::from_millis(1_500), 2),
+            (Duration::from_secs(300), 300),
+        ] {
+            assert_eq!(whole_seconds(delay), seconds, "{delay:?}");
+        }
+    }
 
     #[test]
     fn an_action_is_one_line() {

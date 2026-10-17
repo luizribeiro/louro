@@ -4,6 +4,7 @@ use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::SystemTime;
 use std::{fs, io};
 
 use serde::Serialize;
@@ -16,7 +17,7 @@ use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::Inbox;
-use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret, Sender};
+use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret, Sender, Update};
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 use crate::text;
@@ -30,6 +31,13 @@ struct DmSender {
     changed_account: bool,
 }
 
+/// The most recent thing that went wrong with the connection, for `status`.
+#[derive(Serialize)]
+struct Problem {
+    time: String,
+    message: String,
+}
+
 struct Daemon<I> {
     grants: Grants,
     /// Kept so `send` can refuse to post it.
@@ -38,6 +46,7 @@ struct Daemon<I> {
     inbox: Inbox,
     /// Lowercased nicks whose DM reached the agent, for `irc.dm.send`'s `$first` and `account:`.
     dm_senders: Mutex<HashMap<String, DmSender>>,
+    last_error: Mutex<Option<Problem>>,
     quit: Notify,
 }
 
@@ -47,13 +56,13 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(path)
 }
 
-/// Serves requests on `listener` and buffers `incoming` chat until a `quit`
+/// Serves requests on `listener` and buffers chat from `updates` until a `quit`
 /// request, then removes the socket at `socket_path`.
 pub async fn run(
     grants: Grants,
     password: Option<Secret>,
     irc: impl Irc,
-    mut incoming: mpsc::Receiver<Incoming>,
+    mut updates: mpsc::Receiver<Update>,
     listener: UnixListener,
     socket_path: &Path,
 ) -> io::Result<()> {
@@ -63,6 +72,7 @@ pub async fn run(
         irc,
         inbox: Inbox::default(),
         dm_senders: Mutex::default(),
+        last_error: Mutex::default(),
         quit: Notify::new(),
     });
     loop {
@@ -73,7 +83,7 @@ pub async fn run(
                     let _ = daemon.serve(&mut BufReader::new(stream)).await;
                 });
             }
-            Some(incoming) = incoming.recv() => daemon.ingest(incoming),
+            Some(update) = updates.recv() => daemon.update(update),
             () = daemon.quit.notified() => break,
         }
     }
@@ -89,7 +99,7 @@ pub async fn start(
     let Config { server, grants } = config;
     let socket = resolve_socket_path(server.socket.as_deref())?;
     create_runtime_dir(&socket)?;
-    let (irc, incoming) = irc::connect(&server, password.clone()).await?;
+    let (irc, updates) = irc::connect(&server, password.clone()).await?;
     let listener = bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     output::emit(Ok(json!({
         "server": server.address,
@@ -97,7 +107,7 @@ pub async fn start(
         "channels": server.autojoin,
         "socket": socket,
     })));
-    Ok(async move { run(grants, password, irc, incoming, listener, &socket).await })
+    Ok(async move { run(grants, password, irc, updates, listener, &socket).await })
 }
 
 fn create_runtime_dir(socket: &Path) -> Result<()> {
@@ -126,6 +136,33 @@ fn remove_socket(path: &Path) -> io::Result<()> {
 }
 
 impl<I: Irc> Daemon<I> {
+    fn update(&self, update: Update) {
+        match update {
+            Update::Chat(incoming) => self.ingest(incoming),
+            Update::Disconnected { cause, retry_in } => {
+                self.record_problem(disconnect_message(&cause, retry_in));
+            }
+        }
+    }
+
+    /// Keeps `message` for `status`, unless it contains the password.
+    fn record_problem(&self, message: String) {
+        let message = match text::check_secret(self.password.as_ref(), &message) {
+            Ok(()) => message,
+            Err(_) => "a problem whose description contained the bot's password".into(),
+        };
+        *self.last_error() = Some(Problem {
+            time: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
+            message,
+        });
+    }
+
+    fn last_error(&self) -> MutexGuard<'_, Option<Problem>> {
+        self.last_error
+            .lock()
+            .expect("no code panics while holding the last error lock")
+    }
+
     fn ingest(&self, incoming: Incoming) {
         if !self.grants.may_read(&incoming) {
             return;
@@ -222,6 +259,7 @@ impl<I: Irc> Daemon<I> {
             "nick": nick,
             "channels": channels,
             "grants": self.grants,
+            "last_error": *self.last_error(),
         })
     }
 
@@ -232,6 +270,13 @@ impl<I: Irc> Daemon<I> {
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let msgid = self.irc.send(message).await?;
         Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
+    }
+}
+
+fn disconnect_message(cause: &str, retry_in: Option<u64>) -> String {
+    match retry_in {
+        Some(seconds) => format!("{cause}; reconnecting in {seconds}s"),
+        None => format!("{cause}; papo stopped reconnecting"),
     }
 }
 
@@ -358,7 +403,7 @@ mod tests {
     struct Running {
         _dir: TempDir,
         socket: PathBuf,
-        chat: mpsc::Sender<Incoming>,
+        updates: mpsc::Sender<Update>,
         irc: Arc<FakeIrc>,
         daemon: JoinHandle<io::Result<()>>,
     }
@@ -367,17 +412,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("louro.sock");
         let irc = Arc::new(FakeIrc::default());
-        let (chat, incoming) = mpsc::channel(16);
+        let (updates, receiver) = mpsc::channel(16);
         let daemon = tokio::spawn({
             let irc = Arc::clone(&irc);
             let socket = socket.clone();
             let password = Some(PASSWORD.into());
-            async move { run(grants, password, irc, incoming, bind(&socket)?, &socket).await }
+            async move { run(grants, password, irc, receiver, bind(&socket)?, &socket).await }
         });
         Running {
             _dir: dir,
             socket,
-            chat,
+            updates,
             irc,
             daemon,
         }
@@ -410,7 +455,15 @@ mod tests {
         }
 
         async fn say(&self, incoming: Incoming) {
-            self.chat.send(incoming).await.unwrap();
+            self.update(Update::Chat(incoming)).await;
+        }
+
+        async fn update(&self, update: Update) {
+            self.updates.send(update).await.unwrap();
+        }
+
+        async fn status(&self) -> Value {
+            self.call(json!({"v": 1, "op": "status", "args": {}})).await
         }
     }
 
@@ -434,9 +487,7 @@ mod tests {
     #[tokio::test]
     async fn status_reports_the_connection_and_the_grants() {
         let daemon = launch(grants());
-        let reply = daemon
-            .call(json!({"v": 1, "op": "status", "args": {}}))
-            .await;
+        let reply = daemon.status().await;
         assert_eq!(
             reply,
             json!({"Ok": {
@@ -448,9 +499,59 @@ mod tests {
                     "send": ["#bots"],
                     "dm": {"read": ["luiz", "maria"], "send": ["$first"]},
                     "quit": false
-                }}
+                }},
+                "last_error": null
             }})
         );
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_last_disconnect() {
+        let daemon = launch(grants());
+        for (cause, retry_in) in [
+            ("the connection was lost", Some(1)),
+            ("the server stopped responding", Some(4)),
+            ("the connection was lost", None),
+        ] {
+            daemon
+                .update(Update::Disconnected {
+                    cause: cause.into(),
+                    retry_in,
+                })
+                .await;
+        }
+        let last_error = &daemon.status().await["Ok"]["last_error"];
+        assert_eq!(
+            last_error["message"],
+            "the connection was lost; papo stopped reconnecting"
+        );
+        assert!(last_error["time"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn a_disconnect_says_whether_papo_is_reconnecting() {
+        assert_eq!(
+            disconnect_message("the server stopped responding", Some(4)),
+            "the server stopped responding; reconnecting in 4s"
+        );
+        assert_eq!(
+            disconnect_message("the connection was lost", None),
+            "the connection was lost; papo stopped reconnecting"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_error_never_shows_the_password() {
+        let daemon = launch(grants());
+        daemon
+            .update(Update::Disconnected {
+                cause: format!("the server disconnected: bad password {PASSWORD}"),
+                retry_in: Some(1),
+            })
+            .await;
+        let status = daemon.status().await;
+        assert!(!status.to_string().contains(PASSWORD));
+        assert!(status["Ok"]["last_error"]["message"].is_string());
     }
 
     #[tokio::test]
@@ -628,10 +729,7 @@ mod tests {
         let daemon = launch(grants());
         let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
         assert_eq!(reply["Err"]["code"], "not_allowed");
-        let status = daemon
-            .call(json!({"v": 1, "op": "status", "args": {}}))
-            .await;
-        assert_eq!(status["Ok"]["connected"], true);
+        assert_eq!(daemon.status().await["Ok"]["connected"], true);
     }
 
     #[tokio::test]

@@ -231,7 +231,8 @@ with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows 
     refused("not_connected", "send", "#bots", "anyone there?")
     machine.succeed("systemctl start ergochat")
     machine.wait_for_open_port(settings["ircPort"])
-    status_until(joined)
+    status = status_until(joined)
+    assert "; reconnecting in " in status["last_error"]["message"], status
     start_humans()
     send_raw("luiz", "PRIVMSG #bots :welcome back")
     events_until(from_nick("luiz", "welcome back"))
