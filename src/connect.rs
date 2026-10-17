@@ -5,45 +5,26 @@ use std::fs::DirBuilder;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{self, ExitCode, Stdio};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio::net::UnixListener;
-use tokio::sync::mpsc;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::cli::ConnectArgs;
 use crate::client::{self, Connection};
-use crate::daemon::{self, Config, Incoming};
+use crate::daemon::{self, Config};
 use crate::error::{Code, Error, Result};
 use crate::output;
-use crate::papo::{self, PapoIrc};
+use crate::papo;
 use crate::password::{self, Source};
 use crate::protocol::Op;
-
-/// The one line `connect` prints once the bot is registered and the socket is up.
-#[derive(Serialize)]
-struct Connected {
-    server: String,
-    nick: String,
-    channels: Vec<String>,
-    socket: PathBuf,
-}
 
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ReadyLine {
     Failed { error: Error },
     Connected(Value),
-}
-
-struct Ready {
-    connected: Connected,
-    config: Config,
-    irc: PapoIrc,
-    incoming: mpsc::Receiver<Incoming>,
-    listener: UnixListener,
 }
 
 pub async fn run(args: ConnectArgs, socket: Option<&Path>) -> ExitCode {
@@ -103,21 +84,12 @@ fn cannot_start(err: &io::Error) -> Error {
     Error::new(Code::Internal, format!("can't start the daemon: {err}"))
 }
 
-/// Connects, prints the result line, then serves the socket until `quit`.
 async fn foreground(args: ConnectArgs, socket: Option<&Path>) -> ExitCode {
-    let ready = match start(args, socket).await {
-        Ok(ready) => ready,
+    let daemon = match start(args, socket).await {
+        Ok(daemon) => daemon,
         Err(err) => return output::emit::<()>(Err(err)),
     };
-    output::emit(Ok(&ready.connected));
-    let Ready {
-        connected,
-        config,
-        irc,
-        incoming,
-        listener,
-    } = ready;
-    match daemon::run(config, irc, incoming, listener, &connected.socket).await {
+    match daemon.await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("louro: {err}");
@@ -126,28 +98,28 @@ async fn foreground(args: ConnectArgs, socket: Option<&Path>) -> ExitCode {
     }
 }
 
-async fn start(args: ConnectArgs, socket: Option<&Path>) -> Result<Ready> {
+/// Connects and listens, prints the line `background` waits for, and returns the daemon to run.
+async fn start(
+    args: ConnectArgs,
+    socket: Option<&Path>,
+) -> Result<impl Future<Output = io::Result<()>>> {
     let socket = client::resolve_socket_path(socket)?;
     let password = read_password(&args)?;
     create_runtime_dir(&socket)?;
     let (irc, incoming) = papo::connect(&args, password.clone()).await?;
     let listener = daemon::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
-    Ok(Ready {
-        connected: Connected {
-            server: format!("{}:{}", args.server, args.port()),
-            nick: args.nick,
-            channels: args.joins.clone(),
-            socket,
-        },
-        config: Config {
-            channels: args.joins,
-            allow_dm: args.allow_dm,
-            password,
-        },
-        irc,
-        incoming,
-        listener,
-    })
+    output::emit(Ok(json!({
+        "server": format!("{}:{}", args.server, args.port()),
+        "nick": args.nick,
+        "channels": args.joins,
+        "socket": socket,
+    })));
+    let config = Config {
+        channels: args.joins,
+        allow_dm: args.allow_dm,
+        password,
+    };
+    Ok(async move { daemon::run(config, irc, incoming, listener, &socket).await })
 }
 
 fn read_password(args: &ConnectArgs) -> Result<Option<String>> {
