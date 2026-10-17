@@ -1,6 +1,5 @@
 //! The IRC side of the daemon: one papo client, with its chat forwarded as [`Incoming`].
 
-use std::future;
 use std::time::SystemTime;
 
 use papo::{
@@ -136,16 +135,16 @@ fn timestamp(time: SystemTime) -> String {
 }
 
 impl Irc for PapoIrc {
-    fn status(&self) -> impl Future<Output = IrcStatus> + Send {
+    fn status(&self) -> IrcStatus {
         let state = self.client.state();
-        future::ready(IrcStatus {
+        IrcStatus {
             connected: state.is_connected(),
             nick: state.nick().to_string(),
             channels: state
                 .channels()
                 .map(|channel| channel.name().to_string())
                 .collect(),
-        })
+        }
     }
 
     async fn send(&self, message: Outgoing) -> Result<Option<String>> {

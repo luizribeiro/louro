@@ -266,7 +266,7 @@ fn clean_lines(text: &str) -> Result<String> {
 
 /// The IRC connection as the daemon sees it; papo.rs implements it over a papo client.
 pub trait Irc: Send + Sync + 'static {
-    fn status(&self) -> impl Future<Output = IrcStatus> + Send;
+    fn status(&self) -> IrcStatus;
     /// Sends one message (several lines become a multiline batch) and returns its msgid, if any.
     fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
@@ -377,7 +377,7 @@ impl<I: Irc> Daemon<I> {
         };
         match op {
             Err(error) => reply(conn, Err::<(), _>(error)).await,
-            Ok(Op::Status {}) => reply(conn, Ok(self.status().await)).await,
+            Ok(Op::Status {}) => reply(conn, Ok(self.status())).await,
             Ok(Op::Send(args)) => reply(conn, self.send(args).await).await,
             Ok(Op::Wait(args)) => {
                 let batch = self.inbox.wait(&args).await;
@@ -396,9 +396,9 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    async fn status(&self) -> Status<'_> {
+    fn status(&self) -> Status<'_> {
         Status {
-            irc: self.irc.status().await,
+            irc: self.irc.status(),
             policy: Policy {
                 channels: &self.config.channels,
                 dm: self.config.allow_dm,
@@ -846,12 +846,12 @@ mod tests {
     }
 
     impl Irc for Arc<FakeIrc> {
-        fn status(&self) -> impl Future<Output = IrcStatus> + Send {
-            future::ready(IrcStatus {
+        fn status(&self) -> IrcStatus {
+            IrcStatus {
                 connected: true,
                 nick: "louro".into(),
                 channels: vec!["#bots".into(), "#ergo".into()],
-            })
+            }
         }
 
         fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send {
