@@ -68,8 +68,8 @@ pub enum Command {
     Send(SendArgs),
     /// Disconnect and stop the daemon
     Quit,
-    /// Start the daemon (operator only; not wired up yet)
-    Connect,
+    /// Start the daemon (operator only)
+    Connect(ConnectArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,48 @@ pub struct SendArgs {
     /// Send as a CTCP ACTION ("/me ...")
     #[arg(long)]
     pub action: bool,
+}
+
+#[expect(clippy::struct_excessive_bools, reason = "each is an independent flag")]
+#[derive(Debug, Args)]
+pub struct ConnectArgs {
+    /// IRC server host name
+    pub server: String,
+    /// The bot's nick
+    #[arg(long)]
+    pub nick: String,
+    /// Port [default: 6697, or 6667 with --plaintext]
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// Connect without TLS
+    #[arg(long)]
+    pub plaintext: bool,
+    /// SASL account; prompts for its password on the terminal
+    #[arg(long, value_name = "ACCOUNT")]
+    pub sasl_user: Option<String>,
+    /// Read the SASL password from a file only you can read (chmod 600)
+    #[arg(long, value_name = "PATH")]
+    pub password_file: Option<PathBuf>,
+    /// Channel to join and allow sends to; repeatable
+    #[arg(long = "join", value_name = "CHANNEL")]
+    pub joins: Vec<String>,
+    /// Receive and send direct messages
+    #[arg(long)]
+    pub allow_dm: bool,
+    /// Run in this terminal instead of in the background
+    #[arg(long)]
+    pub foreground: bool,
+    /// Read the password from stdin; how `connect` hands it to its background daemon
+    #[arg(long, hide = true)]
+    pub password_stdin: bool,
+}
+
+impl ConnectArgs {
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+            .unwrap_or(if self.plaintext { 6667 } else { 6697 })
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +241,31 @@ mod tests {
         };
         assert!(args.action);
         assert!(!args.notice);
+    }
+
+    fn connect_args(args: &[&str]) -> ConnectArgs {
+        let required = ["louro", "connect", "127.0.0.1", "--nick", "louro"];
+        let cli = Cli::try_parse_from(required.iter().chain(args)).unwrap();
+        let Some(Command::Connect(args)) = cli.command else {
+            panic!("expected connect");
+        };
+        args
+    }
+
+    #[test]
+    fn connect_port_defaults_to_tls_or_plaintext() {
+        assert_eq!(connect_args(&[]).port(), 6697);
+        assert_eq!(connect_args(&["--plaintext"]).port(), 6667);
+        assert_eq!(
+            connect_args(&["--plaintext", "--port", "6668"]).port(),
+            6668
+        );
+    }
+
+    #[test]
+    fn connect_joins_are_repeatable() {
+        let args = connect_args(&["--join", "#bots", "--join", "#louro"]);
+        assert_eq!(args.joins, ["#bots", "#louro"]);
     }
 
     #[test]

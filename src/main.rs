@@ -27,7 +27,7 @@ async fn main() -> ExitCode {
     };
 
     match command {
-        Command::Connect => output::emit::<()>(Err(Error::new(
+        Command::Connect(_) => output::emit::<()>(Err(Error::new(
             Code::Internal,
             "connect is not wired to papo yet",
         ))),

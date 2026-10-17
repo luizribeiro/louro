@@ -68,7 +68,7 @@ fn version_exits_cleanly_without_the_json_usage_error() {
 #[test]
 fn connect_is_the_permanent_stub() {
     louro()
-        .arg("connect")
+        .args(["connect", "irc.weblounge.org", "--nick", "louro"])
         .assert()
         .failure()
         .code(1)
