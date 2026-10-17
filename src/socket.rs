@@ -144,7 +144,10 @@ impl Connection {
             .map_err(louro_stopped)?;
         read_line(&mut self.socket)
             .await
-            .map_err(louro_stopped)?
+            .map_err(|err| match err.kind() {
+                io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => not_louro(),
+                _ => louro_stopped(err),
+            })?
             .ok_or_else(|| louro_stopped("it closed the connection without answering"))?
     }
 
@@ -168,6 +171,15 @@ fn no_session(path: &Path, err: impl Display) -> Error {
         format!("could not reach louro at {} ({err})", path.display()),
     )
     .with_hint("louro isn't running; ask your operator to start it")
+}
+
+/// Whatever listens on the socket answered, but not as louro; its reply is never repeated.
+fn not_louro() -> Error {
+    Error::new(
+        Code::NoSession,
+        "the socket's reply is not a louro response",
+    )
+    .with_hint("ask your operator to check LOURO_SOCKET")
 }
 
 /// The daemon was reachable but went away mid-request, e.g. stopped while a `wait` blocked.

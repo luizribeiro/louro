@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -275,7 +276,7 @@ fn the_socket_defaults_to_the_runtime_dir_else_a_per_user_tmp_dir() {
 /// ack) arrived before the connection closed.
 fn fake_daemon_expecting_one_request(
     socket: &Path,
-    response: serde_json::Value,
+    response: impl Display + Send + 'static,
 ) -> thread::JoinHandle<bool> {
     let listener = UnixListener::bind(socket).unwrap();
     thread::spawn(move || {
@@ -354,6 +355,29 @@ fn wait_does_not_ack_after_a_daemon_error() {
         !daemon.join().unwrap(),
         "expected no ack after a daemon error"
     );
+}
+
+#[test]
+fn a_reply_that_is_not_from_louro_is_never_echoed() {
+    for reply in [
+        "SSH-2.0-OpenSSH_9.6 TOPSECRET",
+        r#""TOPSECRET-token""#,
+        r#"{"Err": "TOPSECRET"}"#,
+        r#"{"Err": "TOPSECRET"#,
+    ] {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("other.sock");
+        let other = fake_daemon_expecting_one_request(&socket, reply);
+        louro()
+            .env("LOURO_SOCKET", &socket)
+            .arg("status")
+            .assert()
+            .code(3)
+            .stdout(predicate::str::contains("not a louro response"))
+            .stdout(predicate::str::contains("TOPSECRET").not())
+            .stderr(predicate::str::contains("TOPSECRET").not());
+        other.join().unwrap();
+    }
 }
 
 #[test]
