@@ -1,7 +1,7 @@
 //! The bot's SASL password, read once at `connect` and never from argv or env.
 
 use std::fs::File;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -21,35 +21,25 @@ pub enum Source {
 /// `usage` when the file is unreadable or readable by others, or when there
 /// is no terminal to prompt on.
 pub fn read(source: &Source) -> Result<String> {
-    let password = match source {
+    let mut password = match source {
         Source::File(path) => from_file(path)?,
-        Source::Stdin => from_reader(io::stdin()).map_err(|err| {
-            Error::new(Code::Usage, format!("could not read the password: {err}"))
-        })?,
+        Source::Stdin => io::read_to_string(io::stdin()).map_err(unreadable)?,
         Source::Tty(user) => from_tty(user)?,
     };
-    Ok(without_trailing_newline(password))
+    password.truncate(password.trim_end_matches(['\r', '\n']).len());
+    Ok(password)
 }
 
 fn from_file(path: &Path) -> Result<String> {
-    let unreadable =
-        |err: io::Error| Error::new(Code::Usage, format!("can't read {}: {err}", path.display()));
     let file = File::open(path).map_err(unreadable)?;
-    let mode = file.metadata().map_err(unreadable)?.permissions().mode();
-    if mode & 0o077 != 0 {
+    if file.metadata().map_err(unreadable)?.permissions().mode() & 0o077 != 0 {
         return Err(Error::new(
             Code::Usage,
             format!("{} is readable by other users", path.display()),
         )
         .with_hint("chmod 600 it"));
     }
-    from_reader(file).map_err(unreadable)
-}
-
-fn from_reader(mut reader: impl Read) -> io::Result<String> {
-    let mut password = String::new();
-    reader.read_to_string(&mut password)?;
-    Ok(password)
+    io::read_to_string(file).map_err(unreadable)
 }
 
 fn from_tty(user: &str) -> Result<String> {
@@ -60,13 +50,11 @@ fn from_tty(user: &str) -> Result<String> {
         )
         .with_hint("run `louro connect` in your own terminal, or use --password-file"));
     }
-    rpassword::prompt_password(format!("SASL password for {user}: "))
-        .map_err(|err| Error::new(Code::Usage, format!("could not read the password: {err}")))
+    rpassword::prompt_password(format!("SASL password for {user}: ")).map_err(unreadable)
 }
 
-fn without_trailing_newline(mut password: String) -> String {
-    password.truncate(password.trim_end_matches(['\r', '\n']).len());
-    password
+fn unreadable(err: impl std::fmt::Display) -> Error {
+    Error::new(Code::Usage, format!("could not read the password: {err}"))
 }
 
 #[cfg(test)]
@@ -107,7 +95,7 @@ mod tests {
 
     #[test]
     fn trims_only_the_trailing_line_ending() {
-        assert_eq!(without_trailing_newline(" s3cret \r\n".into()), " s3cret ");
-        assert_eq!(without_trailing_newline("s3cret".into()), "s3cret");
+        let file = password_file(" s3cret \r\n", 0o600);
+        assert_eq!(read(&Source::File(file.path().into())).unwrap(), " s3cret ");
     }
 }
