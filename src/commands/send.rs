@@ -21,6 +21,9 @@ pub struct Args {
     /// Send as a CTCP ACTION ("/me ...")
     #[arg(long)]
     pub action: bool,
+    /// Thread the message as a reply to this msgid
+    #[arg(long, value_name = "MSGID")]
+    pub reply_to: Option<String>,
 }
 
 impl Args {
@@ -41,6 +44,7 @@ impl Args {
                 target: self.target,
                 text,
                 kind,
+                reply_to: self.reply_to,
             },
         )
         .await

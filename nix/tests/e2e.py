@@ -166,15 +166,35 @@ def send_raw(nick, line):
     machine.succeed(f"echo {shlex.quote(line)} > {human_file(nick, 'in')}")
 
 
-def heard(nick, target, text):
-    """Waits until nick receives text from the bot, sent to target."""
-    prefix, suffix = f":{BOT['user']}!", f" PRIVMSG {target} :{text}"
+def split_tags(line):
+    """An IRC line's message tags as a dict, and the rest of the line."""
+    if not line.startswith("@"):
+        return {}, line
+    tags, rest = line[1:].split(" ", 1)
+    return dict((tag.split("=", 1) + [""])[:2] for tag in tags.split(";")), rest
+
+
+def received(nick, matches):
+    """Waits until nick receives a line whose tags and rest satisfy matches; returns its tags."""
+    found = []
 
     def check(_last_try):
         log = machine.succeed(f"cat {human_file(nick, 'log')}").splitlines()
-        return any(line.startswith(prefix) and line.endswith(suffix) for line in log)
+        found[:] = [tags for tags, rest in map(split_tags, log) if matches(tags, rest)]
+        return bool(found)
 
     retry(check, timeout=TIMEOUT)
+    return found[0]
+
+
+def heard(nick, target, text):
+    """Waits until nick receives text from the bot, sent to target; returns its tags."""
+    prefix, suffix = f":{BOT['user']}!", f" PRIVMSG {target} :{text}"
+    return received(nick, lambda _tags, line: line.startswith(prefix) and line.endswith(suffix))
+
+
+def reply_tag(tags):
+    return tags.get("+reply", tags.get("+draft/reply"))
 
 
 def louro_blocked(blocked):
@@ -237,6 +257,16 @@ with subtest("chat in #bots reaches wait, marked untrusted, and send reaches #bo
     sent = louro("send", "#bots", "it checks that references don't dangle")
     assert sent["target"] == "#bots" and sent["lines"] == 1, sent
     heard("luiz", "#bots", "it checks that references don't dangle")
+    stop()
+
+with subtest("send --reply-to threads the answer under luiz's message"):
+    start(grants())
+    send_raw("luiz", "PRIVMSG #bots :louro: does ergo keep history?")
+    [question] = events_until(from_nick("luiz", "louro: does ergo keep history?"))
+    sent = louro("send", "#bots", "--reply-to", question["msgid"], "yes, in memory")
+    assert sent["threaded"], sent
+    tags = heard("luiz", "#bots", "yes, in memory")
+    assert reply_tag(tags) == question["msgid"], tags
     stop()
 
 with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):

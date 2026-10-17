@@ -299,9 +299,12 @@ impl<I: Irc> Daemon<I> {
         match op {
             Err(error) => reply(conn, Err::<(), _>(error)).await,
             Ok(Op::Status {}) => reply(conn, Ok(self.status())).await,
-            Ok(Op::Send { target, text, kind }) => {
-                reply(conn, self.send(target, text, kind).await).await
-            }
+            Ok(Op::Send {
+                target,
+                text,
+                kind,
+                reply_to,
+            }) => reply(conn, self.send(target, text, kind, reply_to).await).await,
             Ok(Op::Wait { timeout, max }) => {
                 let batch = self.inbox.wait(timeout, max).await;
                 let cursor = batch.cursor;
@@ -358,13 +361,24 @@ impl<I: Irc> Daemon<I> {
         Ok(json!({"channel": channel, "members": members}))
     }
 
-    async fn send(&self, target: String, text: String, kind: Kind) -> Result<Value> {
+    async fn send(
+        &self,
+        target: String,
+        text: String,
+        kind: Kind,
+        reply_to: Option<String>,
+    ) -> Result<Value> {
         text::check_secret(self.password.as_ref(), &text)?;
         let dm = self.dm_history(&target);
-        let message = self.grants.check_send(target, &text, kind, &dm)?;
+        let message = self.grants.check_send(target, &text, kind, reply_to, &dm)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
-        let msgid = self.irc.send(message).await?;
-        Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
+        let is_reply = message.reply_to.is_some();
+        let sent = self.irc.send(message).await?;
+        let mut result = json!({"target": target, "msgid": sent.msgid, "lines": lines});
+        if is_reply {
+            result["threaded"] = sent.threaded.into();
+        }
+        Ok(result)
     }
 }
 
@@ -408,7 +422,7 @@ mod tests {
 
     use super::*;
     use crate::inbox::NOTICE;
-    use crate::irc::{Origin, Outgoing, Sender};
+    use crate::irc::{Origin, Outgoing, Sender, Sent};
 
     fn from_maria(text: &str) -> Incoming {
         Incoming {
@@ -512,9 +526,13 @@ mod tests {
             })
         }
 
-        fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send {
+        fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send {
+            let threaded = message.reply_to.is_some();
             self.sent.lock().unwrap().push(message);
-            future::ready(Ok(Some("c2m8w1u0pq7rs".into())))
+            future::ready(Ok(Sent {
+                msgid: Some("c2m8w1u0pq7rs".into()),
+                threaded,
+            }))
         }
 
         async fn quit(&self) {
@@ -604,6 +622,12 @@ mod tests {
 
     fn send_request(target: &str, text: &str) -> Value {
         json!({"v": 1, "op": "send", "args": {"target": target, "text": text, "kind": "message"}})
+    }
+
+    fn reply_request(target: &str, msgid: &str, text: &str) -> Value {
+        let mut request = send_request(target, text);
+        request["args"]["reply_to"] = msgid.into();
+        request
     }
 
     fn texts(reply: &Value) -> Vec<&str> {
@@ -824,8 +848,34 @@ mod tests {
                 target: "#bots".into(),
                 kind: Kind::Message,
                 text: "yes: set history.persistent.direct-messages \nin ergo.yaml".into(),
+                reply_to: None,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn a_reply_carries_its_msgid_and_says_whether_it_threaded() {
+        let daemon = launch(grants());
+        let reply = daemon
+            .call(reply_request(
+                "#bots",
+                "4y8kq7j2c9mnz",
+                "yes, see ergo.yaml",
+            ))
+            .await;
+        assert_eq!(reply["Ok"]["threaded"], true);
+        let sent = daemon.irc.sent.lock().unwrap().pop().unwrap();
+        assert_eq!(sent.reply_to.as_deref(), Some("4y8kq7j2c9mnz"));
+    }
+
+    #[tokio::test]
+    async fn a_reply_to_a_malformed_msgid_never_reaches_irc() {
+        let daemon = launch(grants());
+        let reply = daemon
+            .call(reply_request("#bots", "4y8k\r\nQUIT", "hi"))
+            .await;
+        assert_eq!(reply["Err"]["code"], "usage");
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

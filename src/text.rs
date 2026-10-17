@@ -6,6 +6,7 @@ use crate::irc::Secret;
 
 pub const MAX_TEXT_CHARS: usize = 1000;
 const MAX_LINES: usize = 5;
+const MAX_MSGID_BYTES: usize = 128;
 /// Kept out of sends so the agent can't be steered into CTCP requests like DCC.
 const CTCP_DELIMITER: char = '\x01';
 
@@ -42,6 +43,19 @@ pub fn clean_lines(text: &str) -> Result<String> {
         .with_hint("shorten or summarize the reply"));
     }
     Ok(lines.join("\n"))
+}
+
+/// A msgid the agent passes back to the server, like `--reply-to`: one IRC word.
+pub fn check_msgid(msgid: &str) -> Result<()> {
+    let valid = !msgid.is_empty()
+        && msgid.len() <= MAX_MSGID_BYTES
+        && !msgid.starts_with(':')
+        && !msgid.chars().any(|c| c.is_whitespace() || c.is_control());
+    if valid {
+        return Ok(());
+    }
+    Err(Error::new(Code::Usage, format!("{msgid:?} is not a msgid"))
+        .with_hint("use the msgid of an event from `louro wait` or `louro history`"))
 }
 
 /// Refuses `text` if it contains the password, even split across lines, recased, or spaced out.
@@ -91,6 +105,24 @@ mod tests {
     fn no_password_blocks_nothing() {
         for password in [None, Some("".into()), Some(" \n".into())] {
             assert!(check_secret(password.as_ref(), "hello").is_ok());
+        }
+    }
+
+    #[test]
+    fn a_msgid_is_one_short_irc_word() {
+        assert!(check_msgid("4y8kq7j2c9mnz").is_ok());
+        for msgid in [
+            "",
+            ":4y8kq7j2c9mnz",
+            "4y8k q7j2",
+            "4y8k\r\nQUIT",
+            &"x".repeat(129),
+        ] {
+            assert_eq!(
+                check_msgid(msgid).unwrap_err().code,
+                Code::Usage,
+                "{msgid:?}"
+            );
         }
     }
 

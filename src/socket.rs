@@ -40,6 +40,7 @@ pub enum Op {
         target: String,
         text: String,
         kind: Kind,
+        reply_to: Option<String>,
     },
     Names {
         channel: String,

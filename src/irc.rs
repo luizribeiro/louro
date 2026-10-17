@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use papo::{
-    Account, Client, ConnectErrorKind, Endpoint, Event, Events, HistoryItem, Message, MessageKind,
-    RegistrationError, Sasl, Source, State, User,
+    Account, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem, Message,
+    MessageId, MessageKind, RegistrationError, Sasl, Source, State, User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -76,6 +76,14 @@ pub struct Outgoing {
     pub kind: Kind,
     /// At most five lines joined by `\n`, with no CR, NUL or CTCP delimiter.
     pub text: String,
+    /// The msgid this message answers, sent as a reply tag.
+    pub reply_to: Option<String>,
+}
+
+pub struct Sent {
+    pub msgid: Option<String>,
+    /// Whether the server carries reply tags; without them a reply goes out as a plain message.
+    pub threaded: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -91,8 +99,8 @@ pub trait Irc: Send + Sync + 'static {
     fn status(&self) -> IrcStatus;
     /// The members of `channel`, sorted by nick, or `None` if the bot isn't in it.
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
-    /// Sends one message (several lines become a multiline batch) and returns its msgid, if any.
-    fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send;
+    /// Sends one message (several lines become a multiline batch).
+    fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
@@ -330,15 +338,29 @@ impl Irc for PapoIrc {
         Some(members)
     }
 
-    async fn send(&self, message: Outgoing) -> Result<Option<String>> {
-        let Outgoing { target, kind, text } = message;
-        let sent = match kind {
-            Kind::Message => self.client.privmsg(&target, &text).await,
-            Kind::Notice => self.client.notice(&target, &text).await,
-            Kind::Action => self.client.action(&target, flatten_for_action(&text)).await,
+    async fn send(&self, message: Outgoing) -> Result<Sent> {
+        let Outgoing {
+            target,
+            kind,
+            text,
+            reply_to,
+        } = message;
+        let mut request = match kind {
+            Kind::Message => self.client.privmsg(&target, &text),
+            Kind::Notice => self.client.notice(&target, &text),
+            Kind::Action => self.client.action(&target, flatten_for_action(&text)),
         };
-        sent.map(|sent| sent.id.map(|id| id.to_string()))
-            .map_err(|error| Error::new(send_code(&error), error.to_string()))
+        if let Some(id) = &reply_to {
+            request = request.reply_to(&MessageId::from(id));
+        }
+        let threaded = reply_to.is_some() && self.client.state().supports(Feature::Replies);
+        let sent = request
+            .await
+            .map_err(|error| Error::new(send_code(&error), error.to_string()))?;
+        Ok(Sent {
+            msgid: sent.id.map(|id| id.to_string()),
+            threaded,
+        })
     }
 
     async fn quit(&self) {

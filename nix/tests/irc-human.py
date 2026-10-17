@@ -1,5 +1,6 @@
 """A person on IRC, for the e2e test: connects to SERVER as NICK, logs in to
-the account NICK with SASL if given a password, and joins channels. Every
+the account NICK with SASL if given a password, asks for message-tags so
+client tags like replies and reactions show up, and joins channels. Every
 line written to FIFO is sent as a raw IRC line, and every line received is
 appended to LOG. Exits when the server closes the connection."""
 
@@ -35,12 +36,13 @@ def main():
         with sending:
             sock.sendall(line.encode() + b"\r\n")
 
+    send("CAP REQ :message-tags")
     if args.password:
         plain = f"{args.nick}\0{args.nick}\0{args.password}"
         send("CAP REQ :sasl")
         send("AUTHENTICATE PLAIN")
         send("AUTHENTICATE " + base64.b64encode(plain.encode()).decode())
-        send("CAP END")
+    send("CAP END")
     send(f"NICK {args.nick}")
     send(f"USER {args.nick} 0 * :{args.nick}")
 
@@ -52,6 +54,8 @@ def main():
         for line in received:
             line = line.rstrip("\r\n")
             log.write(line + "\n")
+            if line.startswith("@"):
+                line = line.split(" ", 1)[1]
             words = line.split(" ")
             if words[0] == "PING":
                 send("PONG " + words[1])

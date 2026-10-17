@@ -37,13 +37,18 @@ impl Grants {
         target: String,
         text: &str,
         kind: Kind,
+        reply_to: Option<String>,
         dm: &DmHistory,
     ) -> Result<Outgoing> {
         self.check_target(&target, dm)?;
+        if let Some(msgid) = &reply_to {
+            text::check_msgid(msgid)?;
+        }
         Ok(Outgoing {
             text: text::clean_lines(text)?,
             target,
             kind,
+            reply_to,
         })
     }
 
@@ -154,7 +159,7 @@ mod tests {
     }
 
     fn send_as(grants: &Grants, target: &str, dm: &DmHistory) -> Result<Outgoing> {
-        grants.check_send(target.into(), "hi", Kind::Message, dm)
+        grants.check_send(target.into(), "hi", Kind::Message, None, dm)
     }
 
     #[test]
