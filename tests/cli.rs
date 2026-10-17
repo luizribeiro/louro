@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::thread;
 
@@ -183,6 +183,27 @@ fn louro_socket_env_var_is_used_when_no_flag_is_given() {
         .stdout(predicate::str::contains(
             socket.to_str().expect("tempdir path is valid UTF-8"),
         ));
+}
+
+#[test]
+fn the_socket_defaults_to_the_runtime_dir_else_a_per_user_tmp_dir() {
+    let dir = tempdir().unwrap();
+    let uid = std::fs::metadata(dir.path()).unwrap().uid();
+    for (runtime_dir, socket) in [
+        (dir.path().as_os_str(), dir.path().join("louro/louro.sock")),
+        (
+            "".as_ref(),
+            dir.path().join(format!("louro-{uid}/louro.sock")),
+        ),
+    ] {
+        louro()
+            .env("XDG_RUNTIME_DIR", runtime_dir)
+            .env("TMPDIR", dir.path())
+            .arg("status")
+            .assert()
+            .code(3)
+            .stdout(predicate::str::contains(socket.to_str().unwrap()));
+    }
 }
 
 /// Spawns a one-shot fake daemon on `socket`: reads one request line,

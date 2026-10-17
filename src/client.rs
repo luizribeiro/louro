@@ -1,5 +1,4 @@
 use std::env;
-use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -82,8 +81,7 @@ fn broken_connection(err: &std::io::Error) -> Error {
     )
 }
 
-/// `--socket`, else `$XDG_RUNTIME_DIR/louro/louro.sock`, else
-/// `$TMPDIR/louro-<uid>/louro.sock` (design §4.2).
+/// `--socket`, else `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`.
 ///
 /// # Errors
 ///
@@ -92,30 +90,15 @@ pub fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
     }
-    socket_path_from_env(env::var_os("XDG_RUNTIME_DIR"), env::var_os("TMPDIR"))
-}
-
-/// The env-driven half of [`resolve_socket_path`], taken as plain values so
-/// tests can exercise it without mutating the process environment.
-fn socket_path_from_env(
-    xdg_runtime_dir: Option<OsString>,
-    fallback_tmpdir: Option<OsString>,
-) -> Result<PathBuf> {
-    if let Some(dir) = xdg_runtime_dir.filter(|dir| !dir.is_empty()) {
-        return Ok(PathBuf::from(dir).join("louro").join("louro.sock"));
+    if let Some(dir) = env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        return Ok(PathBuf::from(dir).join("louro/louro.sock"));
     }
-    let base_dir = fallback_tmpdir
-        .filter(|dir| !dir.is_empty())
-        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    let uid = current_uid(&base_dir)?;
-    Ok(base_dir.join(format!("louro-{uid}")).join("louro.sock"))
+    let tmp = env::temp_dir();
+    Ok(tmp.join(format!("louro-{}/louro.sock", current_uid(&tmp)?)))
 }
 
-/// The current user's id, read from a file this process just created in
-/// `base_dir` (so it is a path we own, regardless of who owns `base_dir`
-/// itself) via `std::os::unix::fs::MetadataExt`, with no unsafe code.
-/// `create_new` makes sure we stat a file we created, not one already
-/// sitting at this guessable name.
+/// Safe Rust has no getuid, so this reads the owner of a file it creates; `create_new` makes sure
+/// that file isn't one someone else left at this guessable name.
 fn current_uid(base_dir: &Path) -> Result<u32> {
     let probe = base_dir.join(format!("louro-uid-probe-{}", std::process::id()));
     let uid = std::fs::OpenOptions::new()
@@ -140,45 +123,6 @@ mod tests {
 
     use super::*;
     use crate::protocol::{Kind, SendArgs};
-
-    #[test]
-    fn explicit_socket_wins_over_env() {
-        let path = resolve_socket_path(Some(Path::new("/tmp/explicit.sock"))).unwrap();
-        assert_eq!(path, PathBuf::from("/tmp/explicit.sock"));
-    }
-
-    #[test]
-    fn falls_back_to_xdg_runtime_dir() {
-        let path = socket_path_from_env(Some("/run/user/501".into()), Some("/tmp".into())).unwrap();
-        assert_eq!(path, PathBuf::from("/run/user/501/louro/louro.sock"));
-    }
-
-    #[test]
-    fn falls_back_to_tmpdir_with_uid_when_no_runtime_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().to_str().unwrap();
-        let path = socket_path_from_env(None, Some(base.into())).unwrap();
-        let uid = current_uid(dir.path()).unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from(format!("{base}/louro-{uid}/louro.sock"))
-        );
-    }
-
-    #[test]
-    fn empty_env_vars_are_treated_as_unset() {
-        let path = socket_path_from_env(Some(String::new().into()), None).unwrap();
-        let uid = current_uid(Path::new("/tmp")).unwrap();
-        assert_eq!(path, PathBuf::from(format!("/tmp/louro-{uid}/louro.sock")));
-    }
-
-    #[test]
-    fn current_uid_matches_a_freshly_created_file_in_the_same_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let probe = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
-        let expected = probe.path().metadata().unwrap().uid();
-        assert_eq!(current_uid(dir.path()).unwrap(), expected);
-    }
 
     #[tokio::test]
     async fn connecting_to_a_missing_socket_is_no_session() {
