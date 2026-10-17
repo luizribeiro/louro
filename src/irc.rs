@@ -168,6 +168,7 @@ pub trait Irc: Send + Sync + 'static {
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
+#[derive(Serialize)]
 pub struct IrcStatus {
     pub connected: bool,
     pub nick: String,

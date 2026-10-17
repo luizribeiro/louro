@@ -20,8 +20,7 @@ use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE};
 use crate::irc::{
-    self, History, HistoryQuery, Incoming, Irc, IrcStatus, Member, Outgoing, Secret, Sender,
-    Typing, Update,
+    self, History, HistoryQuery, Incoming, Irc, Member, Outgoing, Secret, Sender, Typing, Update,
 };
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -354,18 +353,10 @@ impl<I: Irc> Daemon<I> {
     }
 
     fn status(&self) -> Value {
-        let IrcStatus {
-            connected,
-            nick,
-            channels,
-        } = self.irc.status();
-        json!({
-            "connected": connected,
-            "nick": nick,
-            "channels": channels,
-            "grants": self.grants,
-            "last_error": *self.last_error.lock().unwrap(),
-        })
+        let mut status = json!(self.irc.status());
+        status["grants"] = json!(self.grants);
+        status["last_error"] = json!(*self.last_error.lock().unwrap());
+        status
     }
 
     fn names(&self, channel: &str) -> Result<Value> {
@@ -514,7 +505,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::irc::{Kind, Origin, Sender, Sent};
+    use crate::irc::{IrcStatus, Kind, Origin, Sender, Sent};
 
     fn from_maria(text: &str) -> Incoming {
         Incoming {
