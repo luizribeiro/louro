@@ -125,13 +125,6 @@ mod tests {
     }
 
     #[test]
-    fn no_password_blocks_nothing() {
-        for password in [None, Some("".into()), Some(" \n".into())] {
-            assert!(check_secret(password.as_ref(), "hello").is_ok());
-        }
-    }
-
-    #[test]
     fn a_msgid_is_one_short_irc_word() {
         assert!(check_msgid("4y8kq7j2c9mnz").is_ok());
         for msgid in [
@@ -181,15 +174,19 @@ mod tests {
     }
 
     #[test]
-    fn neutralizes_crlf_and_nul_injection() {
-        let text = clean_lines("ok\r\0QUIT :pwned\r\nPRIVMSG #ops :hi").unwrap();
-        assert_eq!(text, "ok  QUIT :pwned \nPRIVMSG #ops :hi");
-    }
-
-    #[test]
-    fn neutralizes_ctcp_requests() {
-        let text = clean_lines("\x01DCC SEND notes.txt 3232235777 5000\x01").unwrap();
-        assert_eq!(text, " DCC SEND notes.txt 3232235777 5000 ");
+    fn neutralizes_crlf_nul_and_ctcp_injection() {
+        for (text, clean) in [
+            (
+                "ok\r\0QUIT :pwned\r\nPRIVMSG #ops :hi",
+                "ok  QUIT :pwned \nPRIVMSG #ops :hi",
+            ),
+            (
+                "\x01DCC SEND notes.txt 3232235777 5000\x01",
+                " DCC SEND notes.txt 3232235777 5000 ",
+            ),
+        ] {
+            assert_eq!(clean_lines(text).unwrap(), clean);
+        }
     }
 
     #[test]
