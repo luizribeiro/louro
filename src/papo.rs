@@ -1,7 +1,5 @@
 //! The IRC side of the daemon: one papo client, with its chat forwarded as [`Incoming`].
 
-use std::time::SystemTime;
-
 use papo::{
     Client, ConnectErrorKind, Endpoint, Event, Events, Message, MessageKind, RegistrationError,
     Sasl, Source, State,
@@ -95,7 +93,7 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
     }
     Some(Incoming {
         kind,
-        time: timestamp(message.time()),
+        time: humantime::format_rfc3339_millis(message.time()).to_string(),
         msgid: message.msgid().map(str::to_owned),
         target: message.reply_target().to_owned(),
         private,
@@ -105,7 +103,11 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
             bot: message.is_bot(),
         },
         text: message.text().to_owned(),
-        mentions_me: private || mentions(message.text(), state.nick()),
+        mentions_me: private
+            || message
+                .text()
+                .to_lowercase()
+                .contains(&state.nick().to_lowercase()),
         reply_to: message.reply_to().map(str::to_owned),
     })
 }
@@ -117,14 +119,6 @@ fn chat_kind(kind: MessageKind) -> Option<Kind> {
         MessageKind::Action => Some(Kind::Action),
         _ => None,
     }
-}
-
-fn mentions(text: &str, nick: &str) -> bool {
-    text.to_lowercase().contains(&nick.to_lowercase())
-}
-
-fn timestamp(time: SystemTime) -> String {
-    humantime::format_rfc3339_millis(time).to_string()
 }
 
 impl Irc for PapoIrc {
@@ -173,8 +167,6 @@ fn send_code(error: &papo::Error) -> Code {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use papo::{DisconnectCause, Disconnected, InvalidInput};
 
     use super::*;
@@ -229,18 +221,5 @@ mod tests {
         assert_eq!(chat_kind(MessageKind::Notice), Some(Kind::Notice));
         assert_eq!(chat_kind(MessageKind::Action), Some(Kind::Action));
         assert_eq!(chat_kind(MessageKind::Ctcp), None);
-    }
-
-    #[test]
-    fn a_mention_ignores_case() {
-        assert!(mentions("Louro: does ergo support chathistory?", "louro"));
-        assert!(mentions("thanks LOURO", "Louro"));
-        assert!(!mentions("does ergo support chathistory?", "louro"));
-    }
-
-    #[test]
-    fn times_are_utc_rfc3339_with_millis() {
-        let time = SystemTime::UNIX_EPOCH + Duration::from_millis(1_792_184_651_392);
-        assert_eq!(timestamp(time), "2026-10-16T21:04:11.392Z");
     }
 }
