@@ -270,32 +270,10 @@ pub trait Irc: Send + Sync + 'static {
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
-#[derive(Clone, Debug, Serialize)]
 pub struct IrcStatus {
     pub connected: bool,
     pub nick: String,
     pub channels: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct Status<'a> {
-    #[serde(flatten)]
-    irc: IrcStatus,
-    policy: Policy<'a>,
-}
-
-#[derive(Serialize)]
-struct Policy<'a> {
-    channels: &'a [String],
-    dm: bool,
-}
-
-#[derive(Serialize)]
-struct Sent {
-    target: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    msgid: Option<String>,
-    lines: usize,
 }
 
 struct Daemon<I> {
@@ -386,26 +364,21 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    fn status(&self) -> Status<'_> {
-        Status {
-            irc: self.irc.status(),
-            policy: Policy {
-                channels: &self.config.channels,
-                dm: self.config.allow_dm,
-            },
-        }
+    fn status(&self) -> Value {
+        let IrcStatus {
+            connected,
+            nick,
+            channels,
+        } = self.irc.status();
+        let policy = json!({"channels": self.config.channels, "dm": self.config.allow_dm});
+        json!({"connected": connected, "nick": nick, "channels": channels, "policy": policy})
     }
 
-    async fn send(&self, args: SendArgs) -> Result<Sent> {
+    async fn send(&self, args: SendArgs) -> Result<Value> {
         let message = self.config.check_send(args)?;
-        let target = message.target.clone();
-        let lines = message.text.lines().count();
+        let (target, lines) = (message.target.clone(), message.text.lines().count());
         let msgid = self.irc.send(message).await?;
-        Ok(Sent {
-            target,
-            msgid,
-            lines,
-        })
+        Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
     }
 }
 
