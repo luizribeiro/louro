@@ -125,7 +125,8 @@ fn connect_code(error: &papo::Error) -> Code {
         papo::Error::Registration(
             RegistrationError::Sasl { .. }
             | RegistrationError::SaslUnavailable
-            | RegistrationError::PasswordIncorrect,
+            | RegistrationError::PasswordIncorrect
+            | RegistrationError::AccountRequired,
         ) => Code::AuthFailed,
         papo::Error::Connect(failure)
             if matches!(
@@ -166,7 +167,7 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
     Some(Incoming {
         kind,
         time: humantime::format_rfc3339_millis(message.time()).to_string(),
-        msgid: message.msgid().map(str::to_owned),
+        msgid: message.id().map(ToString::to_string),
         target: message.reply_target().to_owned(),
         private,
         from: Sender {
@@ -211,20 +212,20 @@ impl Irc for PapoIrc {
         let sent = match kind {
             Kind::Message => self.client.privmsg(&target, &text).await,
             Kind::Notice => self.client.notice(&target, &text).await,
-            Kind::Action => self.client.privmsg(&target, &ctcp_action(&text)).await,
+            Kind::Action => self.client.action(&target, flatten_for_action(&text)).await,
         };
-        sent.map(|sent| sent.id.map(|id| id.msgid().to_owned()))
+        sent.map(|sent| sent.id.map(|id| id.to_string()))
             .map_err(|error| Error::new(send_code(&error), error.to_string()))
     }
 
     async fn quit(&self) {
-        let _ = self.client.quit(None).await;
+        let _ = self.client.quit("").await;
     }
 }
 
-/// A CTCP message is one line, so an action's lines are joined.
-fn ctcp_action(text: &str) -> String {
-    format!("\x01ACTION {}\x01", text.replace('\n', " "))
+/// papo's CTCP builder panics on a raw newline, so an action's lines are joined onto one.
+fn flatten_for_action(text: &str) -> String {
+    text.replace('\n', " ")
 }
 
 fn send_code(error: &papo::Error) -> Code {
@@ -244,10 +245,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_action_is_one_ctcp_line() {
+    fn an_action_is_one_line() {
         assert_eq!(
-            ctcp_action("checks the logs\nfinds nothing"),
-            "\x01ACTION checks the logs finds nothing\x01"
+            flatten_for_action("checks the logs\nfinds nothing"),
+            "checks the logs finds nothing"
         );
     }
 
