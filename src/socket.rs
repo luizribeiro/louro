@@ -11,7 +11,7 @@ use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, 
 use tokio::net::UnixStream;
 
 use crate::error::{Code, Error, Result};
-use crate::irc::{Kind, Typing};
+use crate::irc::{HistoryQuery, Kind, Typing};
 
 pub const VERSION: u8 = 1;
 
@@ -34,8 +34,15 @@ impl Request {
 pub enum Op {
     /// Connection state, nick, channels, and what the bot may do (grants)
     Status {},
-    #[command(skip)]
-    Wait { timeout: u64, max: NonZeroUsize },
+    /// Block until matching events arrive
+    Wait {
+        /// Seconds to block for, or `none` to wait forever; `0` polls
+        #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]
+        timeout: u64,
+        /// Maximum number of events to return
+        #[arg(long, default_value = "20", value_name = "N")]
+        max: NonZeroUsize,
+    },
     #[command(skip)]
     Send {
         target: String,
@@ -77,15 +84,25 @@ pub enum Op {
         #[arg(long, default_value = "")]
         reason: String,
     },
-    #[command(skip)]
+    /// Earlier chat in a channel or DM, from the server
     History {
+        /// Channel, or the nick of a DM conversation
         target: String,
-        limit: usize,
-        before: Option<String>,
-        after: Option<String>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        query: HistoryQuery,
     },
     /// Disconnect and stop the daemon
     Quit {},
+}
+
+/// `none` is `u64::MAX` seconds, past any `Instant`, so the daemon sets no deadline.
+fn parse_timeout(raw: &str) -> Result<u64, String> {
+    if raw == "none" {
+        return Ok(u64::MAX);
+    }
+    raw.parse()
+        .map_err(|_| format!("expected a number of seconds or `none`, got `{raw}`"))
 }
 
 /// What the client writes after printing a wait result; only then does the daemon move its cursor.
@@ -199,4 +216,15 @@ fn current_uid(base_dir: &Path) -> Result<u32> {
             format!("could not determine the user id for the socket path: {err}"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_timeout_takes_seconds_or_none() {
+        assert_eq!(parse_timeout("60"), Ok(60));
+        assert_eq!(parse_timeout("none"), Ok(u64::MAX));
+    }
 }

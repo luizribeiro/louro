@@ -94,9 +94,16 @@ pub struct Outgoing {
 
 /// Which page of a conversation's history to fetch; `before` and `after` are msgids or
 /// RFC 3339 times, and with neither it is the latest `limit` messages.
+#[derive(Deserialize, Serialize, clap::Args)]
 pub struct HistoryQuery {
+    /// How many messages to return, at most 100
+    #[arg(long = "latest", default_value = "20", value_name = "N")]
     pub limit: usize,
+    /// Only messages before this msgid or RFC 3339 time
+    #[arg(long, value_name = "MSGID|TIME")]
     pub before: Option<String>,
+    /// Only messages after this msgid or RFC 3339 time
+    #[arg(long, value_name = "MSGID|TIME")]
     pub after: Option<String>,
 }
 

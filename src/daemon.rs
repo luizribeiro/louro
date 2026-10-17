@@ -365,17 +365,7 @@ impl<I: Irc> Daemon<I> {
                 msgid,
                 reason,
             }) => reply(conn, self.redact(&target, &msgid, &reason).await).await,
-            Ok(Op::History {
-                target,
-                limit,
-                before,
-                after,
-            }) => {
-                let query = HistoryQuery {
-                    limit,
-                    before,
-                    after,
-                };
+            Ok(Op::History { target, query }) => {
                 reply(conn, self.history(&target, query).await).await
             }
             Ok(Op::Quit {}) => {
