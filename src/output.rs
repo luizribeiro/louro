@@ -5,13 +5,6 @@ use serde::Serialize;
 use crate::error::{Error, Result};
 
 #[derive(Serialize)]
-struct Versioned<T> {
-    v: u8,
-    #[serde(flatten)]
-    body: T,
-}
-
-#[derive(Serialize)]
 struct ErrorBody<'a> {
     error: &'a Error,
 }
@@ -28,14 +21,11 @@ pub fn emit<T: Serialize>(result: Result<T>) -> ExitCode {
 }
 
 fn render<T: Serialize>(result: &Result<T>) -> String {
-    let versioned = match result {
-        Ok(body) => serde_json::to_string(&Versioned { v: 1, body }),
-        Err(error) => serde_json::to_string(&Versioned {
-            v: 1,
-            body: ErrorBody { error },
-        }),
+    let rendered = match result {
+        Ok(body) => serde_json::to_string(body),
+        Err(error) => serde_json::to_string(&ErrorBody { error }),
     };
-    versioned.expect("louro output must serialize to JSON")
+    rendered.expect("louro output must serialize to JSON")
 }
 
 #[cfg(test)]
@@ -55,7 +45,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_a_successful_result_as_versioned_json() {
+    fn renders_a_successful_result_as_the_bare_object() {
         let sent = Sent {
             target: "#bots",
             msgid: "c2m8w1u0pq7rs",
@@ -64,7 +54,7 @@ mod tests {
         };
         assert_eq!(
             render(&Ok(sent)),
-            r##"{"v":1,"target":"#bots","msgid":"c2m8w1u0pq7rs","threaded":true,"lines":1}"##
+            r##"{"target":"#bots","msgid":"c2m8w1u0pq7rs","threaded":true,"lines":1}"##
         );
     }
 
@@ -74,7 +64,7 @@ mod tests {
             .with_hint("don't retry; the operator set this");
         assert_eq!(
             render::<Value>(&Err(not_allowed)),
-            r##"{"v":1,"error":{"code":"not_allowed","message":"#lounge is not in the channel allowlist","hint":"don't retry; the operator set this"}}"##
+            r##"{"error":{"code":"not_allowed","message":"#lounge is not in the channel allowlist","hint":"don't retry; the operator set this"}}"##
         );
     }
 }
