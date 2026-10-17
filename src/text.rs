@@ -73,6 +73,14 @@ pub fn check_reaction(reaction: &str) -> Result<()> {
     ))
 }
 
+/// Short outbound text with no line breaks or other control characters, like a redact reason.
+pub fn check_one_line(text: &str) -> Result<()> {
+    if text.chars().any(char::is_control) {
+        return Err(Error::new(Code::Usage, "this text must be one line"));
+    }
+    Ok(())
+}
+
 /// Refuses `text` if it contains the password, even split across lines, recased, or spaced out.
 pub fn check_secret(password: Option<&Secret>, text: &str) -> Result<()> {
     let leaks = password.is_some_and(|password| {

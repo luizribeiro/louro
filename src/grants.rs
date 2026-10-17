@@ -105,6 +105,14 @@ impl Grants {
         Err(not_allowed(format!("irc.join does not grant {channel}")))
     }
 
+    pub fn check_redact(&self, msgid: &str, reason: &str) -> Result<()> {
+        if !self.irc.redact {
+            return Err(not_allowed("irc.redact is not granted"));
+        }
+        text::check_msgid(msgid)?;
+        text::check_one_line(reason)
+    }
+
     pub fn check_quit(&self) -> Result<()> {
         if self.irc.quit {
             return Ok(());
@@ -418,6 +426,24 @@ mod tests {
         ] {
             let error = grants.check_history(target, dm).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
+        }
+    }
+
+    #[test]
+    fn redacts_only_with_irc_redact_and_a_one_line_reason() {
+        let error = Grants::default()
+            .check_redact("c2m8w1u0pq7rs", "")
+            .unwrap_err();
+        assert_eq!(error.code, Code::NotAllowed);
+        let grants = grants("irc.redact = true");
+        assert!(
+            grants
+                .check_redact("c2m8w1u0pq7rs", "wrong channel")
+                .is_ok()
+        );
+        for (msgid, reason) in [("c2m8 w1u0", ""), ("c2m8w1u0pq7rs", "oops\r\nQUIT")] {
+            let error = grants.check_redact(msgid, reason).unwrap_err();
+            assert_eq!(error.code, Code::Usage, "{msgid:?} {reason:?}");
         }
     }
 

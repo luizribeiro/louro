@@ -71,6 +71,8 @@ pub struct Irc {
     pub react: Selector,
     /// Channels and nicks it may show typing to; it must also be allowed to send there.
     pub typing: Selector,
+    /// Whether it may redact messages it sent itself.
+    pub redact: bool,
     pub quit: bool,
 }
 
@@ -207,6 +209,7 @@ mod tests {
         irc.dm.send = ["$first", "luiz"]
         irc.react = ["#bots", "account:luiz"]
         irc.typing = ["#bots"]
+        irc.redact = true
         irc.quit = true
     "##;
 
@@ -235,7 +238,7 @@ mod tests {
         assert!(irc.dm.read.matches("maria") && irc.dm.send.matches("luiz"));
         assert!(irc.react.matches("#bots") && irc.react.matches_sender("lz", Some("luiz")));
         assert!(irc.typing.matches("#bots") && !irc.typing.matches("#lounge"));
-        assert!(irc.quit);
+        assert!(irc.redact && irc.quit);
     }
 
     #[test]
@@ -255,7 +258,7 @@ mod tests {
         ] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
-        assert!(!irc.quit);
+        assert!(!irc.redact && !irc.quit);
     }
 
     #[test]

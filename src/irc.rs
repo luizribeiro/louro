@@ -143,6 +143,13 @@ pub trait Irc: Send + Sync + 'static {
         target: &str,
         query: HistoryQuery,
     ) -> impl Future<Output = Result<History>> + Send;
+    /// Asks the server to delete the message `msgid` in `target`; an empty reason is omitted.
+    fn redact(
+        &self,
+        target: &str,
+        msgid: &str,
+        reason: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
@@ -470,6 +477,13 @@ impl Irc for PapoIrc {
                 .collect(),
             complete: page.end,
         })
+    }
+
+    async fn redact(&self, target: &str, msgid: &str, reason: &str) -> Result<()> {
+        self.client
+            .redact(target, msgid, reason)
+            .await
+            .map_err(|error| Error::new(send_code(&error), error.to_string()))
     }
 
     async fn quit(&self) {

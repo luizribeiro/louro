@@ -8,6 +8,7 @@ mod history;
 mod names;
 mod quit;
 mod react;
+mod redact;
 mod send;
 mod status;
 mod typing;
@@ -23,6 +24,8 @@ pub enum Command {
     Send(send::Args),
     /// React to a message with an emoji
     React(react::Args),
+    /// Delete a message the bot sent
+    Redact(redact::Args),
     /// Show that the bot is typing
     Typing(typing::Args),
     /// Earlier chat in a channel or DM, from the server
@@ -42,6 +45,7 @@ pub async fn dispatch(command: Command, socket: Option<&Path>) -> ExitCode {
         Command::Send(args) => args.run(socket).await,
         Command::React(args) => args.run(socket).await,
         Command::Typing(args) => args.run(socket).await,
+        Command::Redact(args) => args.run(socket).await,
         Command::History(args) => args.run(socket).await,
         Command::Names(args) => args.run(socket).await,
         Command::Quit(args) => args.run(socket).await,

@@ -55,6 +55,11 @@ pub enum Op {
         target: String,
         state: Typing,
     },
+    Redact {
+        target: String,
+        msgid: String,
+        reason: String,
+    },
     History {
         target: String,
         limit: usize,

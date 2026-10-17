@@ -58,6 +58,8 @@ pkgs.testers.runNixOSTest (
           accounts.multiclient.always-on = "disabled";
           # The test sends in bursts that fakelag would throttle.
           fakelag.enabled = false;
+          # Ergo offers draft/message-redaction only with this on.
+          history.retention.allow-individual-delete = true;
           api = {
             enabled = true;
             listener = "127.0.0.1:${toString settings.apiPort}";

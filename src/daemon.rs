@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
@@ -38,6 +38,26 @@ struct DmSender {
 
 /// The most a `history` call returns, and Ergo's default page size.
 const MAX_HISTORY: usize = 100;
+const SENT_LOG_CAP: usize = 1_000;
+
+/// The bot's own recent messages as (lowercased target, msgid), the only ones `redact` removes.
+#[derive(Default)]
+struct SentLog(VecDeque<(String, String)>);
+
+impl SentLog {
+    fn record(&mut self, target: &str, msgid: String) {
+        if self.0.len() == SENT_LOG_CAP {
+            self.0.pop_front();
+        }
+        self.0.push_back((target.to_ascii_lowercase(), msgid));
+    }
+
+    fn contains(&self, target: &str, msgid: &str) -> bool {
+        self.0
+            .iter()
+            .any(|(sent_to, id)| id == msgid && sent_to.eq_ignore_ascii_case(target))
+    }
+}
 
 /// The most recent thing that went wrong with the connection, for `status`.
 #[derive(Serialize)]
@@ -54,6 +74,7 @@ struct Daemon<I> {
     inbox: Inbox,
     /// Lowercased nicks whose DM reached the agent, for `irc.dm.send`'s `$first` and `account:`.
     dm_senders: Mutex<HashMap<String, DmSender>>,
+    sent: Mutex<SentLog>,
     last_error: Mutex<Option<Problem>>,
     /// Set from a disconnect until the next registration, so the agent hears of each outage once.
     offline: AtomicBool,
@@ -84,6 +105,7 @@ pub async fn run(
         irc,
         inbox: Inbox::default(),
         dm_senders: Mutex::default(),
+        sent: Mutex::default(),
         last_error: Mutex::default(),
         offline: AtomicBool::new(false),
         quit: Notify::new(),
@@ -333,6 +355,11 @@ impl<I: Irc> Daemon<I> {
             Ok(Op::Typing { target, state }) => {
                 reply(conn, self.typing(&target, state).await).await
             }
+            Ok(Op::Redact {
+                target,
+                msgid,
+                reason,
+            }) => reply(conn, self.redact(&target, &msgid, &reason).await).await,
             Ok(Op::History {
                 target,
                 limit,
@@ -428,6 +455,26 @@ impl<I: Irc> Daemon<I> {
         }))
     }
 
+    async fn redact(&self, target: &str, msgid: &str, reason: &str) -> Result<Value> {
+        self.grants.check_redact(msgid, reason)?;
+        text::check_secret(self.password.as_ref(), reason)?;
+        if !self.sent_log().contains(target, msgid) {
+            return Err(Error::new(
+                Code::NotAllowed,
+                format!("{msgid} in {target} is not a message louro sent"),
+            )
+            .with_hint("louro redacts only its own messages, sent since it started"));
+        }
+        self.irc.redact(target, msgid, reason).await?;
+        Ok(json!({"target": target, "msgid": msgid}))
+    }
+
+    fn sent_log(&self) -> MutexGuard<'_, SentLog> {
+        self.sent
+            .lock()
+            .expect("no code panics while holding the sent log lock")
+    }
+
     async fn typing(&self, target: &str, state: Typing) -> Result<Value> {
         self.grants.check_typing(target, &self.dm_history(target))?;
         self.irc.typing(target, state).await?;
@@ -447,6 +494,9 @@ impl<I: Irc> Daemon<I> {
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let is_reply = message.reply_to.is_some();
         let sent = self.irc.send(message).await?;
+        if let Some(msgid) = &sent.msgid {
+            self.sent_log().record(&target, msgid.clone());
+        }
         let mut result = json!({"target": target, "msgid": sent.msgid, "lines": lines});
         if is_reply {
             result["threaded"] = sent.threaded.into();
@@ -560,6 +610,7 @@ mod tests {
             irc.dm.send = ["$first"]
             irc.react = ["#bots"]
             irc.typing = ["#bots"]
+            irc.redact = true
             "##,
         )
         .unwrap()
@@ -572,6 +623,7 @@ mod tests {
         reactions: Mutex<Vec<bool>>,
         typing: Mutex<Vec<Typing>>,
         history_limits: Mutex<Vec<usize>>,
+        redacted: Mutex<Vec<String>>,
         quit: Notify,
     }
 
@@ -660,6 +712,16 @@ mod tests {
                 ],
                 complete: true,
             }))
+        }
+
+        fn redact(
+            &self,
+            _target: &str,
+            msgid: &str,
+            _reason: &str,
+        ) -> impl Future<Output = Result<()>> + Send {
+            self.redacted.lock().unwrap().push(msgid.into());
+            future::ready(Ok(()))
         }
 
         async fn quit(&self) {
@@ -782,6 +844,7 @@ mod tests {
                     "dm": {"read": ["luiz", "maria"], "send": ["$first"]},
                     "react": ["#bots"],
                     "typing": ["#bots"],
+                    "redact": true,
                     "quit": false
                 }},
                 "last_error": null
@@ -1068,6 +1131,53 @@ mod tests {
         assert_eq!(
             *daemon.irc.typing.lock().unwrap(),
             [Typing::Active, Typing::Done]
+        );
+    }
+
+    fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {
+        json!({"v": 1, "op": "redact", "args": {"target": target, "msgid": msgid, "reason": reason}})
+    }
+
+    #[tokio::test]
+    async fn redact_removes_only_a_message_the_bot_sent_there() {
+        let daemon = launch(grants());
+        let unsent = daemon
+            .call(redact_request("#bots", "c2m8w1u0pq7rs", ""))
+            .await;
+        assert_eq!(unsent["Err"]["code"], "not_allowed");
+
+        let sent = daemon
+            .call(send_request("#bots", "wrong channel, sorry"))
+            .await;
+        let msgid = sent["Ok"]["msgid"].as_str().unwrap();
+        for (target, msgid, code) in [
+            ("#lounge", msgid, "not_allowed"),
+            ("#bots", "4y8kq7j2c9mnz", "not_allowed"),
+            ("#bots", msgid, "blocked_secret"),
+        ] {
+            let reason = if code == "blocked_secret" {
+                PASSWORD
+            } else {
+                ""
+            };
+            let reply = daemon.call(redact_request(target, msgid, reason)).await;
+            assert_eq!(reply["Err"]["code"], code, "{target} {msgid}");
+        }
+        let reply = daemon.call(redact_request("#BOTS", msgid, "oops")).await;
+        assert_eq!(reply["Ok"]["msgid"], msgid);
+        assert_eq!(*daemon.irc.redacted.lock().unwrap(), [msgid]);
+    }
+
+    #[test]
+    fn the_sent_log_forgets_the_oldest_message_past_its_cap() {
+        let mut log = SentLog::default();
+        for n in 0..=SENT_LOG_CAP {
+            log.record("#bots", format!("msgid{n}"));
+        }
+        assert!(!log.contains("#bots", "msgid0"));
+        assert!(
+            log.contains("#Bots", "msgid1")
+                && log.contains("#bots", &format!("msgid{SENT_LOG_CAP}"))
         );
     }
 

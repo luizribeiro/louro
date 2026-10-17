@@ -58,13 +58,14 @@ def toml_lines(table, prefix=""):
             yield f"{prefix}{key} = {json.dumps(value)}"
 
 
-def grants(dm_read=False, dm_send=False, quit=False, react=False, typing=False):
+def grants(dm_read=False, dm_send=False, quit=False, react=False, typing=False, redact=False):
     return {"irc": {
         "join": ["#bots"],
         "send": ["#bots"],
         "dm": {"read": dm_read, "send": dm_send},
         "react": react,
         "typing": typing,
+        "redact": redact,
         "quit": quit,
     }}
 
@@ -319,6 +320,17 @@ with subtest("history returns earlier chat in #bots and DMs, the bot's own lines
     assert all(event["target"] == "luiz" and event["private"] for event in page["events"]), page
     refused("not_allowed", "history", "#lounge")
     refused("not_allowed", "history", "mallory")
+    stop()
+
+with subtest("redact deletes the bot's own message, and refuses luiz's"):
+    start(grants(redact=True))
+    sent = louro("send", "#bots", "posted by mistake")
+    louro("redact", "#bots", sent["msgid"], "--reason", "wrong channel")
+    page = louro("history", "#bots")
+    assert "posted by mistake" not in [event["text"] for event in page["events"]], page
+    send_raw("luiz", "PRIVMSG #bots :please don't redact me")
+    [mine] = events_until(from_nick("luiz", "please don't redact me"))
+    refused("not_allowed", "redact", "#bots", mine["msgid"])
     stop()
 
 with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):
