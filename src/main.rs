@@ -34,18 +34,33 @@ async fn main() -> ExitCode {
         Command::Status => output::emit(request(cli.socket.as_deref(), Op::Status {}).await),
         Command::Quit => output::emit(request(cli.socket.as_deref(), Op::Quit {}).await),
         Command::Send(args) => output::emit(send(cli.socket.as_deref(), args).await),
-        Command::Wait(args) => {
-            let op = Op::Wait(WaitArgs {
-                timeout_secs: args.timeout.as_secs(),
-                max: args.max,
-            });
-            output::emit(request(cli.socket.as_deref(), op).await)
-        }
+        Command::Wait(args) => wait(cli.socket.as_deref(), args).await,
     }
 }
 
 async fn request(socket: Option<&Path>, op: Op) -> Result<Value> {
     Connection::connect(socket).await?.request(op).await
+}
+
+/// Prints the result before acking: the daemon only advances the consumer
+/// cursor once it knows the CLI showed the agent what arrived (design §4.4),
+/// so the ack must follow the print, not race it.
+async fn wait(socket: Option<&Path>, args: cli::WaitArgs) -> ExitCode {
+    let mut connection = match Connection::connect(socket).await {
+        Ok(connection) => connection,
+        Err(err) => return output::emit::<()>(Err(err)),
+    };
+    let op = Op::Wait(WaitArgs {
+        timeout_secs: args.timeout.as_secs(),
+        max: args.max,
+    });
+    let result = connection.request(op).await;
+    let printed_ok = result.is_ok();
+    let exit_code = output::emit(result);
+    if printed_ok {
+        let _ = connection.ack().await;
+    }
+    exit_code
 }
 
 async fn send(socket: Option<&Path>, args: cli::SendArgs) -> Result<Value> {
