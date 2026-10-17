@@ -472,9 +472,7 @@ impl Irc for PapoIrc {
             request = request.reply_to(&MessageId::from(id));
         }
         let threaded = reply_to.is_some() && self.client.state().supports(Feature::Replies);
-        let sent = request
-            .await
-            .map_err(|error| Error::new(send_code(&error), error.to_string()))?;
+        let sent = request.await?;
         Ok(Sent {
             msgid: sent.id.map(|id| id.to_string()),
             threaded,
@@ -487,9 +485,7 @@ impl Irc for PapoIrc {
         } else {
             self.client.react(target, msgid, reaction)
         };
-        request
-            .await
-            .map_err(|error| Error::new(send_code(&error), error.to_string()))
+        Ok(request.await?)
     }
 
     async fn typing(&self, target: &str, state: Typing) -> Result<()> {
@@ -498,10 +494,7 @@ impl Irc for PapoIrc {
             Typing::Paused => papo::Typing::Paused,
             Typing::Done => papo::Typing::Done,
         };
-        self.client
-            .typing(target, state)
-            .await
-            .map_err(|error| Error::new(send_code(&error), error.to_string()))
+        Ok(self.client.typing(target, state).await?)
     }
 
     async fn history(&self, target: &str, query: HistoryQuery) -> Result<History> {
@@ -514,10 +507,7 @@ impl Irc for PapoIrc {
             (None, Some(before)) => history.before(before),
             (Some(after), Some(before)) => history.between(after, before),
         };
-        let page = request
-            .limit(query.limit)
-            .await
-            .map_err(|error| Error::new(send_code(&error), error.to_string()))?;
+        let page = request.limit(query.limit).await?;
         let state = self.client.state();
         Ok(History {
             events: page
@@ -529,10 +519,7 @@ impl Irc for PapoIrc {
     }
 
     async fn redact(&self, target: &str, msgid: &str, reason: &str) -> Result<()> {
-        self.client
-            .redact(target, msgid, reason)
-            .await
-            .map_err(|error| Error::new(send_code(&error), error.to_string()))
+        Ok(self.client.redact(target, msgid, reason).await?)
     }
 
     async fn quit(&self) {
@@ -545,14 +532,17 @@ fn flatten_for_action(text: &str) -> String {
     text.replace('\n', " ")
 }
 
-fn send_code(error: &papo::Error) -> Code {
-    match error {
-        papo::Error::Disconnected(_) => Code::NotConnected,
-        papo::Error::Timeout => Code::RequestTimeout,
-        papo::Error::Server(_) => Code::ServerError,
-        papo::Error::InvalidInput(_) => Code::Usage,
-        papo::Error::Unsupported(_) => Code::Unsupported,
-        _ => Code::Internal,
+impl From<papo::Error> for Error {
+    fn from(error: papo::Error) -> Self {
+        let code = match error {
+            papo::Error::Disconnected(_) => Code::NotConnected,
+            papo::Error::Timeout => Code::RequestTimeout,
+            papo::Error::Server(_) => Code::ServerError,
+            papo::Error::InvalidInput(_) => Code::Usage,
+            papo::Error::Unsupported(_) => Code::Unsupported,
+            _ => Code::Internal,
+        };
+        Self::new(code, error.to_string())
     }
 }
 
@@ -701,7 +691,7 @@ mod tests {
                 Code::Unsupported,
             ),
         ] {
-            assert_eq!(send_code(&error), code);
+            assert_eq!(Error::from(error).code, code);
         }
         let refused = papo::Error::Registration(RegistrationError::SaslUnavailable);
         assert_eq!(connect_code(&refused), Code::AuthFailed);
