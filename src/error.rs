@@ -10,14 +10,10 @@ pub enum Code {
     Usage,
     TooLong,
     NoSession,
-    AmbiguousSession,
     SessionExists,
     NotConnected,
     NotAllowed,
     BlockedSecret,
-    RateLimited,
-    Unsupported,
-    CursorExpired,
     AuthFailed,
     ConnectFailed,
     Tls,
@@ -31,12 +27,9 @@ impl Code {
         match self {
             Self::Internal | Self::VersionMismatch => 1,
             Self::Usage | Self::TooLong => 2,
-            Self::NoSession | Self::AmbiguousSession | Self::SessionExists => 3,
+            Self::NoSession | Self::SessionExists => 3,
             Self::NotConnected => 4,
             Self::NotAllowed | Self::BlockedSecret => 5,
-            Self::RateLimited => 6,
-            Self::Unsupported => 7,
-            Self::CursorExpired => 8,
             Self::AuthFailed | Self::ConnectFailed | Self::Tls => 9,
             Self::ServerError | Self::RequestTimeout => 10,
         }
@@ -49,8 +42,6 @@ pub struct Error {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry_after: Option<u64>,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -61,19 +52,12 @@ impl Error {
             code,
             message: message.into(),
             hint: None,
-            retry_after: None,
         }
     }
 
     #[must_use]
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_retry_after(mut self, seconds: u64) -> Self {
-        self.retry_after = Some(seconds);
         self
     }
 }
@@ -88,8 +72,6 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -102,15 +84,13 @@ mod tests {
             Code::NotConnected,
             "the connection to irc.weblounge.org dropped",
         )
-        .with_hint("retry after retry_after seconds, or run `louro status`")
-        .with_retry_after(4);
+        .with_hint("run `louro status`");
         assert_eq!(
             serde_json::to_value(&error).unwrap(),
             json!({
                 "code": "not_connected",
                 "message": "the connection to irc.weblounge.org dropped",
-                "hint": "retry after retry_after seconds, or run `louro status`",
-                "retry_after": 4
+                "hint": "run `louro status`"
             })
         );
 
@@ -123,11 +103,8 @@ mod tests {
 
     #[test]
     fn round_trips_through_json() {
-        let error = Error::new(
-            Code::CursorExpired,
-            "cursor k3f9.12 is older than the journal",
-        )
-        .with_hint("call `louro history`, then `louro wait` with no --after");
+        let error = Error::new(Code::NoSession, "could not reach louro")
+            .with_hint("ask your operator to start it");
         let json = serde_json::to_string(&error).unwrap();
         assert_eq!(serde_json::from_str::<Error>(&json).unwrap(), error);
     }
@@ -140,9 +117,6 @@ mod tests {
             (Code::SessionExists, 3),
             (Code::NotConnected, 4),
             (Code::BlockedSecret, 5),
-            (Code::RateLimited, 6),
-            (Code::Unsupported, 7),
-            (Code::CursorExpired, 8),
             (Code::Tls, 9),
             (Code::RequestTimeout, 10),
         ];
