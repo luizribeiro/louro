@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use papo::{
-    Account, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem, Message,
-    MessageId, MessageKind, RegistrationError, Sasl, Source, State, User,
+    Account, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem,
+    HistoryReference, Message, MessageId, MessageKind, RegistrationError, Sasl, Source, State,
+    User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -14,6 +15,7 @@ pub use papo::Secret;
 
 use crate::config::Server;
 use crate::error::{Code, Error, Result};
+use crate::text;
 
 const UPDATES_CAPACITY: usize = 256;
 const CTCP_VERSION: &str = concat!("louro ", env!("CARGO_PKG_VERSION"), " (papo)");
@@ -43,6 +45,9 @@ pub struct Incoming {
     pub mentions_me: bool,
     pub reply_to: Option<String>,
     pub origin: Origin,
+    /// Sent by the bot itself; only history has these.
+    #[serde(skip)]
+    pub from_me: bool,
 }
 
 /// Whether chat arrived as it was sent, or from the history papo fetches after a reconnect.
@@ -78,6 +83,20 @@ pub struct Outgoing {
     pub text: String,
     /// The msgid this message answers, sent as a reply tag.
     pub reply_to: Option<String>,
+}
+
+/// Which page of a conversation's history to fetch; `before` and `after` are msgids or
+/// RFC 3339 times, and with neither it is the latest `limit` messages.
+pub struct HistoryQuery {
+    pub limit: usize,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+pub struct History {
+    pub events: Vec<Incoming>,
+    /// The server has nothing older (or newer, for `after`) than this page.
+    pub complete: bool,
 }
 
 pub struct Sent {
@@ -118,6 +137,12 @@ pub trait Irc: Send + Sync + 'static {
         remove: bool,
     ) -> impl Future<Output = Result<()>> + Send;
     fn typing(&self, target: &str, state: Typing) -> impl Future<Output = Result<()>> + Send;
+    /// Fetches chat in `target`, a channel or the nick of a DM conversation, from the server.
+    fn history(
+        &self,
+        target: &str,
+        query: HistoryQuery,
+    ) -> impl Future<Output = Result<History>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
@@ -263,6 +288,21 @@ fn whole_seconds(delay: Duration) -> u64 {
 }
 
 fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
+    let private = state.is_me(message.target());
+    if !private && state.channel(message.target()).is_none() {
+        return None;
+    }
+    let incoming = chat(message, state, message.reply_target(), private)?;
+    let origin = chat_origin(message.origin(), incoming.from_me)?;
+    Some(Incoming { origin, ..incoming })
+}
+
+/// A history message in the conversation `target`, which the bot's own lines are part of.
+fn history_chat(message: &Message, state: &State, target: &str) -> Option<Incoming> {
+    chat(message, state, target, message.is_private())
+}
+
+fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option<Incoming> {
     let kind = chat_kind(message.kind())?;
     let nick = message.sender.as_ref().and_then(Source::nick)?;
     let from_me = state.is_me(nick)
@@ -270,16 +310,11 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
             .account()
             .zip(state.account())
             .is_some_and(|(sender, me)| state.casemapping().eq(sender, me));
-    let origin = chat_origin(message.origin(), from_me)?;
-    let private = state.is_me(message.target());
-    if !private && state.channel(message.target()).is_none() {
-        return None;
-    }
     Some(Incoming {
         kind,
         time: humantime::format_rfc3339_millis(message.time()).to_string(),
         msgid: message.id().map(ToString::to_string),
-        target: message.reply_target().to_owned(),
+        target: target.to_owned(),
         private,
         from: Sender {
             nick: nick.to_owned(),
@@ -293,8 +328,18 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
                 .to_lowercase()
                 .contains(&state.nick().to_lowercase()),
         reply_to: message.reply_to().map(str::to_owned),
-        origin,
+        origin: Origin::History,
+        from_me,
     })
+}
+
+/// An RFC 3339 time, else a msgid.
+fn history_reference(raw: &str) -> Result<HistoryReference> {
+    if let Ok(time) = humantime::parse_rfc3339_weak(raw) {
+        return Ok(time.into());
+    }
+    text::check_msgid(raw)?;
+    Ok(raw.into())
 }
 
 /// papo marks our own echoes and other sessions only on live messages, so history from this
@@ -403,6 +448,30 @@ impl Irc for PapoIrc {
             .map_err(|error| Error::new(send_code(&error), error.to_string()))
     }
 
+    async fn history(&self, target: &str, query: HistoryQuery) -> Result<History> {
+        let before = query.before.as_deref().map(history_reference).transpose()?;
+        let after = query.after.as_deref().map(history_reference).transpose()?;
+        let history = self.client.history(target);
+        let request = match (after, before) {
+            (None, None) => history.latest(query.limit),
+            (Some(after), None) => history.after(after),
+            (None, Some(before)) => history.before(before),
+            (Some(after), Some(before)) => history.between(after, before),
+        };
+        let page = request
+            .limit(query.limit)
+            .await
+            .map_err(|error| Error::new(send_code(&error), error.to_string()))?;
+        let state = self.client.state();
+        Ok(History {
+            events: page
+                .messages()
+                .filter_map(|message| history_chat(message, &state, target))
+                .collect(),
+            complete: page.end,
+        })
+    }
+
     async fn quit(&self) {
         let _ = self.client.quit("").await;
     }
@@ -442,6 +511,19 @@ mod tests {
         ] {
             assert_eq!(chat_origin(origin, from_me), forwarded, "{origin:?}");
         }
+    }
+
+    #[test]
+    fn a_history_reference_is_a_time_or_a_msgid() {
+        for raw in [
+            "2026-10-16T21:04:11Z",
+            "2026-10-16T21:04:11.392Z",
+            "4y8kq7j2c9mnz",
+        ] {
+            assert!(history_reference(raw).is_ok(), "{raw}");
+        }
+        let error = history_reference("4y8k q7j2").err().unwrap();
+        assert_eq!(error.code, Code::Usage);
     }
 
     #[test]

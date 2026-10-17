@@ -294,6 +294,33 @@ with subtest("typing shows in #bots as a +typing tag"):
     refused("not_allowed", "typing", "#lounge", "active")
     stop()
 
+with subtest("history returns earlier chat in #bots and DMs, the bot's own lines too"):
+    start(grants(dm_read=["luiz"], dm_send=["$first"]))
+    for text in ["history one", "history two"]:
+        send_raw("luiz", f"PRIVMSG #bots :{text}")
+    events_until(from_nick("luiz", "history two"))
+    louro("send", "#bots", "history three")
+
+    def texts(page):
+        return [event["text"] for event in page["events"]]
+
+    page = louro_until(lambda page: "history three" in texts(page), "history", "#bots")
+    assert texts(page)[-3:] == ["history one", "history two", "history three"], page
+    assert all(event["origin"] == "history" and event["untrusted"] for event in page["events"])
+    assert "untrusted" in page["notice"], page
+    [two] = [event for event in page["events"] if event["text"] == "history two"]
+    before = louro("history", "#bots", "--before", two["msgid"], "--latest", "1")
+    assert texts(before) == ["history one"], before
+    send_raw("luiz", "PRIVMSG louro :a dm for the record")
+    events_until(from_nick("luiz", "a dm for the record"))
+    louro("send", "luiz", "noted, privately")
+    page = louro_until(lambda page: "noted, privately" in texts(page), "history", "luiz")
+    assert texts(page)[-2:] == ["a dm for the record", "noted, privately"], page
+    assert all(event["target"] == "luiz" and event["private"] for event in page["events"]), page
+    refused("not_allowed", "history", "#lounge")
+    refused("not_allowed", "history", "mallory")
+    stop()
+
 with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):
     start(grants(dm_read=["account:luiz"], dm_send=["$first"]))
     refused("not_allowed", "send", "luiz", "hi")

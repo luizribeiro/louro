@@ -55,6 +55,12 @@ pub enum Op {
         target: String,
         state: Typing,
     },
+    History {
+        target: String,
+        limit: usize,
+        before: Option<String>,
+        after: Option<String>,
+    },
     Quit {},
 }
 

@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::Subcommand;
 
 pub mod connect;
+mod history;
 mod names;
 mod quit;
 mod react;
@@ -24,6 +25,8 @@ pub enum Command {
     React(react::Args),
     /// Show that the bot is typing
     Typing(typing::Args),
+    /// Earlier chat in a channel or DM, from the server
+    History(history::Args),
     /// Members of a channel the bot is in
     Names(names::Args),
     /// Disconnect and stop the daemon
@@ -39,6 +42,7 @@ pub async fn dispatch(command: Command, socket: Option<&Path>) -> ExitCode {
         Command::Send(args) => args.run(socket).await,
         Command::React(args) => args.run(socket).await,
         Command::Typing(args) => args.run(socket).await,
+        Command::History(args) => args.run(socket).await,
         Command::Names(args) => args.run(socket).await,
         Command::Quit(args) => args.run(socket).await,
         Command::Connect(args) => args.run(socket).await,

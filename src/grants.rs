@@ -79,6 +79,24 @@ impl Grants {
         Err(not_allowed(format!("{name} does not grant {target}")))
     }
 
+    /// A channel's history needs `irc.join`; a DM conversation's needs `irc.dm.read` for the nick.
+    pub fn check_history(&self, target: &str, dm: &DmHistory) -> Result<()> {
+        match target_kind(target)? {
+            TargetKind::Channel => self.check_join(target),
+            TargetKind::Nick => {
+                if self
+                    .irc
+                    .dm
+                    .read
+                    .matches_sender(target, dm.account.as_deref())
+                {
+                    return Ok(());
+                }
+                Err(not_allowed(format!("irc.dm.read does not grant {target}")))
+            }
+        }
+    }
+
     /// Reading what a channel holds, like its members, needs `irc.join`.
     pub fn check_join(&self, channel: &str) -> Result<()> {
         if self.irc.join.matches(channel) {
@@ -135,8 +153,12 @@ fn target_kind(target: &str) -> Result<TargetKind> {
             "{target} is a status message to a channel, not a nick"
         )));
     }
-    // `$` starts a server mask, and keeps `$first` from naming a nick.
-    if target.starts_with([':', '$']) {
+    // `$` starts a server mask, and keeps `$first` from naming a nick. A space would split the
+    // target into more IRC parameters where papo doesn't check it, as in CHATHISTORY.
+    if target.is_empty()
+        || target.starts_with([':', '$'])
+        || target.contains(|c: char| c.is_whitespace() || c.is_control())
+    {
         return Err(not_allowed(format!(
             "{target} is not a valid message target"
         )));
@@ -188,6 +210,7 @@ mod tests {
             mentions_me: true,
             reply_to: None,
             origin: Origin::Live,
+            from_me: false,
         }
     }
 
@@ -253,6 +276,9 @@ mod tests {
             "%#lounge",
             ":evil",
             "$*.weblounge.org",
+            "#bots extra",
+            "",
+            "maria\r\nQUIT",
         ] {
             let error = send(&grants, target, true).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
@@ -365,6 +391,32 @@ mod tests {
         assert!(grants.check_typing("#bots", &dm).is_ok());
         for target in ["#lounge", "#ops", "luiz"] {
             let error = grants.check_typing(target, &dm).unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{target}");
+        }
+    }
+
+    #[test]
+    fn reads_history_of_joined_channels_and_dm_read_conversations() {
+        let grants = grants(
+            r##"
+            irc.join = ["#bots"]
+            irc.dm.read = ["maria", "account:luiz"]
+            "##,
+        );
+        let luiz = DmHistory {
+            first: true,
+            account: Some("luiz".into()),
+        };
+        let unknown = DmHistory::default();
+        for (target, dm) in [("#BOTS", &unknown), ("maria", &unknown), ("lz", &luiz)] {
+            assert!(grants.check_history(target, dm).is_ok(), "{target}");
+        }
+        for (target, dm) in [
+            ("#lounge", &unknown),
+            ("lz", &unknown),
+            ("#bots,#ops", &unknown),
+        ] {
+            let error = grants.check_history(target, dm).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
     }

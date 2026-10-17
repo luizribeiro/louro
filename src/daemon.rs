@@ -18,8 +18,11 @@ use tokio::sync::{Notify, mpsc};
 use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
-use crate::inbox::{Connection, ConnectionState, Inbox};
-use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Member, Secret, Sender, Typing, Update};
+use crate::inbox::{Connection, ConnectionState, Inbox, NOTICE};
+use crate::irc::{
+    self, History, HistoryQuery, Incoming, Irc, IrcStatus, Kind, Member, Secret, Sender, Typing,
+    Update,
+};
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 use crate::text;
@@ -32,6 +35,9 @@ struct DmSender {
     first_account: Option<String>,
     changed_account: bool,
 }
+
+/// The most a `history` call returns, and Ergo's default page size.
+const MAX_HISTORY: usize = 100;
 
 /// The most recent thing that went wrong with the connection, for `status`.
 #[derive(Serialize)]
@@ -327,6 +333,19 @@ impl<I: Irc> Daemon<I> {
             Ok(Op::Typing { target, state }) => {
                 reply(conn, self.typing(&target, state).await).await
             }
+            Ok(Op::History {
+                target,
+                limit,
+                before,
+                after,
+            }) => {
+                let query = HistoryQuery {
+                    limit,
+                    before,
+                    after,
+                };
+                reply(conn, self.history(&target, query).await).await
+            }
             Ok(Op::Quit {}) => {
                 let allowed = self.grants.check_quit();
                 let quitting = allowed.is_ok();
@@ -385,6 +404,28 @@ impl<I: Irc> Daemon<I> {
         self.grants.check_react(target, msgid, reaction, &dm)?;
         self.irc.react(target, msgid, reaction, remove).await?;
         Ok(json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove}))
+    }
+
+    /// Never touches the inbox, so `wait`'s cursor stays where it was.
+    async fn history(&self, target: &str, query: HistoryQuery) -> Result<Value> {
+        self.grants
+            .check_history(target, &self.dm_history(target))?;
+        let query = HistoryQuery {
+            limit: query.limit.clamp(1, MAX_HISTORY),
+            ..query
+        };
+        let History { events, complete } = self.irc.history(target, query).await?;
+        let events: Vec<_> = events
+            .into_iter()
+            .filter(|incoming| incoming.from_me || self.grants.may_read(incoming))
+            .map(Inbox::sanitized)
+            .collect();
+        Ok(json!({
+            "target": target,
+            "complete": complete,
+            "notice": NOTICE,
+            "events": events,
+        }))
     }
 
     async fn typing(&self, target: &str, state: Typing) -> Result<Value> {
@@ -453,7 +494,6 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::inbox::NOTICE;
     use crate::irc::{Origin, Outgoing, Sender, Sent};
 
     fn from_maria(text: &str) -> Incoming {
@@ -472,6 +512,7 @@ mod tests {
             mentions_me: true,
             reply_to: None,
             origin: Origin::Live,
+            from_me: false,
         }
     }
 
@@ -530,6 +571,7 @@ mod tests {
         /// Whether each reaction asked for was a removal.
         reactions: Mutex<Vec<bool>>,
         typing: Mutex<Vec<Typing>>,
+        history_limits: Mutex<Vec<usize>>,
         quit: Notify,
     }
 
@@ -586,6 +628,38 @@ mod tests {
         fn typing(&self, _target: &str, state: Typing) -> impl Future<Output = Result<()>> + Send {
             self.typing.lock().unwrap().push(state);
             future::ready(Ok(()))
+        }
+
+        fn history(
+            &self,
+            _target: &str,
+            query: HistoryQuery,
+        ) -> impl Future<Output = Result<History>> + Send {
+            self.history_limits.lock().unwrap().push(query.limit);
+            let history = |incoming| Incoming {
+                origin: Origin::History,
+                ..incoming
+            };
+            let own = Incoming {
+                from: Sender {
+                    nick: "louro".into(),
+                    account: Some("louro".into()),
+                    bot: true,
+                },
+                from_me: true,
+                ..from_maria("it's in ergo.yaml")
+            };
+            future::ready(Ok(History {
+                events: vec![
+                    history(from_maria("louro\0: where is that set?")),
+                    history(own),
+                    history(Incoming {
+                        target: "#ops".into(),
+                        ..from_joao("not for you")
+                    }),
+                ],
+                complete: true,
+            }))
         }
 
         async fn quit(&self) {
@@ -995,6 +1069,49 @@ mod tests {
             *daemon.irc.typing.lock().unwrap(),
             [Typing::Active, Typing::Done]
         );
+    }
+
+    fn history_request(target: &str, limit: usize) -> Value {
+        json!({"v": 1, "op": "history", "args": {"target": target, "limit": limit}})
+    }
+
+    #[tokio::test]
+    async fn history_returns_sanitized_untrusted_chat_including_the_bots_own() {
+        let daemon = launch(grants());
+        let reply = daemon.call(history_request("#bots", 20)).await;
+        assert_eq!(reply["Ok"]["notice"], NOTICE);
+        assert_eq!(reply["Ok"]["complete"], true);
+        assert_eq!(
+            texts(&reply),
+            ["louro: where is that set?", "it's in ergo.yaml"]
+        );
+        let events = reply["Ok"]["events"].as_array().unwrap();
+        assert!(events.iter().all(|event| event["origin"] == "history"));
+        assert!(events.iter().all(|event| event["untrusted"] == true));
+        assert!(events.iter().all(|event| event.get("from_me").is_none()));
+    }
+
+    #[tokio::test]
+    async fn history_caps_the_page_and_needs_a_read_grant() {
+        let daemon = launch(grants());
+        for limit in [0, 500] {
+            daemon.call(history_request("#bots", limit)).await;
+        }
+        assert_eq!(*daemon.irc.history_limits.lock().unwrap(), [1, 100]);
+        for target in ["#ops", "joao"] {
+            let reply = daemon.call(history_request(target, 20)).await;
+            assert_eq!(reply["Err"]["code"], "not_allowed", "{target}");
+        }
+        assert!(daemon.call(history_request("maria", 20)).await["Ok"].is_object());
+    }
+
+    #[tokio::test]
+    async fn history_leaves_the_wait_cursor_alone() {
+        let daemon = launch(grants());
+        daemon.say(from_maria("louro: still there?")).await;
+        daemon.call(history_request("#bots", 20)).await;
+        let (_, reply) = daemon.wait(5).await;
+        assert_eq!(texts(&reply), ["louro: still there?"]);
     }
 
     #[tokio::test]

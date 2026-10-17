@@ -159,6 +159,11 @@ impl Inbox {
         self.buffer().ack(cursor);
     }
 
+    /// Chat that never enters the inbox, like `history`, sanitized and marked as `wait`'s is.
+    pub fn sanitized(incoming: Incoming) -> impl Serialize {
+        Body::chat(incoming)
+    }
+
     fn buffer(&self) -> MutexGuard<'_, Buffer> {
         self.buffer
             .lock()
@@ -190,6 +195,7 @@ mod tests {
             mentions_me: true,
             reply_to: None,
             origin: Origin::Live,
+            from_me: false,
         }
     }
 
