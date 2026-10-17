@@ -137,9 +137,7 @@ impl Inbox {
     }
 
     async fn wait(&self, args: &WaitArgs) -> Batch {
-        let deadline = args
-            .timeout_secs
-            .and_then(|secs| Instant::now().checked_add(Duration::from_secs(secs)));
+        let deadline = Instant::now().checked_add(Duration::from_secs(args.timeout_secs));
         loop {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
@@ -509,7 +507,7 @@ mod tests {
         }
     }
 
-    fn wait_args(timeout_secs: Option<u64>, max: usize) -> WaitArgs {
+    fn wait_args(timeout_secs: u64, max: usize) -> WaitArgs {
         WaitArgs {
             timeout_secs,
             max: NonZeroUsize::new(max).unwrap(),
@@ -590,7 +588,7 @@ mod tests {
         let inbox = Arc::new(Inbox::default());
         let waiter = tokio::spawn({
             let inbox = Arc::clone(&inbox);
-            async move { inbox.wait(&wait_args(Some(60), 20)).await }
+            async move { inbox.wait(&wait_args(60, 20)).await }
         });
         time::sleep(Duration::from_secs(5)).await;
         inbox.push(from_maria("louro: does ergo support chathistory for DMs?"));
@@ -607,7 +605,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_quiet_channel_times_out_successfully() {
-        let batch = Inbox::default().wait(&wait_args(Some(60), 20)).await;
+        let batch = Inbox::default().wait(&wait_args(60, 20)).await;
         assert_eq!(
             serde_json::to_value(&batch).unwrap(),
             json!({
@@ -623,10 +621,10 @@ mod tests {
     #[tokio::test]
     async fn a_zero_timeout_polls() {
         let inbox = Inbox::default();
-        assert!(inbox.wait(&wait_args(Some(0), 20)).await.timed_out);
+        assert!(inbox.wait(&wait_args(0, 20)).await.timed_out);
 
         inbox.push(from_joao("it does, it's a config option"));
-        let batch = inbox.wait(&wait_args(Some(0), 20)).await;
+        let batch = inbox.wait(&wait_args(0, 20)).await;
         assert!(!batch.timed_out);
         assert_eq!(ids(&batch), [1]);
     }
@@ -636,7 +634,7 @@ mod tests {
         let inbox = Arc::new(Inbox::default());
         let waiter = tokio::spawn({
             let inbox = Arc::clone(&inbox);
-            async move { inbox.wait(&wait_args(Some(u64::MAX), 20)).await }
+            async move { inbox.wait(&wait_args(u64::MAX, 20)).await }
         });
         time::sleep(Duration::from_secs(3600)).await;
         inbox.push(from_maria("louro: still there?"));
@@ -649,18 +647,18 @@ mod tests {
         inbox.push(from_maria("louro: does ergo support chathistory for DMs?"));
         inbox.push(from_joao("it does, it's a config option"));
 
-        let unacked = inbox.wait(&wait_args(Some(0), 20)).await;
+        let unacked = inbox.wait(&wait_args(0, 20)).await;
         assert_eq!(ids(&unacked), [1, 2]);
-        let again = inbox.wait(&wait_args(Some(0), 20)).await;
+        let again = inbox.wait(&wait_args(0, 20)).await;
         assert_eq!(ids(&again), [1, 2]);
 
         inbox.push(from_maria("louro: which config option?"));
         inbox.ack(again.cursor);
-        let after_ack = inbox.wait(&wait_args(Some(0), 20)).await;
+        let after_ack = inbox.wait(&wait_args(0, 20)).await;
         assert_eq!(ids(&after_ack), [3]);
 
         inbox.ack(after_ack.cursor);
-        let drained = inbox.wait(&wait_args(Some(0), 20)).await;
+        let drained = inbox.wait(&wait_args(0, 20)).await;
         assert!(drained.timed_out);
         assert_eq!(drained.cursor, 3);
     }
@@ -672,13 +670,13 @@ mod tests {
         inbox.push(from_joao("it does, it's a config option"));
         inbox.push(from_maria("louro: which one?"));
 
-        let first = inbox.wait(&wait_args(Some(0), 2)).await;
+        let first = inbox.wait(&wait_args(0, 2)).await;
         assert_eq!(ids(&first), [1, 2]);
         assert!(first.more);
         assert_eq!(first.cursor, 2);
 
         inbox.ack(first.cursor);
-        let rest = inbox.wait(&wait_args(Some(0), 2)).await;
+        let rest = inbox.wait(&wait_args(0, 2)).await;
         assert_eq!(ids(&rest), [3]);
         assert!(!rest.more);
     }
@@ -689,7 +687,7 @@ mod tests {
         for n in 0..BUFFER_CAP + 5 {
             inbox.push(from_joao(&format!("spam {n}")));
         }
-        let batch = inbox.wait(&wait_args(Some(0), 1)).await;
+        let batch = inbox.wait(&wait_args(0, 1)).await;
         assert_eq!(ids(&batch), [6]);
         assert!(batch.more);
     }
@@ -1039,7 +1037,7 @@ mod tests {
         };
         daemon.ingest(from_maria_dm("hey, got a sec?"));
 
-        let batch = daemon.inbox.wait(&wait_args(Some(0), 20)).await;
+        let batch = daemon.inbox.wait(&wait_args(0, 20)).await;
         assert_eq!(ids(&batch), [1]);
     }
 

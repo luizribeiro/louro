@@ -49,7 +49,7 @@ async fn wait(socket: Option<&Path>, args: cli::WaitArgs) -> ExitCode {
         Err(err) => return output::emit::<()>(Err(err)),
     };
     let op = Op::Wait(WaitArgs {
-        timeout_secs: args.timeout.as_secs(),
+        timeout_secs: args.timeout,
         max: args.max,
     });
     let result = connection.request(op).await;

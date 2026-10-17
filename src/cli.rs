@@ -73,28 +73,12 @@ pub enum Command {
     Connect(ConnectArgs),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timeout {
-    Secs(u64),
-    None,
-}
-
-impl Timeout {
-    #[must_use]
-    pub const fn as_secs(self) -> Option<u64> {
-        match self {
-            Self::Secs(secs) => Some(secs),
-            Self::None => None,
-        }
-    }
-}
-
-fn parse_timeout(raw: &str) -> Result<Timeout, String> {
+/// `none` is `u64::MAX` seconds, past any `Instant`, so the daemon sets no deadline.
+fn parse_timeout(raw: &str) -> Result<u64, String> {
     if raw == "none" {
-        return Ok(Timeout::None);
+        return Ok(u64::MAX);
     }
     raw.parse()
-        .map(Timeout::Secs)
         .map_err(|_| format!("expected a number of seconds or `none`, got `{raw}`"))
 }
 
@@ -102,7 +86,7 @@ fn parse_timeout(raw: &str) -> Result<Timeout, String> {
 pub struct WaitArgs {
     /// Seconds to block for, or `none` to wait forever; `0` polls
     #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]
-    pub timeout: Timeout,
+    pub timeout: u64,
     /// Maximum number of events to return
     #[arg(long, default_value = "20", value_name = "N")]
     pub max: NonZeroUsize,
@@ -189,20 +173,20 @@ mod tests {
         let Some(Command::Wait(args)) = cli.command else {
             panic!("expected wait");
         };
-        assert_eq!(args.timeout.as_secs(), Some(5));
+        assert_eq!(args.timeout, 5);
         assert_eq!(args.max.get(), 20);
 
         let cli = Cli::try_parse_from(["louro", "wait", "--timeout", "0"]).unwrap();
         let Some(Command::Wait(args)) = cli.command else {
             panic!("expected wait");
         };
-        assert_eq!(args.timeout.as_secs(), Some(0));
+        assert_eq!(args.timeout, 0);
 
         let cli = Cli::try_parse_from(["louro", "wait", "--timeout", "none"]).unwrap();
         let Some(Command::Wait(args)) = cli.command else {
             panic!("expected wait");
         };
-        assert_eq!(args.timeout.as_secs(), None);
+        assert_eq!(args.timeout, u64::MAX);
     }
 
     #[test]
@@ -211,7 +195,7 @@ mod tests {
         let Some(Command::Wait(args)) = cli.command else {
             panic!("expected wait");
         };
-        assert_eq!(args.timeout.as_secs(), Some(60));
+        assert_eq!(args.timeout, 60);
     }
 
     #[test]

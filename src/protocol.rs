@@ -31,7 +31,7 @@ pub enum Op {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WaitArgs {
-    pub timeout_secs: Option<u64>,
+    pub timeout_secs: u64,
     pub max: NonZeroUsize,
 }
 
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(
             parse(json!({"v": 1, "op": "wait", "args": {"timeout_secs": 60, "max": 5}})).op,
             Op::Wait(WaitArgs {
-                timeout_secs: Some(60),
+                timeout_secs: 60,
                 max: NonZeroUsize::new(5).unwrap()
             })
         );
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn serializes_requests_in_the_wire_shape() {
         let request = Request::new(Op::Wait(WaitArgs {
-            timeout_secs: Some(0),
+            timeout_secs: 0,
             max: NonZeroUsize::new(20).unwrap(),
         }));
         assert_eq!(
