@@ -44,11 +44,7 @@ impl Args {
             Err(err) => return output::emit::<()>(Err(err)),
         };
         if is_running(config.server.socket.as_deref()).await {
-            return output::emit::<()>(Err(Error::new(
-                Code::SessionExists,
-                "louro is already running",
-            )
-            .with_hint("run `louro quit` first")));
+            return output::emit::<()>(Err(daemon::already_running()));
         }
         if self.foreground {
             foreground(self.password_stdin, config).await
