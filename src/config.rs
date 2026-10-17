@@ -80,7 +80,8 @@ pub struct Dm {
 }
 
 /// `true` for everyone, or a list of names, each matched case-insensitively and allowed one
-/// trailing `*`.
+/// trailing `*`. In a DM selector (see [`Selector::matches_sender`]), an entry can also be
+/// `account:NAME` to match the sender's logged-in account instead of their nick.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged, expecting = "true, false, or a list of names")]
 pub enum Selector {
@@ -100,6 +101,20 @@ impl Selector {
             Self::All(all) => *all,
             Self::Only(patterns) => patterns.iter().any(|pattern| glob_matches(pattern, name)),
         }
+    }
+
+    /// Like `matches`, but an `account:NAME` entry matches only a sender logged into that
+    /// account (case-insensitively, no glob); other entries keep matching `nick`, as `matches`
+    /// does. A sender with no account never matches an `account:` entry.
+    pub fn matches_sender(&self, nick: &str, account: Option<&str>) -> bool {
+        let by_account = account.is_some_and(|account| {
+            matches!(self, Self::Only(patterns) if patterns.iter().any(|pattern| {
+                pattern
+                    .strip_prefix("account:")
+                    .is_some_and(|wanted| wanted.eq_ignore_ascii_case(account))
+            }))
+        });
+        by_account || self.matches(nick)
     }
 }
 
@@ -276,6 +291,25 @@ mod tests {
             refusal(&text),
             "#* is in irc.send but not granted by irc.join"
         );
+    }
+
+    #[test]
+    fn account_selectors_match_only_a_sender_logged_into_that_account() {
+        let selector = Selector::Only(vec!["account:luiz".into()]);
+        for (nick, account, matches) in [
+            ("lz", Some("luiz"), true),
+            ("lz", Some("Luiz"), true),
+            ("luiz", None, false),
+            ("luiz", Some("mallory"), false),
+        ] {
+            assert_eq!(
+                selector.matches_sender(nick, account),
+                matches,
+                "{nick} ({account:?})"
+            );
+        }
+        let bare = Selector::Only(vec!["maria".into()]);
+        assert!(bare.matches_sender("maria", Some("mallory")));
     }
 
     #[test]

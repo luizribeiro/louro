@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
@@ -13,11 +14,21 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
+use crate::grants::DmHistory;
 use crate::inbox::Inbox;
-use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret};
+use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret, Sender};
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 use crate::text;
+
+/// What's known about DMs received from one nick: its account at the first DM, if any, and
+/// whether a later DM from it carried a different one (the nick may have changed hands). Once
+/// set, `changed_account` stays set for the rest of the daemon's run.
+#[derive(Default)]
+struct DmSender {
+    first_account: Option<String>,
+    changed_account: bool,
+}
 
 struct Daemon<I> {
     grants: Grants,
@@ -25,8 +36,8 @@ struct Daemon<I> {
     password: Option<Secret>,
     irc: I,
     inbox: Inbox,
-    /// Lowercased nicks whose DM reached the agent, for `$first` in `irc.dm.send`.
-    dm_senders: Mutex<HashSet<String>>,
+    /// Lowercased nicks whose DM reached the agent, for `irc.dm.send`'s `$first` and `account:`.
+    dm_senders: Mutex<HashMap<String, DmSender>>,
     quit: Notify,
 }
 
@@ -120,13 +131,48 @@ impl<I: Irc> Daemon<I> {
             return;
         }
         if incoming.private {
-            self.dm_senders()
-                .insert(incoming.from.nick.to_ascii_lowercase());
+            self.record_dm_sender(&incoming.from);
         }
         self.inbox.push(incoming);
     }
 
-    fn dm_senders(&self) -> MutexGuard<'_, HashSet<String>> {
+    fn record_dm_sender(&self, from: &Sender) {
+        let nick = from.nick.to_ascii_lowercase();
+        let account = from
+            .account
+            .as_ref()
+            .map(|account| account.to_ascii_lowercase());
+        match self.dm_senders().entry(nick) {
+            Entry::Occupied(mut sender) => {
+                let sender = sender.get_mut();
+                if sender.first_account.is_some() && sender.first_account != account {
+                    sender.changed_account = true;
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(DmSender {
+                    first_account: account,
+                    changed_account: false,
+                });
+            }
+        }
+    }
+
+    /// What's known about DMs from `target`, for `$first` and `account:` entries in
+    /// `irc.dm.send`.
+    fn dm_history(&self, target: &str) -> DmHistory {
+        match self.dm_senders().get(&target.to_ascii_lowercase()) {
+            None => DmHistory::default(),
+            Some(sender) => DmHistory {
+                first: sender.first_account.is_none() || !sender.changed_account,
+                account: (!sender.changed_account)
+                    .then(|| sender.first_account.clone())
+                    .flatten(),
+            },
+        }
+    }
+
+    fn dm_senders(&self) -> MutexGuard<'_, HashMap<String, DmSender>> {
         self.dm_senders
             .lock()
             .expect("no code panics while holding the DM senders lock")
@@ -181,8 +227,8 @@ impl<I: Irc> Daemon<I> {
 
     async fn send(&self, target: String, text: String, kind: Kind) -> Result<Value> {
         text::check_secret(self.password.as_ref(), &text)?;
-        let dm_received = self.dm_senders().contains(&target.to_ascii_lowercase());
-        let message = self.grants.check_send(target, &text, kind, dm_received)?;
+        let dm = self.dm_history(&target);
+        let message = self.grants.check_send(target, &text, kind, &dm)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let msgid = self.irc.send(message).await?;
         Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
@@ -523,6 +569,50 @@ mod tests {
         assert_eq!(texts(&reply), ["louro, got a sec?"]);
         let after = daemon.call(send_request("Maria", "sure, what's up?")).await;
         assert_eq!(after["Ok"]["target"], "Maria");
+    }
+
+    #[tokio::test]
+    async fn first_refuses_a_send_once_a_different_account_holds_the_nick() {
+        let daemon = launch(grants());
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.wait(5).await;
+        let before = daemon.call(send_request("luiz", "sure")).await;
+        assert_eq!(before["Ok"]["target"], "luiz");
+
+        let hijacked = Incoming {
+            from: Sender {
+                nick: "luiz".into(),
+                account: Some("mallory".into()),
+                bot: false,
+            },
+            ..dm(from_luiz("it's still me, luiz"))
+        };
+        daemon.say(hijacked).await;
+        daemon.wait(5).await;
+
+        let after = daemon.call(send_request("luiz", "sure")).await;
+        assert_eq!(after["Err"]["code"], "not_allowed");
+    }
+
+    #[tokio::test]
+    async fn first_still_works_once_an_accountless_sender_logs_in() {
+        let daemon = launch(grants());
+        let first_without_account = Incoming {
+            from: Sender {
+                nick: "maria".into(),
+                account: None,
+                bot: false,
+            },
+            ..dm(from_maria("hey, got a sec?"))
+        };
+        daemon.say(first_without_account).await;
+        daemon.wait(5).await;
+
+        daemon.say(dm(from_maria("it's me, logged in now"))).await;
+        daemon.wait(5).await;
+
+        let reply = daemon.call(send_request("maria", "sure")).await;
+        assert_eq!(reply["Ok"]["target"], "maria");
     }
 
     #[tokio::test]

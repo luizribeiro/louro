@@ -8,25 +8,38 @@ use crate::text;
 /// In `irc.dm.send`: anyone whose DM the daemon has received.
 const FIRST: &str = "$first";
 
+/// What the daemon knows about DMs received from a target nick, for `irc.dm.send`'s `$first`
+/// and `account:` entries. Both come from the same nick→account bookkeeping (see `daemon.rs`).
+#[derive(Default)]
+pub struct DmHistory {
+    /// The nick has sent the bot a DM and, if that DM carried an account, every DM from it since
+    /// has carried the same one: `$first` may still name it.
+    pub first: bool,
+    /// The nick's account, known only while every DM from it has carried the same one.
+    pub account: Option<String>,
+}
+
 impl Grants {
     /// Channel chat only from `irc.join` channels, DMs only from `irc.dm.read` senders.
     pub fn may_read(&self, incoming: &Incoming) -> bool {
         if incoming.private {
-            self.irc.dm.read.matches(&incoming.from.nick)
+            self.irc
+                .dm
+                .read
+                .matches_sender(&incoming.from.nick, incoming.from.account.as_deref())
         } else {
             self.irc.join.matches(&incoming.target)
         }
     }
 
-    /// `dm_received` says whether `target` has sent the bot a DM, for `$first`.
     pub fn check_send(
         &self,
         target: String,
         text: &str,
         kind: Kind,
-        dm_received: bool,
+        dm: &DmHistory,
     ) -> Result<Outgoing> {
-        self.check_target(&target, dm_received)?;
+        self.check_target(&target, dm)?;
         Ok(Outgoing {
             text: text::clean_lines(text)?,
             target,
@@ -42,7 +55,7 @@ impl Grants {
             .with_hint("the operator stops louro"))
     }
 
-    fn check_target(&self, target: &str, dm_received: bool) -> Result<()> {
+    fn check_target(&self, target: &str, dm: &DmHistory) -> Result<()> {
         // `PRIVMSG maria,#lounge` would also reach a target no grant covers.
         if target.contains(',') {
             return Err(not_allowed("send to one target at a time"));
@@ -65,7 +78,9 @@ impl Grants {
             )));
         }
         let dm_send = &self.irc.dm.send;
-        if !(dm_send.matches(target) || dm_received && dm_send.matches(FIRST)) {
+        let allowed = dm_send.matches_sender(target, dm.account.as_deref())
+            || dm.first && dm_send.matches(FIRST);
+        if !allowed {
             return Err(not_allowed(format!("irc.dm.send does not grant {target}")));
         }
         Ok(())
@@ -97,6 +112,10 @@ mod tests {
     }
 
     fn incoming(target: &str, nick: &str, private: bool) -> Incoming {
+        incoming_as(target, nick, None, private)
+    }
+
+    fn incoming_as(target: &str, nick: &str, account: Option<&str>, private: bool) -> Incoming {
         Incoming {
             kind: Kind::Message,
             time: "2026-10-16T21:04:11.392Z".into(),
@@ -105,7 +124,7 @@ mod tests {
             private,
             from: Sender {
                 nick: nick.into(),
-                account: None,
+                account: account.map(String::from),
                 bot: false,
             },
             text: "louro: ping".into(),
@@ -115,7 +134,18 @@ mod tests {
     }
 
     fn send(grants: &Grants, target: &str, dm_received: bool) -> Result<Outgoing> {
-        grants.check_send(target.into(), "hi", Kind::Message, dm_received)
+        send_as(
+            grants,
+            target,
+            &DmHistory {
+                first: dm_received,
+                account: None,
+            },
+        )
+    }
+
+    fn send_as(grants: &Grants, target: &str, dm: &DmHistory) -> Result<Outgoing> {
+        grants.check_send(target.into(), "hi", Kind::Message, dm)
     }
 
     #[test]
@@ -169,6 +199,54 @@ mod tests {
             let error = send(&grants, target, true).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
+    }
+
+    #[test]
+    fn dm_read_accepts_account_selectors() {
+        let grants = grants(r#"irc.dm.read = ["account:luiz"]"#);
+        for (nick, account, readable) in [
+            ("lz", Some("luiz"), true),
+            ("luiz", None, false),
+            ("luiz", Some("mallory"), false),
+        ] {
+            let event = incoming_as("louro", nick, account, true);
+            assert_eq!(grants.may_read(&event), readable, "{nick} ({account:?})");
+        }
+    }
+
+    #[test]
+    fn dm_send_accepts_account_selectors_for_the_senders_known_account() {
+        let grants = grants(r#"irc.dm.send = ["account:luiz"]"#);
+        for (account, allowed) in [
+            (Some("luiz"), true),
+            (Some("mallory"), false),
+            (None, false),
+        ] {
+            let dm = DmHistory {
+                first: false,
+                account: account.map(String::from),
+            };
+            assert_eq!(send_as(&grants, "lz", &dm).is_ok(), allowed, "{account:?}");
+        }
+    }
+
+    #[test]
+    fn first_with_an_account_refuses_once_the_nick_no_longer_maps_to_it() {
+        let grants = grants(r#"irc.dm.send = ["$first"]"#);
+        let still_luiz = DmHistory {
+            first: true,
+            account: Some("luiz".into()),
+        };
+        assert!(send_as(&grants, "luiz", &still_luiz).is_ok());
+
+        let changed_hands = DmHistory {
+            first: false,
+            account: None,
+        };
+        assert_eq!(
+            send_as(&grants, "luiz", &changed_hands).unwrap_err().code,
+            Code::NotAllowed
+        );
     }
 
     #[test]
