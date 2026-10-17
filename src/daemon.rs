@@ -383,10 +383,7 @@ impl<I: Irc> Daemon<I> {
         let op = match read_line::<Value>(conn).await {
             Ok(Some(request)) => parse_request(request),
             Ok(None) => return Ok(()),
-            Err(error) if is_malformed(&error) => {
-                Err(Error::new(Code::Usage, "the request is not a JSON line"))
-            }
-            Err(error) => return Err(error),
+            Err(_) => Err(Error::new(Code::Usage, "the request is not a JSON line")),
         };
         match op {
             Err(error) => reply(conn, Err::<(), _>(error)).await,
@@ -443,13 +440,6 @@ fn parse_request(request: Value) -> Result<Op> {
     serde_json::from_value::<Request>(request)
         .map(|request| request.op)
         .map_err(|error| Error::new(Code::Usage, format!("bad request: {error}")))
-}
-
-fn is_malformed(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
-    )
 }
 
 async fn reply(conn: &mut BufReader<UnixStream>, result: Result<impl Serialize>) -> io::Result<()> {
