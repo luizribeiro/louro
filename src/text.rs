@@ -1,0 +1,96 @@
+//! Hygiene for chat text: sanitizing and capping inbound text, cleaning outbound text, and
+//! blocking the bot's password from being sent.
+
+use crate::error::{Code, Error, Result};
+use crate::irc::Secret;
+
+pub const MAX_TEXT_CHARS: usize = 1000;
+const MAX_LINES: usize = 5;
+/// Kept out of sends so the agent can't be steered into CTCP requests like DCC.
+const CTCP_DELIMITER: char = '\x01';
+
+/// Strips control characters (keeping newlines) and caps length by character count; the bool
+/// says whether the text was cut.
+pub fn sanitize(text: &str) -> (String, bool) {
+    let mut clean: String = text
+        .chars()
+        .filter(|&c| c == '\n' || !c.is_control())
+        .collect();
+    match clean.char_indices().nth(MAX_TEXT_CHARS) {
+        Some((cut, _)) => {
+            clean.truncate(cut);
+            (clean, true)
+        }
+        None => (clean, false),
+    }
+}
+
+pub fn clean_lines(text: &str) -> Result<String> {
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| line.replace(['\r', '\0', CTCP_DELIMITER], " "))
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Err(Error::new(Code::Usage, "there is no text to send"));
+    }
+    if lines.len() > MAX_LINES {
+        return Err(Error::new(
+            Code::TooLong,
+            format!("{} lines is more than the {MAX_LINES} allowed", lines.len()),
+        )
+        .with_hint("shorten or summarize the reply"));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// True if `text` contains the password, even split across lines, recased, or spaced out.
+pub fn blocked_secret(password: Option<&Secret>, text: &str) -> bool {
+    password.is_some_and(|password| {
+        let password = squash(password.expose());
+        !password.is_empty() && squash(text).contains(&password)
+    })
+}
+
+/// Catches the password even when split across lines or recased.
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_control_characters_but_keeps_newlines() {
+        assert_eq!(
+            sanitize("hi\0 there\x7f\x07 friend\x1b[31m\nbye").0,
+            "hi there friend[31m\nbye"
+        );
+    }
+
+    #[test]
+    fn neutralizes_crlf_and_nul_injection() {
+        let text = clean_lines("ok\r\0QUIT :pwned\r\nPRIVMSG #ops :hi").unwrap();
+        assert_eq!(text, "ok  QUIT :pwned \nPRIVMSG #ops :hi");
+    }
+
+    #[test]
+    fn neutralizes_ctcp_requests() {
+        let text = clean_lines("\x01DCC SEND notes.txt 3232235777 5000\x01").unwrap();
+        assert_eq!(text, " DCC SEND notes.txt 3232235777 5000 ");
+    }
+
+    #[test]
+    fn allows_up_to_five_lines() {
+        let five = "one\ntwo\n\nthree\nfour\nfive\n";
+        assert_eq!(clean_lines(five).unwrap(), "one\ntwo\nthree\nfour\nfive");
+
+        let error = clean_lines("one\ntwo\nthree\nfour\nfive\nsix").unwrap_err();
+        assert_eq!(error.code, Code::TooLong);
+        assert!(error.hint.is_some());
+    }
+}

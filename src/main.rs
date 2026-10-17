@@ -15,6 +15,7 @@ mod irc;
 mod output;
 mod password;
 mod socket;
+mod text;
 
 use cli::{Cli, Command, PRIMER};
 use error::{Code, Error, Result};

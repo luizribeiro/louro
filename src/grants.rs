@@ -1,10 +1,7 @@
 use crate::error::{Code, Error, Result};
 use crate::irc::{Outgoing, Secret};
 use crate::socket::SendArgs;
-
-const MAX_LINES: usize = 5;
-/// Kept out of sends so the agent can't be steered into CTCP requests like DCC.
-const CTCP_DELIMITER: char = '\x01';
+use crate::text;
 
 /// The operator's policy. `password` is here only so `send` can refuse to post it.
 pub struct Grants {
@@ -15,7 +12,7 @@ pub struct Grants {
 
 impl Grants {
     pub fn check_send(&self, args: SendArgs) -> Result<Outgoing> {
-        if self.contains_password(&args.text) {
+        if text::blocked_secret(self.password.as_ref(), &args.text) {
             return Err(Error::new(
                 Code::BlockedSecret,
                 "the text contains the bot's password, so it was not sent",
@@ -23,16 +20,9 @@ impl Grants {
         }
         self.check_target(&args.target)?;
         Ok(Outgoing {
-            text: clean_lines(&args.text)?,
+            text: text::clean_lines(&args.text)?,
             target: args.target,
             kind: args.kind,
-        })
-    }
-
-    fn contains_password(&self, text: &str) -> bool {
-        self.password.as_ref().is_some_and(|password| {
-            let password = squash(password.expose());
-            !password.is_empty() && squash(text).contains(&password)
         })
     }
 
@@ -72,33 +62,6 @@ impl Grants {
 
 fn not_allowed(message: impl Into<String>) -> Error {
     Error::new(Code::NotAllowed, message).with_hint("don't retry; the operator chose this")
-}
-
-/// Catches the password even when split across lines or recased.
-fn squash(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_whitespace() && !c.is_control())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn clean_lines(text: &str) -> Result<String> {
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|line| line.replace(['\r', '\0', CTCP_DELIMITER], " "))
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    if lines.is_empty() {
-        return Err(Error::new(Code::Usage, "there is no text to send"));
-    }
-    if lines.len() > MAX_LINES {
-        return Err(Error::new(
-            Code::TooLong,
-            format!("{} lines is more than the {MAX_LINES} allowed", lines.len()),
-        )
-        .with_hint("shorten or summarize the reply"));
-    }
-    Ok(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -180,32 +143,5 @@ mod tests {
             };
             assert!(grants.check_send(send("#bots", "hello")).is_ok());
         }
-    }
-
-    #[test]
-    fn neutralizes_crlf_and_nul_injection() {
-        let outgoing = grants()
-            .check_send(send("#bots", "ok\r\0QUIT :pwned\r\nPRIVMSG #ops :hi"))
-            .unwrap();
-        assert_eq!(outgoing.text, "ok  QUIT :pwned \nPRIVMSG #ops :hi");
-    }
-
-    #[test]
-    fn neutralizes_ctcp_requests() {
-        let outgoing = grants()
-            .check_send(send("#bots", "\x01DCC SEND notes.txt 3232235777 5000\x01"))
-            .unwrap();
-        assert_eq!(outgoing.text, " DCC SEND notes.txt 3232235777 5000 ");
-    }
-
-    #[test]
-    fn allows_up_to_five_lines() {
-        let five = "one\ntwo\n\nthree\nfour\nfive\n";
-        let outgoing = grants().check_send(send("#bots", five)).unwrap();
-        assert_eq!(outgoing.text, "one\ntwo\nthree\nfour\nfive");
-
-        let error = refused(&grants(), "#bots", "one\ntwo\nthree\nfour\nfive\nsix");
-        assert_eq!(error.code, Code::TooLong);
-        assert!(error.hint.is_some());
     }
 }
