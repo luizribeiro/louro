@@ -9,7 +9,6 @@ pub enum Code {
     VersionMismatch,
     Usage,
     TooLong,
-    InvalidTarget,
     NoSession,
     AmbiguousSession,
     SessionExists,
@@ -31,7 +30,7 @@ impl Code {
     pub const fn exit_code(self) -> u8 {
         match self {
             Self::Internal | Self::VersionMismatch => 1,
-            Self::Usage | Self::TooLong | Self::InvalidTarget => 2,
+            Self::Usage | Self::TooLong => 2,
             Self::NoSession | Self::AmbiguousSession | Self::SessionExists => 3,
             Self::NotConnected => 4,
             Self::NotAllowed | Self::BlockedSecret => 5,

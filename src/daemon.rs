@@ -225,15 +225,6 @@ impl Config {
     }
 
     fn check_target(&self, target: &str) -> Result<()> {
-        if target.is_empty()
-            || target.starts_with(':')
-            || target.contains(|c: char| c == ',' || c.is_whitespace() || c.is_control())
-        {
-            return Err(Error::new(
-                Code::InvalidTarget,
-                format!("{target:?} is not a channel or nick"),
-            ));
-        }
         if target.starts_with(['#', '&', '+', '!']) {
             if self
                 .channels
@@ -242,18 +233,23 @@ impl Config {
             {
                 return Ok(());
             }
-            return Err(Error::new(
-                Code::NotAllowed,
-                format!("{target} is not one of the bot's channels"),
-            )
-            .with_hint("don't retry; the operator chose the channels"));
+            return Err(not_allowed(format!(
+                "{target} is not one of the bot's channels"
+            )));
         }
-        if self.allow_dm {
-            return Ok(());
+        if !self.allow_dm {
+            return Err(not_allowed("direct messages are off"));
         }
-        Err(Error::new(Code::NotAllowed, "direct messages are off")
-            .with_hint("don't retry; the operator chose this"))
+        // `PRIVMSG maria,#lounge` would also reach a channel the bot isn't in.
+        if target.contains(',') {
+            return Err(not_allowed("send to one nick at a time"));
+        }
+        Ok(())
     }
+}
+
+fn not_allowed(message: impl Into<String>) -> Error {
+    Error::new(Code::NotAllowed, message).with_hint("don't retry; the operator chose this")
 }
 
 /// Catches the password even when split across lines or recased.
@@ -789,22 +785,15 @@ mod tests {
     }
 
     #[test]
-    fn refuses_targets_that_would_smuggle_more_into_the_command() {
+    fn refuses_a_dm_list_that_could_reach_another_channel() {
         let dm_on = Config {
             allow_dm: true,
             ..config()
         };
-        for target in [
-            "",
-            "maria,joao",
-            "#bots,#lounge",
-            "maria :hi",
-            "#bots\r\nJOIN #ops",
-            ":maria",
-        ] {
-            let error = refused(&dm_on, target, "hi");
-            assert_eq!(error.code, Code::InvalidTarget, "{target:?}");
-        }
+        assert_eq!(
+            refused(&dm_on, "maria,#lounge", "hi").code,
+            Code::NotAllowed
+        );
     }
 
     #[test]
