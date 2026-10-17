@@ -2,8 +2,7 @@
 
 use crate::config::{Grants, Selector};
 use crate::error::{Code, Error, Result};
-use crate::irc::{Incoming, Outgoing};
-use crate::text;
+use crate::irc::Incoming;
 
 /// In `irc.dm.send`: anyone whose DM the daemon has received.
 const FIRST: &str = "$first";
@@ -32,76 +31,64 @@ impl Grants {
         }
     }
 
-    pub fn check_send(&self, message: Outgoing, dm: &DmHistory) -> Result<Outgoing> {
-        self.check_target(&message.target, dm)?;
-        if let Some(msgid) = &message.reply_to {
-            text::check_msgid(msgid)?;
+    /// A channel needs `irc.join` and `irc.send`; a nick needs `irc.dm.send`.
+    pub fn check_send(&self, target: &str, dm: &DmHistory) -> Result<()> {
+        match target_kind(target)? {
+            TargetKind::Channel => require(
+                self.irc.join.matches(target) && self.irc.send.matches(target),
+                "irc.send",
+                target,
+            ),
+            TargetKind::Nick => {
+                let dm_send = &self.irc.dm.send;
+                let allowed = dm_send.matches_sender(target, dm.account.as_deref())
+                    || dm.first && dm_send.matches(FIRST);
+                require(allowed, "irc.dm.send", target)
+            }
         }
-        Ok(Outgoing {
-            text: text::clean_lines(&message.text)?,
-            ..message
-        })
-    }
-
-    /// Reacting needs `irc.react` for the target on top of the right to send there.
-    pub fn check_react(
-        &self,
-        target: &str,
-        msgid: &str,
-        reaction: &str,
-        dm: &DmHistory,
-    ) -> Result<()> {
-        self.check_also(&self.irc.react, "irc.react", target, dm)?;
-        text::check_msgid(msgid)?;
-        text::check_reaction(reaction)
-    }
-
-    /// Showing typing needs `irc.typing` for the target on top of the right to send there.
-    pub fn check_typing(&self, target: &str, dm: &DmHistory) -> Result<()> {
-        self.check_also(&self.irc.typing, "irc.typing", target, dm)
     }
 
     /// A grant that narrows sending, like `irc.react`: the target needs both.
-    fn check_also(&self, grant: &Selector, name: &str, target: &str, dm: &DmHistory) -> Result<()> {
-        self.check_target(target, dm)?;
-        if grant.matches_sender(target, dm.account.as_deref()) {
-            return Ok(());
-        }
-        Err(not_allowed(format!("{name} does not grant {target}")))
+    pub fn check_also(
+        &self,
+        grant: &Selector,
+        name: &str,
+        target: &str,
+        dm: &DmHistory,
+    ) -> Result<()> {
+        self.check_send(target, dm)?;
+        require(
+            grant.matches_sender(target, dm.account.as_deref()),
+            name,
+            target,
+        )
     }
 
     /// A channel's history needs `irc.join`; a DM conversation's needs `irc.dm.read` for the nick.
     pub fn check_history(&self, target: &str, dm: &DmHistory) -> Result<()> {
         match target_kind(target)? {
             TargetKind::Channel => self.check_join(target),
-            TargetKind::Nick => {
-                if self
-                    .irc
+            TargetKind::Nick => require(
+                self.irc
                     .dm
                     .read
-                    .matches_sender(target, dm.account.as_deref())
-                {
-                    return Ok(());
-                }
-                Err(not_allowed(format!("irc.dm.read does not grant {target}")))
-            }
+                    .matches_sender(target, dm.account.as_deref()),
+                "irc.dm.read",
+                target,
+            ),
         }
     }
 
     /// Reading what a channel holds, like its members, needs `irc.join`.
     pub fn check_join(&self, channel: &str) -> Result<()> {
-        if self.irc.join.matches(channel) {
-            return Ok(());
-        }
-        Err(not_allowed(format!("irc.join does not grant {channel}")))
+        require(self.irc.join.matches(channel), "irc.join", channel)
     }
 
-    pub fn check_redact(&self, msgid: &str, reason: &str) -> Result<()> {
-        if !self.irc.redact {
-            return Err(not_allowed("irc.redact is not granted"));
+    pub fn check_redact(&self) -> Result<()> {
+        if self.irc.redact {
+            return Ok(());
         }
-        text::check_msgid(msgid)?;
-        text::check_one_line(reason)
+        Err(not_allowed("irc.redact is not granted"))
     }
 
     pub fn check_quit(&self) -> Result<()> {
@@ -111,26 +98,13 @@ impl Grants {
         Err(Error::new(Code::NotAllowed, "irc.quit is not granted")
             .with_hint("the operator stops louro"))
     }
+}
 
-    fn check_target(&self, target: &str, dm: &DmHistory) -> Result<()> {
-        match target_kind(target)? {
-            TargetKind::Channel => {
-                if self.irc.join.matches(target) && self.irc.send.matches(target) {
-                    return Ok(());
-                }
-                Err(not_allowed(format!("irc.send does not grant {target}")))
-            }
-            TargetKind::Nick => {
-                let dm_send = &self.irc.dm.send;
-                let allowed = dm_send.matches_sender(target, dm.account.as_deref())
-                    || dm.first && dm_send.matches(FIRST);
-                if allowed {
-                    return Ok(());
-                }
-                Err(not_allowed(format!("irc.dm.send does not grant {target}")))
-            }
-        }
+fn require(granted: bool, grant: &str, target: &str) -> Result<()> {
+    if granted {
+        return Ok(());
     }
+    Err(not_allowed(format!("{grant} does not grant {target}")))
 }
 
 enum TargetKind {
@@ -214,25 +188,12 @@ mod tests {
         }
     }
 
-    fn send(grants: &Grants, target: &str, dm_received: bool) -> Result<Outgoing> {
-        send_as(
-            grants,
-            target,
-            &DmHistory {
-                first: dm_received,
-                account: None,
-            },
-        )
-    }
-
-    fn send_as(grants: &Grants, target: &str, dm: &DmHistory) -> Result<Outgoing> {
-        let message = Outgoing {
-            target: target.into(),
-            kind: Kind::Message,
-            text: "hi".into(),
-            reply_to: None,
+    fn send(grants: &Grants, target: &str, dm_received: bool) -> Result<()> {
+        let dm = DmHistory {
+            first: dm_received,
+            account: None,
         };
-        grants.check_send(message, dm)
+        grants.check_send(target, &dm)
     }
 
     #[test]
@@ -316,7 +277,7 @@ mod tests {
                 first: false,
                 account: account.map(String::from),
             };
-            assert_eq!(send_as(&grants, "lz", &dm).is_ok(), allowed, "{account:?}");
+            assert_eq!(grants.check_send("lz", &dm).is_ok(), allowed, "{account:?}");
         }
     }
 
@@ -327,14 +288,14 @@ mod tests {
             first: true,
             account: Some("luiz".into()),
         };
-        assert!(send_as(&grants, "luiz", &still_luiz).is_ok());
+        assert!(grants.check_send("luiz", &still_luiz).is_ok());
 
         let changed_hands = DmHistory {
             first: false,
             account: None,
         };
         assert_eq!(
-            send_as(&grants, "luiz", &changed_hands).unwrap_err().code,
+            grants.check_send("luiz", &changed_hands).unwrap_err().code,
             Code::NotAllowed
         );
     }
@@ -364,7 +325,7 @@ mod tests {
                 first: false,
                 account: account.map(String::from),
             };
-            grants.check_react(target, "4y8kq7j2c9mnz", "👍", &dm)
+            grants.check_also(&grants.irc.react, "irc.react", target, &dm)
         };
         assert!(react("#bots", None).is_ok());
         assert!(react("luiz", Some("luiz")).is_ok());
@@ -380,8 +341,6 @@ mod tests {
                 "{target}"
             );
         }
-        let bad_msgid = grants.check_react("#bots", "4y8k q7j2", "👍", &DmHistory::default());
-        assert_eq!(bad_msgid.unwrap_err().code, Code::Usage);
     }
 
     #[test]
@@ -394,9 +353,15 @@ mod tests {
             "##,
         );
         let dm = DmHistory::default();
-        assert!(grants.check_typing("#bots", &dm).is_ok());
+        assert!(
+            grants
+                .check_also(&grants.irc.typing, "irc.typing", "#bots", &dm)
+                .is_ok()
+        );
         for target in ["#lounge", "#ops", "luiz"] {
-            let error = grants.check_typing(target, &dm).unwrap_err();
+            let error = grants
+                .check_also(&grants.irc.typing, "irc.typing", target, &dm)
+                .unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
     }
@@ -428,29 +393,14 @@ mod tests {
     }
 
     #[test]
-    fn redacts_only_with_irc_redact_and_a_one_line_reason() {
-        let error = Grants::default()
-            .check_redact("c2m8w1u0pq7rs", "")
-            .unwrap_err();
-        assert_eq!(error.code, Code::NotAllowed);
-        let grants = grants("irc.redact = true");
-        assert!(
-            grants
-                .check_redact("c2m8w1u0pq7rs", "wrong channel")
-                .is_ok()
-        );
-        for (msgid, reason) in [("c2m8 w1u0", ""), ("c2m8w1u0pq7rs", "oops\r\nQUIT")] {
-            let error = grants.check_redact(msgid, reason).unwrap_err();
-            assert_eq!(error.code, Code::Usage, "{msgid:?} {reason:?}");
-        }
-    }
-
-    #[test]
-    fn quits_only_with_irc_quit() {
-        assert!(grants("irc.quit = true").check_quit().is_ok());
-        let error = Grants::default().check_quit().unwrap_err();
+    fn redacts_and_quits_only_when_granted() {
+        let none = Grants::default();
+        assert_eq!(none.check_redact().unwrap_err().code, Code::NotAllowed);
+        let error = none.check_quit().unwrap_err();
         assert_eq!(error.code, Code::NotAllowed);
         assert_eq!(error.hint.as_deref(), Some("the operator stops louro"));
+        let both = grants("irc.redact = true\nirc.quit = true");
+        assert!(both.check_redact().is_ok() && both.check_quit().is_ok());
     }
 
     #[test]

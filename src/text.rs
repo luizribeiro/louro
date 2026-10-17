@@ -164,6 +164,15 @@ mod tests {
     }
 
     #[test]
+    fn a_one_line_text_has_no_line_breaks() {
+        assert!(check_one_line("wrong channel").is_ok());
+        assert_eq!(
+            check_one_line("oops\r\nQUIT").unwrap_err().code,
+            Code::Usage
+        );
+    }
+
+    #[test]
     fn strips_control_characters_but_keeps_newlines() {
         assert_eq!(
             sanitize("hi\0 there\x7f\x07 friend\x1b[31m\nbye").0,

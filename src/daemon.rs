@@ -418,7 +418,10 @@ impl<I: Irc> Daemon<I> {
     ) -> Result<Value> {
         text::check_secret(self.password.as_ref(), reaction)?;
         let dm = self.dm_history(target);
-        self.grants.check_react(target, msgid, reaction, &dm)?;
+        self.grants
+            .check_also(&self.grants.irc.react, "irc.react", target, &dm)?;
+        text::check_msgid(msgid)?;
+        text::check_reaction(reaction)?;
         self.irc.react(target, msgid, reaction, remove).await?;
         Ok(json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove}))
     }
@@ -446,7 +449,9 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn redact(&self, target: &str, msgid: &str, reason: &str) -> Result<Value> {
-        self.grants.check_redact(msgid, reason)?;
+        self.grants.check_redact()?;
+        text::check_msgid(msgid)?;
+        text::check_one_line(reason)?;
         text::check_secret(self.password.as_ref(), reason)?;
         if !self.sent_log().contains(target, msgid) {
             return Err(Error::new(
@@ -466,7 +471,9 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn typing(&self, target: &str, state: Typing) -> Result<Value> {
-        self.grants.check_typing(target, &self.dm_history(target))?;
+        let dm = self.dm_history(target);
+        self.grants
+            .check_also(&self.grants.irc.typing, "irc.typing", target, &dm)?;
         self.irc.typing(target, state).await?;
         Ok(json!({"target": target, "state": state}))
     }
@@ -474,7 +481,14 @@ impl<I: Irc> Daemon<I> {
     async fn send(&self, message: Outgoing) -> Result<Value> {
         text::check_secret(self.password.as_ref(), &message.text)?;
         let dm = self.dm_history(&message.target);
-        let message = self.grants.check_send(message, &dm)?;
+        self.grants.check_send(&message.target, &dm)?;
+        if let Some(msgid) = &message.reply_to {
+            text::check_msgid(msgid)?;
+        }
+        let message = Outgoing {
+            text: text::clean_lines(&message.text)?,
+            ..message
+        };
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let is_reply = message.reply_to.is_some();
         let sent = self.irc.send(message).await?;
