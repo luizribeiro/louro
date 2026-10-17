@@ -133,14 +133,15 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
-/// Reads `path`, else the default louro.toml; `socket` overrides `server.socket`.
+/// Reads `path`, else the default louro.toml; `socket` overrides `server.socket`. `--config` can
+/// name any file, so errors never quote it, and a missing file reads like an unreadable one.
 pub fn load(path: Option<&Path>, socket: Option<&Path>) -> Result<Config> {
     let path = match path {
         Some(path) => path.to_path_buf(),
         None => default_path()?,
     };
-    let text = fs::read_to_string(&path).map_err(|err| {
-        Error::new(Code::Usage, format!("can't read {}: {err}", path.display())).with_hint(EXAMPLE)
+    let text = fs::read_to_string(&path).map_err(|_| {
+        Error::new(Code::Usage, format!("can't read {}", path.display())).with_hint(EXAMPLE)
     })?;
     let mut config = parse(&text)
         .map_err(|err| Error::new(Code::Usage, format!("{}: {err}", path.display())))?;
@@ -167,13 +168,38 @@ fn default_path() -> Result<PathBuf> {
 }
 
 fn parse(text: &str) -> Result<Config, String> {
-    let config: Config = toml::from_str(text).map_err(|err| err.to_string())?;
+    let config: Config = toml::from_str(text).map_err(|err| describe(&err, text))?;
     let irc = &config.grants.irc;
     within_join(irc, &config.server.autojoin, "autojoin")?;
     if let Selector::Only(send) = &irc.send {
         within_join(irc, send, "irc.send")?;
     }
     Ok(config)
+}
+
+/// toml's message and position, without the source line its `Display` quotes.
+fn describe(err: &toml::de::Error, text: &str) -> String {
+    let message = without_value(err.message());
+    let Some(before) = err.span().and_then(|span| text.get(..span.start)) else {
+        return message;
+    };
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+    format!("line {line}, column {column}: {message}")
+}
+
+/// serde's type errors quote the value they found, as in `invalid type: string "…", expected a
+/// sequence`, so only what was expected is kept.
+fn without_value(message: &str) -> String {
+    match message.split_once(": ") {
+        Some((kind @ ("invalid type" | "invalid value"), found)) => {
+            found.rsplit_once(", expected ").map_or_else(
+                || kind.to_owned(),
+                |(_, expected)| format!("{kind}, expected {expected}"),
+            )
+        }
+        _ => message.to_owned(),
+    }
 }
 
 /// The bot can't read or speak where it may not sit.
@@ -234,6 +260,22 @@ mod tests {
         ] {
             let refusal = refusal(&format!("{MINIMAL}{settings}"));
             assert_eq!(refusal, format!("{refused} but not granted by irc.join"));
+        }
+    }
+
+    #[test]
+    fn a_config_error_gives_its_position_but_never_the_value_found() {
+        for (settings, refused) in [
+            (
+                "autojoin = \"sk-proj-4fQe9TzXb2LmN8vR1sWk\"",
+                "line 5, column 16: invalid type, expected a sequence",
+            ),
+            (
+                "realname = \"Lóuro\" the bot",
+                "line 5, column 24: unexpected key or value, expected newline, `#`",
+            ),
+        ] {
+            assert_eq!(refusal(&format!("{MINIMAL}{settings}")), refused);
         }
     }
 

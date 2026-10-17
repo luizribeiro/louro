@@ -86,6 +86,66 @@ fn connect_without_a_config_shows_an_example() {
 }
 
 #[test]
+fn connect_never_quotes_a_file_that_is_not_a_louro_config() {
+    let dir = tempdir().unwrap();
+    let ssh_key = "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+    let api_key = "sk-proj-4fQe9TzXb2LmN8vR1sWk";
+    let age_key = "AGE-SECRET-KEY-1QYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQYQS";
+    for (name, contents, secret, position) in [
+        (
+            "known_hosts",
+            format!("github.com ssh-ed25519 {ssh_key}\n"),
+            ssh_key,
+            "line 1, column 12",
+        ),
+        (
+            ".env",
+            format!("KEY=\"{api_key}\"\n"),
+            api_key,
+            "line 1, column 1",
+        ),
+        (
+            "age.key",
+            format!(
+                "# created: 2026-10-17T10:00:00Z\n\
+                 # public key: age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq\n\
+                 {age_key}\n"
+            ),
+            age_key,
+            "line 3, column 77",
+        ),
+    ] {
+        let path = dir.path().join(name);
+        fs::write(&path, contents).unwrap();
+        louro()
+            .arg("connect")
+            .arg("--config")
+            .arg(&path)
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains(position))
+            .stdout(predicate::str::contains(secret).not())
+            .stderr(predicate::str::contains(secret).not());
+    }
+}
+
+#[test]
+fn connect_says_the_same_for_a_missing_or_an_unreadable_config() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("louro.toml");
+    let connect = || louro().arg("connect").arg("--config").arg(&path).output();
+    let missing = connect().unwrap();
+    fs::write(&path, "[server]\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = connect().unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    assert_eq!(
+        (missing.stdout, missing.stderr),
+        (unreadable.stdout, unreadable.stderr)
+    );
+}
+
+#[test]
 fn connect_refuses_when_louro_is_already_running() {
     let dir = tempdir().unwrap();
     let socket = dir.path().join("louro.sock");
