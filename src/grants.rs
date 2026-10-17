@@ -234,6 +234,7 @@ mod tests {
             "#bots extra",
             "",
             "maria\r\nQUIT",
+            "maria\u{7}",
         ] {
             let error = send(&grants, target, true).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
