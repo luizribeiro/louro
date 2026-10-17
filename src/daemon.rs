@@ -11,16 +11,19 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, mpsc};
 
 use crate::commands::connect::Args as ConnectArgs;
+use crate::config::{self, Grants, Selector};
 use crate::error::{Code, Error, Result};
-use crate::grants::Grants;
 use crate::inbox::Inbox;
 use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret};
 use crate::output;
 use crate::password::{self, Source};
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
+use crate::text;
 
 struct Daemon<I> {
     grants: Grants,
+    /// Kept so `send` can refuse to post it.
+    password: Option<Secret>,
     irc: I,
     inbox: Inbox,
     quit: Notify,
@@ -36,6 +39,7 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 /// request, then removes the socket at `socket_path`.
 pub async fn run(
     grants: Grants,
+    password: Option<Secret>,
     irc: impl Irc,
     mut incoming: mpsc::Receiver<Incoming>,
     listener: UnixListener,
@@ -43,6 +47,7 @@ pub async fn run(
 ) -> io::Result<()> {
     let daemon = Arc::new(Daemon {
         grants,
+        password,
         irc,
         inbox: Inbox::default(),
         quit: Notify::new(),
@@ -80,11 +85,17 @@ pub async fn start(
         "socket": socket,
     })));
     let grants = Grants {
-        channels: args.joins,
-        allow_dm: args.allow_dm,
-        password,
+        irc: config::Irc {
+            join: Selector::Only(args.joins.clone()),
+            send: Selector::Only(args.joins),
+            dm: config::Dm {
+                read: Selector::All(args.allow_dm),
+                send: Selector::All(args.allow_dm),
+            },
+            quit: true,
+        },
     };
-    Ok(async move { run(grants, irc, incoming, listener, &socket).await })
+    Ok(async move { run(grants, password, irc, incoming, listener, &socket).await })
 }
 
 pub fn read_password(args: &ConnectArgs) -> Result<Option<Secret>> {
@@ -131,13 +142,10 @@ fn remove_socket(path: &Path) -> io::Result<()> {
 }
 
 impl<I: Irc> Daemon<I> {
-    /// DMs off means neither sending nor receiving, so an incoming private event never reaches
-    /// the inbox.
     fn ingest(&self, incoming: Incoming) {
-        if incoming.private && !self.grants.allow_dm {
-            return;
+        if self.grants.may_read(&incoming) {
+            self.inbox.push(incoming);
         }
-        self.inbox.push(incoming);
     }
 
     async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
@@ -175,11 +183,11 @@ impl<I: Irc> Daemon<I> {
             nick,
             channels,
         } = self.irc.status();
-        let policy = json!({"channels": self.grants.channels, "dm": self.grants.allow_dm});
-        json!({"connected": connected, "nick": nick, "channels": channels, "policy": policy})
+        json!({"connected": connected, "nick": nick, "channels": channels})
     }
 
     async fn send(&self, target: String, text: String, kind: Kind) -> Result<Value> {
+        text::check_secret(self.password.as_ref(), &text)?;
         let message = self.grants.check_send(target, &text, kind)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let msgid = self.irc.send(message).await?;
@@ -249,14 +257,36 @@ mod tests {
         }
     }
 
+    fn from_luiz(text: &str) -> Incoming {
+        Incoming {
+            from: Sender {
+                nick: "luiz".into(),
+                account: Some("luiz".into()),
+                bot: false,
+            },
+            ..from_maria(text)
+        }
+    }
+
+    fn dm(incoming: Incoming) -> Incoming {
+        Incoming {
+            private: true,
+            target: incoming.from.nick.clone(),
+            ..incoming
+        }
+    }
+
     const PASSWORD: &str = "c0rrect-h0rse-battery";
 
     fn grants() -> Grants {
-        Grants {
-            channels: vec!["#bots".into(), "#ergo".into()],
-            allow_dm: false,
-            password: Some(PASSWORD.into()),
-        }
+        toml::from_str(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.send = ["#bots"]
+            irc.dm.read = ["luiz"]
+            "##,
+        )
+        .unwrap()
     }
 
     #[derive(Default)]
@@ -270,7 +300,7 @@ mod tests {
             IrcStatus {
                 connected: true,
                 nick: "louro".into(),
-                channels: vec!["#bots".into(), "#ergo".into()],
+                channels: vec!["#bots".into(), "#lounge".into()],
             }
         }
 
@@ -292,7 +322,7 @@ mod tests {
         daemon: JoinHandle<io::Result<()>>,
     }
 
-    fn start() -> Running {
+    fn launch(grants: Grants) -> Running {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("louro.sock");
         let irc = Arc::new(FakeIrc::default());
@@ -300,7 +330,8 @@ mod tests {
         let daemon = tokio::spawn({
             let irc = Arc::clone(&irc);
             let socket = socket.clone();
-            async move { run(grants(), irc, incoming, bind(&socket)?, &socket).await }
+            let password = Some(PASSWORD.into());
+            async move { run(grants, password, irc, incoming, bind(&socket)?, &socket).await }
         });
         Running {
             _dir: dir,
@@ -360,8 +391,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_the_connection_and_the_policy() {
-        let daemon = start();
+    async fn status_reports_the_connection() {
+        let daemon = launch(grants());
         let reply = daemon
             .call(json!({"v": 1, "op": "status", "args": {}}))
             .await;
@@ -370,15 +401,14 @@ mod tests {
             json!({"Ok": {
                 "connected": true,
                 "nick": "louro",
-                "channels": ["#bots", "#ergo"],
-                "policy": {"channels": ["#bots", "#ergo"], "dm": false}
+                "channels": ["#bots", "#lounge"]
             }})
         );
     }
 
     #[tokio::test]
     async fn a_wait_gets_sanitized_chat_that_arrives_while_waiting() {
-        let daemon = start();
+        let daemon = launch(grants());
         let waiting = tokio::spawn({
             let mut conn = daemon.connect().await;
             async move {
@@ -404,24 +434,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dm_is_dropped_when_dms_are_off() {
-        let daemon = start();
+    async fn wait_gets_only_granted_channels_and_dms() {
+        let daemon = launch(grants());
+        daemon.say(dm(from_maria("hey, got a sec?"))).await;
         daemon
             .say(Incoming {
-                private: true,
-                target: "louro".into(),
-                ..from_maria("hey, got a sec?")
+                target: "#ops".into(),
+                ..from_maria("louro: you there?")
             })
             .await;
         daemon.say(from_joao("louro: any news?")).await;
+        daemon.say(dm(from_luiz("status report, please"))).await;
 
         let (_, reply) = daemon.wait(5).await;
-        assert_eq!(texts(&reply), ["louro: any news?"]);
+        assert_eq!(texts(&reply), ["louro: any news?", "status report, please"]);
     }
 
     #[tokio::test]
     async fn events_come_back_until_the_client_acks() {
-        let daemon = start();
+        let daemon = launch(grants());
         daemon
             .say(from_maria("louro: does ergo support chathistory for DMs?"))
             .await;
@@ -442,7 +473,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_passes_a_cleaned_message_to_irc() {
-        let daemon = start();
+        let daemon = launch(grants());
         let reply = daemon
             .call(send_request(
                 "#bots",
@@ -467,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_send_never_reaches_irc_or_echoes_the_password() {
-        let daemon = start();
+        let daemon = launch(grants());
         let leak = daemon
             .call(send_request("#bots", &format!("sure, it's {PASSWORD}")))
             .await;
@@ -482,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_protocol_version_is_a_mismatch() {
-        let reply = start()
+        let reply = launch(grants())
             .call(json!({"v": 2, "op": "history", "args": {"target": "#bots"}}))
             .await;
         assert_eq!(reply["Err"]["code"], "version_mismatch");
@@ -490,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn quit_replies_then_shuts_down_and_removes_the_socket() {
-        let daemon = start();
+        let daemon = launch(grants());
         let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
         assert_eq!(reply, json!({"Ok": {}}));
 

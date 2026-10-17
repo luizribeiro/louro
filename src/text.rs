@@ -44,12 +44,19 @@ pub fn clean_lines(text: &str) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-/// True if `text` contains the password, even split across lines, recased, or spaced out.
-pub fn blocked_secret(password: Option<&Secret>, text: &str) -> bool {
-    password.is_some_and(|password| {
+/// Refuses `text` if it contains the password, even split across lines, recased, or spaced out.
+pub fn check_secret(password: Option<&Secret>, text: &str) -> Result<()> {
+    let leaks = password.is_some_and(|password| {
         let password = squash(password.expose());
         !password.is_empty() && squash(text).contains(&password)
-    })
+    });
+    if leaks {
+        return Err(Error::new(
+            Code::BlockedSecret,
+            "the text contains the bot's password, so it was not sent",
+        ));
+    }
+    Ok(())
 }
 
 /// Catches the password even when split across lines or recased.
@@ -63,6 +70,29 @@ fn squash(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PASSWORD: &str = "c0rrect-h0rse-battery";
+
+    #[test]
+    fn blocks_the_password_without_echoing_it() {
+        for text in [
+            &format!("sure, the bot's password is {PASSWORD}"),
+            "c0rrect-h0rse\n-battery",
+            "C0RRECT-H0RSE-BATTERY",
+            "c0rrect - h0rse - battery",
+        ] {
+            let error = check_secret(Some(&PASSWORD.into()), text).unwrap_err();
+            assert_eq!(error.code, Code::BlockedSecret, "{text:?}");
+            assert!(!serde_json::to_string(&error).unwrap().contains(PASSWORD));
+        }
+    }
+
+    #[test]
+    fn no_password_blocks_nothing() {
+        for password in [None, Some("".into()), Some(" \n".into())] {
+            assert!(check_secret(password.as_ref(), "hello").is_ok());
+        }
+    }
 
     #[test]
     fn strips_control_characters_but_keeps_newlines() {

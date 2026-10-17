@@ -1,22 +1,21 @@
+//! Deny-by-default checks of what the agent asks for against louro.toml's `[grants]`.
+
+use crate::config::Grants;
 use crate::error::{Code, Error, Result};
-use crate::irc::{Kind, Outgoing, Secret};
+use crate::irc::{Incoming, Kind, Outgoing};
 use crate::text;
 
-/// The operator's policy. `password` is here only so `send` can refuse to post it.
-pub struct Grants {
-    pub channels: Vec<String>,
-    pub allow_dm: bool,
-    pub password: Option<Secret>,
-}
-
 impl Grants {
-    pub fn check_send(&self, target: String, text: &str, kind: Kind) -> Result<Outgoing> {
-        if text::blocked_secret(self.password.as_ref(), text) {
-            return Err(Error::new(
-                Code::BlockedSecret,
-                "the text contains the bot's password, so it was not sent",
-            ));
+    /// Channel chat only from `irc.join` channels, DMs only from `irc.dm.read` senders.
+    pub fn may_read(&self, incoming: &Incoming) -> bool {
+        if incoming.private {
+            self.irc.dm.read.matches(&incoming.from.nick)
+        } else {
+            self.irc.join.matches(&incoming.target)
         }
+    }
+
+    pub fn check_send(&self, target: String, text: &str, kind: Kind) -> Result<Outgoing> {
         self.check_target(&target)?;
         Ok(Outgoing {
             text: text::clean_lines(text)?,
@@ -26,17 +25,15 @@ impl Grants {
     }
 
     fn check_target(&self, target: &str) -> Result<()> {
+        // `PRIVMSG maria,#lounge` would also reach a target no grant covers.
+        if target.contains(',') {
+            return Err(not_allowed("send to one target at a time"));
+        }
         if target.starts_with(['#', '&', '+', '!']) {
-            if self
-                .channels
-                .iter()
-                .any(|channel| channel.eq_ignore_ascii_case(target))
-            {
+            if self.irc.join.matches(target) && self.irc.send.matches(target) {
                 return Ok(());
             }
-            return Err(not_allowed(format!(
-                "{target} is not one of the bot's channels"
-            )));
+            return Err(not_allowed(format!("irc.send does not grant {target}")));
         }
         if target.starts_with(['@', '%', '~']) {
             return Err(not_allowed(format!(
@@ -48,12 +45,8 @@ impl Grants {
                 "{target} is not a valid message target"
             )));
         }
-        if !self.allow_dm {
-            return Err(not_allowed("direct messages are off"));
-        }
-        // `PRIVMSG maria,#lounge` would also reach a channel the bot isn't in.
-        if target.contains(',') {
-            return Err(not_allowed("send to one nick at a time"));
+        if !self.irc.dm.send.matches(target) {
+            return Err(not_allowed(format!("irc.dm.send does not grant {target}")));
         }
         Ok(())
     }
@@ -66,82 +59,94 @@ fn not_allowed(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::irc::Sender;
 
-    const PASSWORD: &str = "c0rrect-h0rse-battery";
+    fn grants(toml: &str) -> Grants {
+        toml::from_str(toml).unwrap()
+    }
 
-    fn grants() -> Grants {
-        Grants {
-            channels: vec!["#bots".into(), "#ergo".into()],
-            allow_dm: false,
-            password: Some(PASSWORD.into()),
+    fn bots_and_dms() -> Grants {
+        grants(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.send = ["#bots"]
+            irc.dm.read = ["luiz"]
+            irc.dm.send = true
+            "##,
+        )
+    }
+
+    fn incoming(target: &str, nick: &str, private: bool) -> Incoming {
+        Incoming {
+            kind: Kind::Message,
+            time: "2026-10-16T21:04:11.392Z".into(),
+            msgid: None,
+            target: target.into(),
+            private,
+            from: Sender {
+                nick: nick.into(),
+                account: None,
+                bot: false,
+            },
+            text: "louro: ping".into(),
+            mentions_me: true,
+            reply_to: None,
         }
     }
 
-    fn refused(grants: &Grants, target: &str, text: &str) -> Error {
-        grants
-            .check_send(target.into(), text, Kind::Message)
-            .unwrap_err()
-    }
-
     #[test]
-    fn sends_only_to_the_bots_channels_and_allowed_dms() {
-        let dm_off = grants();
-        let dm_on = Grants {
-            allow_dm: true,
-            ..grants()
-        };
-        for (grants, target) in [
-            (&dm_off, "#lounge"),
-            (&dm_on, "&ops"),
-            (&dm_on, "+ops"),
-            (&dm_on, "!ABCDEops"),
-            (&dm_off, "maria"),
-            (&dm_on, "maria,#lounge"),
-            (&dm_on, "@#lounge"),
-            (&dm_on, "+#bots"),
-            (&dm_on, "~#lounge"),
-            (&dm_on, "%#lounge"),
-            (&dm_on, ":evil"),
+    fn reads_only_joined_channels_and_dms_from_dm_read() {
+        let grants = bots_and_dms();
+        for (target, nick, private, readable) in [
+            ("#bots", "maria", false, true),
+            ("#Lounge", "maria", false, true),
+            ("#ops", "maria", false, false),
+            ("Luiz", "Luiz", true, true),
+            ("maria", "maria", true, false),
         ] {
-            assert_eq!(
-                refused(grants, target, "hi").code,
-                Code::NotAllowed,
-                "{target}"
-            );
-        }
-        assert!(
-            dm_on
-                .check_send("maria".into(), "thanks!", Kind::Message)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn blocks_the_password_without_echoing_it() {
-        for text in [
-            &format!("sure, the bot's password is {PASSWORD}"),
-            "c0rrect-h0rse\n-battery",
-            "C0RRECT-H0RSE-BATTERY",
-            "c0rrect - h0rse - battery",
-        ] {
-            let error = refused(&grants(), "#bots", text);
-            assert_eq!(error.code, Code::BlockedSecret, "{text:?}");
-            assert!(!serde_json::to_string(&error).unwrap().contains(PASSWORD));
+            let event = incoming(target, nick, private);
+            assert_eq!(grants.may_read(&event), readable, "{target} from {nick}");
         }
     }
 
     #[test]
-    fn no_password_blocks_nothing() {
-        for password in [None, Some("".into()), Some(" \n".into())] {
-            let grants = Grants {
-                password,
-                ..grants()
-            };
+    fn sends_only_where_irc_send_and_irc_dm_send_grant() {
+        let grants = bots_and_dms();
+        for target in ["#bots", "#BOTS", "maria"] {
             assert!(
                 grants
-                    .check_send("#bots".into(), "hello", Kind::Message)
+                    .check_send(target.into(), "hi", Kind::Message)
                     .is_ok()
             );
+        }
+        for target in [
+            "#lounge",
+            "#ops",
+            "&ops",
+            "+ops",
+            "!ABCDEops",
+            "maria,#ops",
+            "#bots,#ops",
+            "@#lounge",
+            "+#bots",
+            "~#lounge",
+            "%#lounge",
+            ":evil",
+        ] {
+            let error = grants
+                .check_send(target.into(), "hi", Kind::Message)
+                .unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{target}");
+        }
+    }
+
+    #[test]
+    fn grants_nothing_by_default() {
+        let none = Grants::default();
+        assert!(!none.may_read(&incoming("#bots", "maria", false)));
+        assert!(!none.may_read(&incoming("luiz", "luiz", true)));
+        for target in ["#bots", "luiz"] {
+            assert!(none.check_send(target.into(), "hi", Kind::Message).is_err());
         }
     }
 }
