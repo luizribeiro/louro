@@ -11,7 +11,7 @@ use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, 
 use tokio::net::UnixStream;
 
 use crate::error::{Code, Error, Result};
-use crate::irc::{HistoryQuery, Kind, Typing};
+use crate::irc::{HistoryQuery, Outgoing, Typing};
 
 pub const VERSION: u8 = 1;
 
@@ -44,12 +44,7 @@ pub enum Op {
         max: NonZeroUsize,
     },
     #[command(skip)]
-    Send {
-        target: String,
-        text: String,
-        kind: Kind,
-        reply_to: Option<String>,
-    },
+    Send(Outgoing),
     /// Members of a channel the bot is in
     Names {
         /// A channel the bot is in

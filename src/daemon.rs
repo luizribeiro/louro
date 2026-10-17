@@ -20,8 +20,8 @@ use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE};
 use crate::irc::{
-    self, History, HistoryQuery, Incoming, Irc, IrcStatus, Kind, Member, Secret, Sender, Typing,
-    Update,
+    self, History, HistoryQuery, Incoming, Irc, IrcStatus, Member, Outgoing, Secret, Sender,
+    Typing, Update,
 };
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -332,12 +332,7 @@ impl<I: Irc> Daemon<I> {
         match op {
             Err(error) => reply(conn, Err::<(), _>(error)).await,
             Ok(Op::Status {}) => reply(conn, Ok(self.status())).await,
-            Ok(Op::Send {
-                target,
-                text,
-                kind,
-                reply_to,
-            }) => reply(conn, self.send(target, text, kind, reply_to).await).await,
+            Ok(Op::Send(message)) => reply(conn, self.send(message).await).await,
             Ok(Op::Wait { timeout, max }) => {
                 let batch = self.inbox.wait(timeout, max).await;
                 let cursor = batch.cursor;
@@ -476,16 +471,10 @@ impl<I: Irc> Daemon<I> {
         Ok(json!({"target": target, "state": state}))
     }
 
-    async fn send(
-        &self,
-        target: String,
-        text: String,
-        kind: Kind,
-        reply_to: Option<String>,
-    ) -> Result<Value> {
-        text::check_secret(self.password.as_ref(), &text)?;
-        let dm = self.dm_history(&target);
-        let message = self.grants.check_send(target, &text, kind, reply_to, &dm)?;
+    async fn send(&self, message: Outgoing) -> Result<Value> {
+        text::check_secret(self.password.as_ref(), &message.text)?;
+        let dm = self.dm_history(&message.target);
+        let message = self.grants.check_send(message, &dm)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let is_reply = message.reply_to.is_some();
         let sent = self.irc.send(message).await?;
@@ -539,7 +528,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::irc::{Origin, Outgoing, Sender, Sent};
+    use crate::irc::{Kind, Origin, Sender, Sent};
 
     fn from_maria(text: &str) -> Incoming {
         Incoming {

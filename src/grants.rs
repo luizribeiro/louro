@@ -2,7 +2,7 @@
 
 use crate::config::{Grants, Selector};
 use crate::error::{Code, Error, Result};
-use crate::irc::{Incoming, Kind, Outgoing};
+use crate::irc::{Incoming, Outgoing};
 use crate::text;
 
 /// In `irc.dm.send`: anyone whose DM the daemon has received.
@@ -32,23 +32,14 @@ impl Grants {
         }
     }
 
-    pub fn check_send(
-        &self,
-        target: String,
-        text: &str,
-        kind: Kind,
-        reply_to: Option<String>,
-        dm: &DmHistory,
-    ) -> Result<Outgoing> {
-        self.check_target(&target, dm)?;
-        if let Some(msgid) = &reply_to {
+    pub fn check_send(&self, message: Outgoing, dm: &DmHistory) -> Result<Outgoing> {
+        self.check_target(&message.target, dm)?;
+        if let Some(msgid) = &message.reply_to {
             text::check_msgid(msgid)?;
         }
         Ok(Outgoing {
-            text: text::clean_lines(text)?,
-            target,
-            kind,
-            reply_to,
+            text: text::clean_lines(&message.text)?,
+            ..message
         })
     }
 
@@ -181,7 +172,7 @@ fn not_allowed(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::irc::{Origin, Sender};
+    use crate::irc::{Kind, Origin, Sender};
 
     fn grants(toml: &str) -> Grants {
         toml::from_str(toml).unwrap()
@@ -235,7 +226,13 @@ mod tests {
     }
 
     fn send_as(grants: &Grants, target: &str, dm: &DmHistory) -> Result<Outgoing> {
-        grants.check_send(target.into(), "hi", Kind::Message, None, dm)
+        let message = Outgoing {
+            target: target.into(),
+            kind: Kind::Message,
+            text: "hi".into(),
+            reply_to: None,
+        };
+        grants.check_send(message, dm)
     }
 
     #[test]

@@ -82,11 +82,12 @@ pub struct Member {
     pub bot: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Outgoing {
     pub target: String,
     pub kind: Kind,
-    /// At most five lines joined by `\n`, with no CR, NUL or CTCP delimiter.
+    /// By the time it reaches [`Irc::send`], at most five lines joined by `\n`, with no CR, NUL
+    /// or CTCP delimiter.
     pub text: String,
     /// The msgid this message answers, sent as a reply tag.
     pub reply_to: Option<String>,

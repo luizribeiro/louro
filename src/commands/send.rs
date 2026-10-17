@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use serde_json::Value;
 
 use crate::error::{Code, Error, Result};
-use crate::irc::Kind;
+use crate::irc::{Kind, Outgoing};
 use crate::output;
 use crate::socket::{self, Op};
 
@@ -37,17 +37,13 @@ impl Args {
             (_, true) => Kind::Action,
             (false, false) => Kind::Message,
         };
-        let text = read_text(self.text)?;
-        socket::request(
-            socket,
-            Op::Send {
-                target: self.target,
-                text,
-                kind,
-                reply_to: self.reply_to,
-            },
-        )
-        .await
+        let message = Outgoing {
+            target: self.target,
+            kind,
+            text: read_text(self.text)?,
+            reply_to: self.reply_to,
+        };
+        socket::request(socket, Op::Send(message)).await
     }
 }
 
