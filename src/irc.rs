@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use papo::{
-    Client, ConnectErrorKind, Endpoint, Event, Events, HistoryItem, Message, MessageKind,
-    RegistrationError, Sasl, Source, State,
+    Account, Client, ConnectErrorKind, Endpoint, Event, Events, HistoryItem, Message, MessageKind,
+    RegistrationError, Sasl, Source, State, User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -60,6 +60,16 @@ pub struct Sender {
     pub bot: bool,
 }
 
+/// A channel member as papo's state knows it; `prefix` is the highest rank, like `@`, or empty.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub struct Member {
+    pub nick: String,
+    pub prefix: String,
+    pub account: Option<String>,
+    pub away: bool,
+    pub bot: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Outgoing {
     pub target: String,
@@ -79,6 +89,8 @@ pub enum Kind {
 /// The IRC connection as the daemon sees it; `PapoIrc` below implements it over a papo client.
 pub trait Irc: Send + Sync + 'static {
     fn status(&self) -> IrcStatus;
+    /// The members of `channel`, sorted by nick, or `None` if the bot isn't in it.
+    fn names(&self, channel: &str) -> Option<Vec<Member>>;
     /// Sends one message (several lines become a multiline batch) and returns its msgid, if any.
     fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
@@ -290,6 +302,32 @@ impl Irc for PapoIrc {
                 .map(|channel| channel.name().to_string())
                 .collect(),
         }
+    }
+
+    fn names(&self, channel: &str) -> Option<Vec<Member>> {
+        let state = self.client.state();
+        let mut members: Vec<Member> = state
+            .channel(channel)?
+            .members()
+            .map(|member| {
+                let user = state.user(member.nick());
+                Member {
+                    nick: member.nick().to_string(),
+                    prefix: member
+                        .highest_prefix()
+                        .map(String::from)
+                        .unwrap_or_default(),
+                    account: user.and_then(|user| match user.account() {
+                        Account::LoggedIn(account) => Some(account.to_string()),
+                        _ => None,
+                    }),
+                    away: user.is_some_and(|user| user.away().is_some()),
+                    bot: user.is_some_and(User::is_bot),
+                }
+            })
+            .collect();
+        members.sort_by(|a, b| a.nick.cmp(&b.nick));
+        Some(members)
     }
 
     async fn send(&self, message: Outgoing) -> Result<Option<String>> {

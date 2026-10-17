@@ -93,16 +93,20 @@ def connect(grants):
     return louro("connect", "--config", CONFIG)
 
 
-def status_until(predicate):
-    """The first status that satisfies predicate."""
-    statuses = []
+def louro_until(predicate, *args):
+    """The first output of louro(*args) that satisfies predicate."""
+    outputs = []
 
     def check(_last_try):
-        statuses.append(louro("status"))
-        return predicate(statuses[-1])
+        outputs.append(louro(*args))
+        return predicate(outputs[-1])
 
     retry(check, timeout=TIMEOUT)
-    return statuses[-1]
+    return outputs[-1]
+
+
+def status_until(predicate):
+    return louro_until(predicate, "status")
 
 
 def joined(status):
@@ -258,6 +262,18 @@ with subtest("sends outside the grants, and quit without irc.quit, are refused")
     refused("not_allowed", "send", "@#bots", "hi")
     refused("not_allowed", "quit")
     assert louro("status")["connected"], "a refused quit leaves louro running"
+    stop()
+
+with subtest("names lists #bots with accounts, and refuses channels outside irc.join"):
+    start(grants())
+
+    def members(names):
+        return {member["nick"]: member for member in names["members"]}
+
+    names = louro_until(lambda names: members(names).get("luiz", {}).get("account"), "names", "#bots")
+    assert {"luiz", "mallory", BOT["user"]} <= members(names).keys(), names
+    assert members(names)["mallory"]["account"] == "mallory", names
+    refused("not_allowed", "names", "#lounge")
     stop()
 
 with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows again"):

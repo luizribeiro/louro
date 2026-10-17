@@ -19,7 +19,7 @@ use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox};
-use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret, Sender, Update};
+use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Member, Secret, Sender, Update};
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 use crate::text;
@@ -311,6 +311,7 @@ impl<I: Irc> Daemon<I> {
                 }
                 Ok(())
             }
+            Ok(Op::Names { channel }) => reply(conn, self.names(&channel)).await,
             Ok(Op::Quit {}) => {
                 let allowed = self.grants.check_quit();
                 let quitting = allowed.is_ok();
@@ -336,6 +337,25 @@ impl<I: Irc> Daemon<I> {
             "grants": self.grants,
             "last_error": *self.last_error(),
         })
+    }
+
+    fn names(&self, channel: &str) -> Result<Value> {
+        self.grants.check_join(channel)?;
+        let members: Vec<Member> = self
+            .irc
+            .names(channel)
+            .ok_or_else(|| {
+                Error::new(Code::NotAllowed, format!("louro is not in {channel}"))
+                    .with_hint("`louro status` lists the channels it is in")
+            })?
+            .into_iter()
+            .map(|member| Member {
+                nick: text::sanitize(&member.nick).0,
+                account: member.account.map(|account| text::sanitize(&account).0),
+                ..member
+            })
+            .collect();
+        Ok(json!({"channel": channel, "members": members}))
     }
 
     async fn send(&self, target: String, text: String, kind: Kind) -> Result<Value> {
@@ -469,6 +489,27 @@ mod tests {
                 nick: "louro".into(),
                 channels: vec!["#bots".into(), "#lounge".into()],
             }
+        }
+
+        fn names(&self, channel: &str) -> Option<Vec<Member>> {
+            (channel == "#bots").then(|| {
+                vec![
+                    Member {
+                        nick: "luiz".into(),
+                        prefix: "@".into(),
+                        account: Some("luiz".into()),
+                        away: false,
+                        bot: false,
+                    },
+                    Member {
+                        nick: "mal\u{1b}[2Jlory".into(),
+                        prefix: String::new(),
+                        account: Some("mal\u{7}lory".into()),
+                        away: true,
+                        bot: true,
+                    },
+                ]
+            })
         }
 
         fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send {
@@ -857,6 +898,31 @@ mod tests {
 
         let reply = daemon.call(send_request("maria", "sure")).await;
         assert_eq!(reply["Ok"]["target"], "maria");
+    }
+
+    fn names_request(channel: &str) -> Value {
+        json!({"v": 1, "op": "names", "args": {"channel": channel}})
+    }
+
+    #[tokio::test]
+    async fn names_lists_sanitized_members_of_a_joined_channel() {
+        let reply = launch(grants()).call(names_request("#bots")).await;
+        assert_eq!(
+            reply,
+            json!({"Ok": {"channel": "#bots", "members": [
+                {"nick": "luiz", "prefix": "@", "account": "luiz", "away": false, "bot": false},
+                {"nick": "mal[2Jlory", "prefix": "", "account": "mallory", "away": true, "bot": true},
+            ]}})
+        );
+    }
+
+    #[tokio::test]
+    async fn names_needs_irc_join_and_the_bot_in_the_channel() {
+        let daemon = launch(grants());
+        for channel in ["#ops", "#lounge"] {
+            let reply = daemon.call(names_request(channel)).await;
+            assert_eq!(reply["Err"]["code"], "not_allowed", "{channel}");
+        }
     }
 
     #[tokio::test]

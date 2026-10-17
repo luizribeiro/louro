@@ -47,6 +47,14 @@ impl Grants {
         })
     }
 
+    /// Reading what a channel holds, like its members, needs `irc.join`.
+    pub fn check_join(&self, channel: &str) -> Result<()> {
+        if self.irc.join.matches(channel) {
+            return Ok(());
+        }
+        Err(not_allowed(format!("irc.join does not grant {channel}")))
+    }
+
     pub fn check_quit(&self) -> Result<()> {
         if self.irc.quit {
             return Ok(());
@@ -248,6 +256,16 @@ mod tests {
             send_as(&grants, "luiz", &changed_hands).unwrap_err().code,
             Code::NotAllowed
         );
+    }
+
+    #[test]
+    fn reads_channel_state_only_where_irc_join_grants() {
+        let grants = bots_and_dms();
+        assert!(grants.check_join("#Lounge").is_ok());
+        for target in ["#ops", "luiz"] {
+            let error = grants.check_join(target).unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{target}");
+        }
     }
 
     #[test]

@@ -41,6 +41,9 @@ pub enum Op {
         text: String,
         kind: Kind,
     },
+    Names {
+        channel: String,
+    },
     Quit {},
 }
 
