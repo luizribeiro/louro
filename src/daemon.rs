@@ -326,19 +326,29 @@ struct Daemon<I> {
     quit: Notify,
 }
 
-/// Serves requests on `socket_path` and buffers `incoming` chat until a `quit` request.
+/// Binds the daemon's socket at `path`, replacing a stale one.
 ///
 /// # Errors
 ///
-/// Fails when the socket can't be bound or removed.
+/// Fails when the socket can't be removed or bound.
+pub fn bind(path: &Path) -> io::Result<UnixListener> {
+    remove_socket(path)?;
+    UnixListener::bind(path)
+}
+
+/// Serves requests on `listener` and buffers `incoming` chat until a `quit`
+/// request, then removes the socket at `socket_path`.
+///
+/// # Errors
+///
+/// Fails when the socket can't be removed.
 pub async fn run(
     config: Config,
     irc: impl Irc,
     mut incoming: mpsc::Receiver<Incoming>,
+    listener: UnixListener,
     socket_path: &Path,
 ) -> io::Result<()> {
-    remove_socket(socket_path)?;
-    let listener = UnixListener::bind(socket_path)?;
     let daemon = Arc::new(Daemon {
         config,
         irc,
@@ -900,7 +910,7 @@ mod tests {
         let daemon = tokio::spawn({
             let irc = Arc::clone(&irc);
             let socket = socket.clone();
-            async move { run(config(), irc, incoming, &socket).await }
+            async move { run(config(), irc, incoming, bind(&socket)?, &socket).await }
         });
         Running {
             _dir: dir,
@@ -1021,16 +1031,8 @@ mod tests {
     #[tokio::test]
     async fn fails_when_the_socket_cannot_be_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let (_chat, incoming) = mpsc::channel(1);
         let missing_dir = dir.path().join("gone").join("louro.sock");
-        let result = run(
-            config(),
-            Arc::new(FakeIrc::default()),
-            incoming,
-            &missing_dir,
-        )
-        .await;
-        assert!(result.is_err());
+        assert!(bind(&missing_dir).is_err());
     }
 
     #[tokio::test(start_paused = true)]
