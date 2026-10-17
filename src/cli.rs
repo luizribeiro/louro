@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
 /// Printed for both bare `louro` and `louro --help`, since an agent finds the tool through either.
 pub const PRIMER: &str = "\
@@ -77,7 +78,7 @@ fn parse_timeout(raw: &str) -> Result<u64, String> {
         .map_err(|_| format!("expected a number of seconds or `none`, got `{raw}`"))
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WaitArgs {
     /// Seconds to block for, or `none` to wait forever; `0` polls
     #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]

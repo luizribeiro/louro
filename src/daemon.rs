@@ -136,7 +136,7 @@ impl Inbox {
     }
 
     async fn wait(&self, args: &WaitArgs) -> Batch {
-        let deadline = Instant::now().checked_add(Duration::from_secs(args.timeout_secs));
+        let deadline = Instant::now().checked_add(Duration::from_secs(args.timeout));
         loop {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
@@ -479,7 +479,7 @@ mod tests {
 
     fn wait_args(timeout_secs: u64, max: usize) -> WaitArgs {
         WaitArgs {
-            timeout_secs,
+            timeout: timeout_secs,
             max: NonZeroUsize::new(max).unwrap(),
         }
     }
@@ -917,7 +917,7 @@ mod tests {
     }
 
     fn wait_request(timeout_secs: u64) -> Value {
-        json!({"v": 1, "op": "wait", "args": {"timeout_secs": timeout_secs, "max": 20}})
+        json!({"v": 1, "op": "wait", "args": {"timeout": timeout_secs, "max": 20}})
     }
 
     fn send_request(target: &str, text: &str) -> Value {

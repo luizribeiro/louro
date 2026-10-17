@@ -18,7 +18,7 @@ mod protocol;
 use cli::{Cli, Command, PRIMER};
 use client::Connection;
 use error::{Code, Error, Result};
-use protocol::{Kind, Op, SendArgs, WaitArgs};
+use protocol::{Kind, Op, SendArgs};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -55,11 +55,7 @@ async fn wait(socket: Option<&Path>, args: cli::WaitArgs) -> ExitCode {
         Ok(connection) => connection,
         Err(err) => return output::emit::<()>(Err(err)),
     };
-    let op = Op::Wait(WaitArgs {
-        timeout_secs: args.timeout,
-        max: args.max,
-    });
-    let result = connection.request(op).await;
+    let result = connection.request(Op::Wait(args)).await;
     let printed_ok = result.is_ok();
     let exit_code = output::emit(result);
     if printed_ok {
