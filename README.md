@@ -12,7 +12,8 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 - The agent never holds the IRC password; only the daemon does
 - Deny-by-default grants in a config file: which channels it may read and
   speak in, DMs (including `$first`, reply only to people who DM'd first),
-  and whether it may quit
+  where it may react or show typing, and whether it may redact its own
+  messages or quit
 - Untrusted-text marking and sanitizing, as a defense against prompt
   injection from chat
 - Nothing is missed between calls: a cursor plus an ack, not a poll
