@@ -11,6 +11,7 @@ SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON_RUNNING = f"pgrep -u {BOT['user']} -x louro"
 TIMEOUT = dt.timedelta(minutes=2)
+EXIT_CODES = {"not_allowed": 5}
 
 
 def as_bot(command):
@@ -23,6 +24,12 @@ def louro(*args, exit_code=0):
     status, out = machine.execute(command)
     assert status == exit_code, f"{command}: exit {status}, wanted {exit_code}: {out}"
     return json.loads(out)
+
+
+def refused(code, *args):
+    """Runs louro, expecting it to fail with code and its exit code."""
+    error = louro(*args, exit_code=EXIT_CODES[code])["error"]
+    assert error["code"] == code, error
 
 
 def register(account, password):
@@ -119,6 +126,14 @@ with subtest("louro connects, joins #bots, and status shows its grants"):
     status = status_until(joined)
     assert status["nick"] == BOT["user"], status
     assert status["grants"] == granted, status
+    stop()
+
+with subtest("sends outside the grants, and quit without irc.quit, are refused"):
+    start(grants())
+    refused("not_allowed", "send", "#lounge", "hi")
+    refused("not_allowed", "send", "@#bots", "hi")
+    refused("not_allowed", "quit")
+    assert louro("status")["connected"], "a refused quit leaves louro running"
     stop()
 
 with subtest("with irc.quit granted, louro quit stops the daemon and removes the socket"):
