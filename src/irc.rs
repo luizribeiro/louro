@@ -13,6 +13,7 @@ use crate::config::Server;
 use crate::error::{Code, Error, Result};
 
 const INCOMING_CAPACITY: usize = 256;
+const CTCP_VERSION: &str = concat!("louro ", env!("CARGO_PKG_VERSION"), " (papo)");
 
 #[derive(Clone, Serialize)]
 pub struct Incoming {
@@ -78,6 +79,7 @@ pub async fn connect(
         .nick(&server.nick)
         .alt_nicks(server.alt_nicks.clone())
         .bot()
+        .ctcp_version(Some(CTCP_VERSION))
         .autojoin(server.autojoin.clone());
     if let Some(username) = &server.username {
         builder = builder.username(username);
