@@ -45,6 +45,12 @@ pub enum Op {
     Names {
         channel: String,
     },
+    React {
+        target: String,
+        msgid: String,
+        reaction: String,
+        remove: bool,
+    },
     Quit {},
 }
 

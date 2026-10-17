@@ -58,11 +58,12 @@ def toml_lines(table, prefix=""):
             yield f"{prefix}{key} = {json.dumps(value)}"
 
 
-def grants(dm_read=False, dm_send=False, quit=False):
+def grants(dm_read=False, dm_send=False, quit=False, react=False):
     return {"irc": {
         "join": ["#bots"],
         "send": ["#bots"],
         "dm": {"read": dm_read, "send": dm_send},
+        "react": react,
         "quit": quit,
     }}
 
@@ -267,6 +268,19 @@ with subtest("send --reply-to threads the answer under luiz's message"):
     assert sent["threaded"], sent
     tags = heard("luiz", "#bots", "yes, in memory")
     assert reply_tag(tags) == question["msgid"], tags
+    stop()
+
+with subtest("react tags luiz's message with a reaction, only where irc.react grants"):
+    start(grants(react=["#bots"]))
+    send_raw("luiz", "PRIVMSG #bots :louro: react to this")
+    [message] = events_until(from_nick("luiz", "louro: react to this"))
+    louro("react", "#bots", message["msgid"], "👍")
+    tags = received("luiz", lambda tags, line: (
+        line.startswith(f":{BOT['user']}!") and " TAGMSG #bots" in line
+        and tags.get("+draft/react") == "👍"
+    ))
+    assert reply_tag(tags) == message["msgid"], tags
+    refused("not_allowed", "react", "#lounge", message["msgid"], "👍")
     stop()
 
 with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):

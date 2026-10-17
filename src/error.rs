@@ -14,6 +14,7 @@ pub enum Code {
     NotConnected,
     NotAllowed,
     BlockedSecret,
+    Unsupported,
     AuthFailed,
     ConnectFailed,
     Tls,
@@ -29,6 +30,7 @@ impl Code {
             Self::NoSession | Self::SessionExists => 3,
             Self::NotConnected => 4,
             Self::NotAllowed | Self::BlockedSecret => 5,
+            Self::Unsupported => 7,
             Self::AuthFailed | Self::ConnectFailed | Self::Tls => 9,
             Self::ServerError | Self::RequestTimeout => 10,
         }

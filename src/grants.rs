@@ -1,6 +1,6 @@
 //! Deny-by-default checks of what the agent asks for against louro.toml's `[grants]`.
 
-use crate::config::Grants;
+use crate::config::{Grants, Selector};
 use crate::error::{Code, Error, Result};
 use crate::irc::{Incoming, Kind, Outgoing};
 use crate::text;
@@ -50,6 +50,28 @@ impl Grants {
             kind,
             reply_to,
         })
+    }
+
+    /// Reacting needs `irc.react` for the target on top of the right to send there.
+    pub fn check_react(
+        &self,
+        target: &str,
+        msgid: &str,
+        reaction: &str,
+        dm: &DmHistory,
+    ) -> Result<()> {
+        self.check_also(&self.irc.react, "irc.react", target, dm)?;
+        text::check_msgid(msgid)?;
+        text::check_reaction(reaction)
+    }
+
+    /// A grant that narrows sending, like `irc.react`: the target needs both.
+    fn check_also(&self, grant: &Selector, name: &str, target: &str, dm: &DmHistory) -> Result<()> {
+        self.check_target(target, dm)?;
+        if grant.matches_sender(target, dm.account.as_deref()) {
+            return Ok(());
+        }
+        Err(not_allowed(format!("{name} does not grant {target}")))
     }
 
     /// Reading what a channel holds, like its members, needs `irc.join`.
@@ -271,6 +293,41 @@ mod tests {
             let error = grants.check_join(target).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
+    }
+
+    #[test]
+    fn reacts_only_where_irc_react_and_sending_both_grant() {
+        let grants = grants(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.send = ["#bots", "#lounge"]
+            irc.dm.send = ["luiz", "maria"]
+            irc.react = ["#bots", "account:luiz", "joao"]
+            "##,
+        );
+        let react = |target: &str, account: Option<&str>| {
+            let dm = DmHistory {
+                first: false,
+                account: account.map(String::from),
+            };
+            grants.check_react(target, "4y8kq7j2c9mnz", "👍", &dm)
+        };
+        assert!(react("#bots", None).is_ok());
+        assert!(react("luiz", Some("luiz")).is_ok());
+        for (target, account) in [
+            ("#lounge", None),
+            ("maria", None),
+            ("joao", None),
+            ("#ops", None),
+        ] {
+            assert_eq!(
+                react(target, account).unwrap_err().code,
+                Code::NotAllowed,
+                "{target}"
+            );
+        }
+        let bad_msgid = grants.check_react("#bots", "4y8k q7j2", "👍", &DmHistory::default());
+        assert_eq!(bad_msgid.unwrap_err().code, Code::Usage);
     }
 
     #[test]

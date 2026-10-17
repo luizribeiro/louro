@@ -7,6 +7,7 @@ use crate::irc::Secret;
 pub const MAX_TEXT_CHARS: usize = 1000;
 const MAX_LINES: usize = 5;
 const MAX_MSGID_BYTES: usize = 128;
+const MAX_REACTION_CHARS: usize = 32;
 /// Kept out of sends so the agent can't be steered into CTCP requests like DCC.
 const CTCP_DELIMITER: char = '\x01';
 
@@ -56,6 +57,20 @@ pub fn check_msgid(msgid: &str) -> Result<()> {
     }
     Err(Error::new(Code::Usage, format!("{msgid:?} is not a msgid"))
         .with_hint("use the msgid of an event from `louro wait` or `louro history`"))
+}
+
+/// A reaction is a short emoji or word, never a hidden message.
+pub fn check_reaction(reaction: &str) -> Result<()> {
+    let valid = !reaction.trim().is_empty()
+        && reaction.chars().count() <= MAX_REACTION_CHARS
+        && !reaction.chars().any(char::is_control);
+    if valid {
+        return Ok(());
+    }
+    Err(Error::new(
+        Code::Usage,
+        format!("a reaction is 1 to {MAX_REACTION_CHARS} characters with no control characters"),
+    ))
 }
 
 /// Refuses `text` if it contains the password, even split across lines, recased, or spaced out.
@@ -122,6 +137,20 @@ mod tests {
                 check_msgid(msgid).unwrap_err().code,
                 Code::Usage,
                 "{msgid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reaction_is_short_and_has_no_control_characters() {
+        for reaction in ["👍", "🇧🇷", "👨‍👩‍👧", "+1", &"🦜".repeat(32)] {
+            assert!(check_reaction(reaction).is_ok(), "{reaction:?}");
+        }
+        for reaction in ["", " ", "ok\r\nQUIT", "\u{1b}[31m", &"🦜".repeat(33)] {
+            assert_eq!(
+                check_reaction(reaction).unwrap_err().code,
+                Code::Usage,
+                "{reaction:?}"
             );
         }
     }

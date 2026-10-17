@@ -315,6 +315,15 @@ impl<I: Irc> Daemon<I> {
                 Ok(())
             }
             Ok(Op::Names { channel }) => reply(conn, self.names(&channel)).await,
+            Ok(Op::React {
+                target,
+                msgid,
+                reaction,
+                remove,
+            }) => {
+                let reacted = self.react(&target, &msgid, &reaction, remove).await;
+                reply(conn, reacted).await
+            }
             Ok(Op::Quit {}) => {
                 let allowed = self.grants.check_quit();
                 let quitting = allowed.is_ok();
@@ -359,6 +368,20 @@ impl<I: Irc> Daemon<I> {
             })
             .collect();
         Ok(json!({"channel": channel, "members": members}))
+    }
+
+    async fn react(
+        &self,
+        target: &str,
+        msgid: &str,
+        reaction: &str,
+        remove: bool,
+    ) -> Result<Value> {
+        text::check_secret(self.password.as_ref(), reaction)?;
+        let dm = self.dm_history(target);
+        self.grants.check_react(target, msgid, reaction, &dm)?;
+        self.irc.react(target, msgid, reaction, remove).await?;
+        Ok(json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove}))
     }
 
     async fn send(
@@ -485,6 +508,7 @@ mod tests {
             irc.send = ["#bots"]
             irc.dm.read = ["luiz", "maria"]
             irc.dm.send = ["$first"]
+            irc.react = ["#bots"]
             "##,
         )
         .unwrap()
@@ -493,6 +517,8 @@ mod tests {
     #[derive(Default)]
     struct FakeIrc {
         sent: Mutex<Vec<Outgoing>>,
+        /// Whether each reaction asked for was a removal.
+        reactions: Mutex<Vec<bool>>,
         quit: Notify,
     }
 
@@ -533,6 +559,17 @@ mod tests {
                 msgid: Some("c2m8w1u0pq7rs".into()),
                 threaded,
             }))
+        }
+
+        fn react(
+            &self,
+            _target: &str,
+            _msgid: &str,
+            _reaction: &str,
+            remove: bool,
+        ) -> impl Future<Output = Result<()>> + Send {
+            self.reactions.lock().unwrap().push(remove);
+            future::ready(Ok(()))
         }
 
         async fn quit(&self) {
@@ -653,6 +690,7 @@ mod tests {
                     "join": ["#bots", "#lounge"],
                     "send": ["#bots"],
                     "dm": {"read": ["luiz", "maria"], "send": ["$first"]},
+                    "react": ["#bots"],
                     "quit": false
                 }},
                 "last_error": null
@@ -891,6 +929,32 @@ mod tests {
         let elsewhere = daemon.call(send_request("#lounge", "hi all")).await;
         assert_eq!(elsewhere["Err"]["code"], "not_allowed");
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
+    fn react_request(target: &str, reaction: &str, remove: bool) -> Value {
+        json!({"v": 1, "op": "react", "args": {
+            "target": target, "msgid": "4y8kq7j2c9mnz", "reaction": reaction, "remove": remove
+        }})
+    }
+
+    #[tokio::test]
+    async fn react_adds_and_removes_a_reaction_where_granted() {
+        let daemon = launch(grants());
+        for remove in [false, true] {
+            let reply = daemon.call(react_request("#bots", "👍", remove)).await;
+            assert_eq!(reply["Ok"]["removed"], remove);
+        }
+        let refused = daemon.call(react_request("#lounge", "👍", false)).await;
+        assert_eq!(refused["Err"]["code"], "not_allowed");
+        assert_eq!(*daemon.irc.reactions.lock().unwrap(), [false, true]);
+    }
+
+    #[tokio::test]
+    async fn a_reaction_never_carries_the_password() {
+        let daemon = launch(grants());
+        let reply = daemon.call(react_request("#bots", PASSWORD, false)).await;
+        assert_eq!(reply["Err"]["code"], "blocked_secret");
+        assert!(daemon.irc.reactions.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

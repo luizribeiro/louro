@@ -67,6 +67,8 @@ pub struct Irc {
     /// Channels it may speak in.
     pub send: Selector,
     pub dm: Dm,
+    /// Channels and nicks whose messages it may react to; it must also be allowed to send there.
+    pub react: Selector,
     pub quit: bool,
 }
 
@@ -201,6 +203,7 @@ mod tests {
         irc.send = ["#bots"]
         irc.dm.read = true
         irc.dm.send = ["$first", "luiz"]
+        irc.react = ["#bots", "account:luiz"]
         irc.quit = true
     "##;
 
@@ -227,6 +230,7 @@ mod tests {
         assert!(irc.join.matches("#help-rust") && irc.send.matches("#bots"));
         assert!(!irc.send.matches("#lounge"));
         assert!(irc.dm.read.matches("maria") && irc.dm.send.matches("luiz"));
+        assert!(irc.react.matches("#bots") && irc.react.matches_sender("lz", Some("luiz")));
         assert!(irc.quit);
     }
 
@@ -237,7 +241,7 @@ mod tests {
         assert_eq!(server.sasl_username(), None);
         assert!(server.autojoin.is_empty());
         let irc = grants.irc;
-        for selector in [&irc.join, &irc.send, &irc.dm.read, &irc.dm.send] {
+        for selector in [&irc.join, &irc.send, &irc.dm.read, &irc.dm.send, &irc.react] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
         assert!(!irc.quit);

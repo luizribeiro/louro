@@ -101,6 +101,14 @@ pub trait Irc: Send + Sync + 'static {
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
     /// Sends one message (several lines become a multiline batch).
     fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send;
+    /// Adds `reaction` to the message `msgid` in `target`, or removes it.
+    fn react(
+        &self,
+        target: &str,
+        msgid: &str,
+        reaction: &str,
+        remove: bool,
+    ) -> impl Future<Output = Result<()>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
@@ -363,6 +371,17 @@ impl Irc for PapoIrc {
         })
     }
 
+    async fn react(&self, target: &str, msgid: &str, reaction: &str, remove: bool) -> Result<()> {
+        let request = if remove {
+            self.client.unreact(target, msgid, reaction)
+        } else {
+            self.client.react(target, msgid, reaction)
+        };
+        request
+            .await
+            .map_err(|error| Error::new(send_code(&error), error.to_string()))
+    }
+
     async fn quit(&self) {
         let _ = self.client.quit("").await;
     }
@@ -379,13 +398,14 @@ fn send_code(error: &papo::Error) -> Code {
         papo::Error::Timeout => Code::RequestTimeout,
         papo::Error::Server(_) => Code::ServerError,
         papo::Error::InvalidInput(_) => Code::Usage,
+        papo::Error::Unsupported(_) => Code::Unsupported,
         _ => Code::Internal,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use papo::{DisconnectCause, Disconnected, InvalidInput};
+    use papo::{DisconnectCause, Disconnected, InvalidInput, Unsupported, UnsupportedReason};
 
     use super::*;
 
@@ -506,6 +526,13 @@ mod tests {
             (
                 papo::Error::InvalidInput(InvalidInput::EmptyText),
                 Code::Usage,
+            ),
+            (
+                papo::Error::Unsupported(Unsupported::new(
+                    Feature::Reactions,
+                    UnsupportedReason::NotOffered,
+                )),
+                Code::Unsupported,
             ),
         ] {
             assert_eq!(send_code(&error), code);

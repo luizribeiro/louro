@@ -6,6 +6,7 @@ use clap::Subcommand;
 pub mod connect;
 mod names;
 mod quit;
+mod react;
 mod send;
 mod status;
 mod wait;
@@ -18,6 +19,8 @@ pub enum Command {
     Wait(wait::Args),
     /// Send a message, notice or action
     Send(send::Args),
+    /// React to a message with an emoji
+    React(react::Args),
     /// Members of a channel the bot is in
     Names(names::Args),
     /// Disconnect and stop the daemon
@@ -31,6 +34,7 @@ pub async fn dispatch(command: Command, socket: Option<&Path>) -> ExitCode {
         Command::Status(args) => args.run(socket).await,
         Command::Wait(args) => args.run(socket).await,
         Command::Send(args) => args.run(socket).await,
+        Command::React(args) => args.run(socket).await,
         Command::Names(args) => args.run(socket).await,
         Command::Quit(args) => args.run(socket).await,
         Command::Connect(args) => args.run(socket).await,
