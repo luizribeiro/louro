@@ -72,14 +72,24 @@ pub struct Sender {
     pub bot: bool,
 }
 
+impl Sender {
+    /// Nicks and accounts come from other users, so they are cleaned like their chat.
+    pub fn sanitized(self) -> Self {
+        let clean = |name: &str| text::sanitize(name).0;
+        Self {
+            nick: clean(&self.nick),
+            account: self.account.as_deref().map(clean),
+            ..self
+        }
+    }
+}
+
 /// A channel member as papo's state knows it; `prefix` is the highest rank, like `@`, or empty.
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Serialize)]
 pub struct Member {
-    pub nick: String,
+    #[serde(flatten)]
+    pub user: Sender,
     pub prefix: String,
-    pub account: Option<String>,
-    pub away: bool,
-    pub bot: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -429,26 +439,15 @@ impl Irc for PapoIrc {
         let mut members: Vec<Member> = state
             .channel(channel)?
             .members()
-            .map(|member| {
-                let Sender {
-                    nick,
-                    account,
-                    away,
-                    bot,
-                } = known_sender(&state, member.nick());
-                Member {
-                    nick,
-                    prefix: member
-                        .highest_prefix()
-                        .map(String::from)
-                        .unwrap_or_default(),
-                    account,
-                    away,
-                    bot,
-                }
+            .map(|member| Member {
+                user: known_sender(&state, member.nick()),
+                prefix: member
+                    .highest_prefix()
+                    .map(String::from)
+                    .unwrap_or_default(),
             })
             .collect();
-        members.sort_by(|a, b| a.nick.cmp(&b.nick));
+        members.sort_by(|a, b| a.user.nick.cmp(&b.user.nick));
         Some(members)
     }
 

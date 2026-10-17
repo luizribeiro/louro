@@ -142,15 +142,9 @@ impl Inbox {
     }
 
     pub fn push_invite(&self, invite: Invite) {
-        let clean = |name: &str| sanitize(name).0;
-        let from = Sender {
-            nick: clean(&invite.from.nick),
-            account: invite.from.account.as_deref().map(clean),
-            ..invite.from
-        };
         let invite = Invite {
-            from,
-            channel: clean(&invite.channel),
+            from: invite.from.sanitized(),
+            channel: sanitize(&invite.channel).0,
             ..invite
         };
         self.push_body(Body::Invite {

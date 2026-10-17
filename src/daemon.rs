@@ -370,8 +370,7 @@ impl<I: Irc> Daemon<I> {
             })?
             .into_iter()
             .map(|member| Member {
-                nick: text::sanitize(&member.nick).0,
-                account: member.account.map(|account| text::sanitize(&account).0),
+                user: member.user.sanitized(),
                 ..member
             })
             .collect();
@@ -604,18 +603,17 @@ mod tests {
             (channel == "#bots").then(|| {
                 vec![
                     Member {
-                        nick: "luiz".into(),
+                        user: from_luiz("").from,
                         prefix: "@".into(),
-                        account: Some("luiz".into()),
-                        away: false,
-                        bot: false,
                     },
                     Member {
-                        nick: "mal\u{1b}[2Jlory".into(),
+                        user: Sender {
+                            nick: "mal\u{1b}[2Jlory".into(),
+                            account: Some("mal\u{7}lory".into()),
+                            away: true,
+                            bot: true,
+                        },
                         prefix: String::new(),
-                        account: Some("mal\u{7}lory".into()),
-                        away: true,
-                        bot: true,
                     },
                 ]
             })
