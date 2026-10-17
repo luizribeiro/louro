@@ -1,0 +1,17 @@
+---
+name: Set up Nix
+description: Install Nix and configure the shared build cache.
+
+runs:
+  using: composite
+  steps:
+    # v35
+    # yamllint disable-line rule:line-length
+    - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
+    # v7
+    # yamllint disable-line rule:line-length
+    - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+      with:
+        # yamllint disable-line rule:line-length
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock', '**/*.nix') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
