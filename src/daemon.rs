@@ -956,8 +956,9 @@ mod tests {
 
         async fn wait(&self, timeout_secs: u64) -> (BufReader<UnixStream>, Value) {
             let mut conn = self.connect().await;
-            let request = json!({"v": 1, "op": "wait", "args": {"timeout_secs": timeout_secs}});
-            write_line(&mut conn, &request).await.unwrap();
+            write_line(&mut conn, &wait_request(timeout_secs))
+                .await
+                .unwrap();
             let reply = read_line(&mut conn).await.unwrap().unwrap();
             (conn, reply)
         }
@@ -967,8 +968,12 @@ mod tests {
         }
     }
 
+    fn wait_request(timeout_secs: u64) -> Value {
+        json!({"v": 1, "op": "wait", "args": {"timeout_secs": timeout_secs, "max": 20}})
+    }
+
     fn send_request(target: &str, text: &str) -> Value {
-        json!({"v": 1, "op": "send", "args": {"target": target, "text": text}})
+        json!({"v": 1, "op": "send", "args": {"target": target, "text": text, "kind": "message"}})
     }
 
     fn texts(reply: &Value) -> Vec<&str> {
@@ -1003,8 +1008,7 @@ mod tests {
         let waiting = tokio::spawn({
             let mut conn = daemon.connect().await;
             async move {
-                let request = json!({"v": 1, "op": "wait", "args": {"timeout_secs": 30}});
-                write_line(&mut conn, &request).await.unwrap();
+                write_line(&mut conn, &wait_request(30)).await.unwrap();
                 read_line::<Value>(&mut conn).await.unwrap().unwrap()
             }
         });
@@ -1056,8 +1060,7 @@ mod tests {
     async fn serves_other_requests_while_a_wait_is_parked() {
         let daemon = start();
         let mut parked = daemon.connect().await;
-        let request = json!({"v": 1, "op": "wait", "args": {"timeout_secs": 30}});
-        write_line(&mut parked, &request).await.unwrap();
+        write_line(&mut parked, &wait_request(30)).await.unwrap();
 
         let status = daemon
             .call(json!({"v": 1, "op": "status", "args": {}}))

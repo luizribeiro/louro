@@ -30,26 +30,19 @@ pub enum Op {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WaitArgs {
     pub timeout_secs: Option<u64>,
-    #[serde(default = "default_max")]
     pub max: usize,
-}
-
-const fn default_max() -> usize {
-    20
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SendArgs {
     pub target: String,
     pub text: String,
-    #[serde(default)]
     pub kind: Kind,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    #[default]
     Message,
     Notice,
     Action,
@@ -129,23 +122,6 @@ mod tests {
                 kind: Kind::Action
             })
         );
-    }
-
-    #[test]
-    fn wait_and_send_args_have_defaults() {
-        assert_eq!(
-            parse(json!({"v": 1, "op": "wait", "args": {}})).op,
-            Op::Wait(WaitArgs {
-                timeout_secs: None,
-                max: 20
-            })
-        );
-        let Op::Send(send) =
-            parse(json!({"v": 1, "op": "send", "args": {"target": "maria", "text": "thanks!"}})).op
-        else {
-            panic!("expected a send");
-        };
-        assert_eq!(send.kind, Kind::Message);
     }
 
     #[test]
