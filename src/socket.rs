@@ -28,44 +28,63 @@ impl Request {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+/// A request to the daemon; the commands that only forward one parse straight into it.
+#[derive(Deserialize, Serialize, clap::Subcommand)]
 #[serde(tag = "op", content = "args", rename_all = "snake_case")]
 pub enum Op {
+    /// Connection state, nick, channels, and what the bot may do (grants)
     Status {},
-    Wait {
-        timeout: u64,
-        max: NonZeroUsize,
-    },
+    #[command(skip)]
+    Wait { timeout: u64, max: NonZeroUsize },
+    #[command(skip)]
     Send {
         target: String,
         text: String,
         kind: Kind,
         reply_to: Option<String>,
     },
+    /// Members of a channel the bot is in
     Names {
+        /// A channel the bot is in
         channel: String,
     },
+    /// React to a message with an emoji
     React {
+        /// Channel or nick the message was sent to
         target: String,
+        /// The msgid of the message to react to
         msgid: String,
+        /// A short emoji or word, up to 32 characters
         reaction: String,
+        /// Remove this reaction instead of adding it
+        #[arg(long)]
         remove: bool,
     },
+    /// Show that the bot is typing
     Typing {
+        /// Channel or nick to show typing to
         target: String,
+        /// `active` while composing, `paused`, or `done` once finished
         state: Typing,
     },
+    /// Delete a message the bot sent
     Redact {
+        /// Channel or nick the message was sent to
         target: String,
+        /// The msgid `louro send` returned
         msgid: String,
+        /// Why, shown to clients that support redaction
+        #[arg(long, default_value = "")]
         reason: String,
     },
+    #[command(skip)]
     History {
         target: String,
         limit: usize,
         before: Option<String>,
         after: Option<String>,
     },
+    /// Disconnect and stop the daemon
     Quit {},
 }
 
