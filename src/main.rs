@@ -20,7 +20,7 @@ mod text;
 use cli::{Cli, Command, PRIMER};
 use error::{Code, Error, Result};
 use irc::Kind;
-use socket::{Connection, Op, SendArgs};
+use socket::{Connection, Op};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -57,7 +57,12 @@ async fn wait(socket: Option<&Path>, args: cli::WaitArgs) -> ExitCode {
         Ok(connection) => connection,
         Err(err) => return output::emit::<()>(Err(err)),
     };
-    let result = connection.request(Op::Wait(args)).await;
+    let result = connection
+        .request(Op::Wait {
+            timeout: args.timeout,
+            max: args.max,
+        })
+        .await;
     let printed_ok = result.is_ok();
     let exit_code = output::emit(result);
     if printed_ok {
@@ -75,11 +80,11 @@ async fn send(socket: Option<&Path>, args: cli::SendArgs) -> Result<Value> {
     let text = read_text(args.text)?;
     request(
         socket,
-        Op::Send(SendArgs {
+        Op::Send {
             target: args.target,
             text,
             kind,
-        }),
+        },
     )
     .await
 }

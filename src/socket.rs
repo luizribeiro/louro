@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt::Display;
+use std::num::NonZeroUsize;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,6 @@ use serde_json::Value;
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-pub use crate::cli::WaitArgs;
 use crate::error::{Code, Error, Result};
 use crate::irc::Kind;
 
@@ -32,16 +32,16 @@ impl Request {
 #[serde(tag = "op", content = "args", rename_all = "snake_case")]
 pub enum Op {
     Status {},
-    Wait(WaitArgs),
-    Send(SendArgs),
+    Wait {
+        timeout: u64,
+        max: NonZeroUsize,
+    },
+    Send {
+        target: String,
+        text: String,
+        kind: Kind,
+    },
     Quit {},
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct SendArgs {
-    pub target: String,
-    pub text: String,
-    pub kind: Kind,
 }
 
 /// What the client writes after printing a wait result; only then does the daemon move its cursor.

@@ -2,6 +2,7 @@
 //! only once the client has acked.
 
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -10,7 +11,6 @@ use tokio::sync::Notify;
 use tokio::time::{self, Instant};
 
 use crate::irc::Incoming;
-use crate::socket::WaitArgs;
 use crate::text::sanitize;
 
 const BUFFER_CAP: usize = 10_000;
@@ -95,13 +95,13 @@ impl Inbox {
         self.arrived.notify_waiters();
     }
 
-    pub async fn wait(&self, args: &WaitArgs) -> Batch {
-        let deadline = Instant::now().checked_add(Duration::from_secs(args.timeout));
+    pub async fn wait(&self, timeout: u64, max: NonZeroUsize) -> Batch {
+        let deadline = Instant::now().checked_add(Duration::from_secs(timeout));
         loop {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
-            let batch = self.buffer().batch(args.max.get());
+            let batch = self.buffer().batch(max.get());
             if !batch.events.is_empty() {
                 return batch;
             }
@@ -131,7 +131,6 @@ impl Inbox {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     use super::*;
@@ -170,11 +169,8 @@ mod tests {
         }
     }
 
-    fn wait_args(timeout_secs: u64, max: usize) -> WaitArgs {
-        WaitArgs {
-            timeout: timeout_secs,
-            max: NonZeroUsize::new(max).unwrap(),
-        }
+    fn max(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).unwrap()
     }
 
     fn ids(batch: &Batch) -> Vec<u64> {
@@ -201,7 +197,7 @@ mod tests {
         let inbox = Arc::new(Inbox::default());
         let waiter = tokio::spawn({
             let inbox = Arc::clone(&inbox);
-            async move { inbox.wait(&wait_args(u64::MAX, 20)).await }
+            async move { inbox.wait(u64::MAX, max(20)).await }
         });
         time::sleep(Duration::from_secs(3600)).await;
         inbox.push(from_maria("louro: still there?"));
@@ -215,13 +211,13 @@ mod tests {
         inbox.push(from_joao("it does, it's a config option"));
         inbox.push(from_maria("louro: which one?"));
 
-        let first = inbox.wait(&wait_args(0, 2)).await;
+        let first = inbox.wait(0, max(2)).await;
         assert_eq!(ids(&first), [1, 2]);
         assert!(first.more);
         assert_eq!(first.cursor, 2);
 
         inbox.ack(first.cursor);
-        let rest = inbox.wait(&wait_args(0, 2)).await;
+        let rest = inbox.wait(0, max(2)).await;
         assert_eq!(ids(&rest), [3]);
         assert!(!rest.more);
     }
@@ -232,7 +228,7 @@ mod tests {
         for n in 0..BUFFER_CAP + 5 {
             inbox.push(from_joao(&format!("spam {n}")));
         }
-        let batch = inbox.wait(&wait_args(0, 1)).await;
+        let batch = inbox.wait(0, max(1)).await;
         assert_eq!(ids(&batch), [6]);
         assert!(batch.more);
     }

@@ -14,12 +14,10 @@ use crate::cli::ConnectArgs;
 use crate::error::{Code, Error, Result};
 use crate::grants::Grants;
 use crate::inbox::Inbox;
-use crate::irc::{self, Incoming, Irc, IrcStatus, Secret};
+use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret};
 use crate::output;
 use crate::password::{self, Source};
-use crate::socket::{
-    Ack, Op, Request, SendArgs, VERSION, read_line, resolve_socket_path, write_line,
-};
+use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 
 struct Daemon<I> {
     grants: Grants,
@@ -151,9 +149,11 @@ impl<I: Irc> Daemon<I> {
         match op {
             Err(error) => reply(conn, Err::<(), _>(error)).await,
             Ok(Op::Status {}) => reply(conn, Ok(self.status())).await,
-            Ok(Op::Send(args)) => reply(conn, self.send(args).await).await,
-            Ok(Op::Wait(args)) => {
-                let batch = self.inbox.wait(&args).await;
+            Ok(Op::Send { target, text, kind }) => {
+                reply(conn, self.send(target, text, kind).await).await
+            }
+            Ok(Op::Wait { timeout, max }) => {
+                let batch = self.inbox.wait(timeout, max).await;
                 let cursor = batch.cursor;
                 reply(conn, Ok(batch)).await?;
                 if let Some(Ack { ack: true }) = read_line(conn).await? {
@@ -179,8 +179,8 @@ impl<I: Irc> Daemon<I> {
         json!({"connected": connected, "nick": nick, "channels": channels, "policy": policy})
     }
 
-    async fn send(&self, args: SendArgs) -> Result<Value> {
-        let message = self.grants.check_send(args)?;
+    async fn send(&self, target: String, text: String, kind: Kind) -> Result<Value> {
+        let message = self.grants.check_send(target, &text, kind)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let msgid = self.irc.send(message).await?;
         Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
@@ -215,7 +215,7 @@ mod tests {
 
     use super::*;
     use crate::inbox::NOTICE;
-    use crate::irc::{Kind, Outgoing, Sender};
+    use crate::irc::{Outgoing, Sender};
 
     fn from_maria(text: &str) -> Incoming {
         Incoming {

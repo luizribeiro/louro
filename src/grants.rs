@@ -1,6 +1,5 @@
 use crate::error::{Code, Error, Result};
-use crate::irc::{Outgoing, Secret};
-use crate::socket::SendArgs;
+use crate::irc::{Kind, Outgoing, Secret};
 use crate::text;
 
 /// The operator's policy. `password` is here only so `send` can refuse to post it.
@@ -11,18 +10,18 @@ pub struct Grants {
 }
 
 impl Grants {
-    pub fn check_send(&self, args: SendArgs) -> Result<Outgoing> {
-        if text::blocked_secret(self.password.as_ref(), &args.text) {
+    pub fn check_send(&self, target: String, text: &str, kind: Kind) -> Result<Outgoing> {
+        if text::blocked_secret(self.password.as_ref(), text) {
             return Err(Error::new(
                 Code::BlockedSecret,
                 "the text contains the bot's password, so it was not sent",
             ));
         }
-        self.check_target(&args.target)?;
+        self.check_target(&target)?;
         Ok(Outgoing {
-            text: text::clean_lines(&args.text)?,
-            target: args.target,
-            kind: args.kind,
+            text: text::clean_lines(text)?,
+            target,
+            kind,
         })
     }
 
@@ -67,7 +66,6 @@ fn not_allowed(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::irc::Kind;
 
     const PASSWORD: &str = "c0rrect-h0rse-battery";
 
@@ -79,16 +77,10 @@ mod tests {
         }
     }
 
-    fn send(target: &str, text: &str) -> SendArgs {
-        SendArgs {
-            target: target.into(),
-            text: text.into(),
-            kind: Kind::Message,
-        }
-    }
-
     fn refused(grants: &Grants, target: &str, text: &str) -> Error {
-        grants.check_send(send(target, text)).unwrap_err()
+        grants
+            .check_send(target.into(), text, Kind::Message)
+            .unwrap_err()
     }
 
     #[test]
@@ -117,7 +109,11 @@ mod tests {
                 "{target}"
             );
         }
-        assert!(dm_on.check_send(send("maria", "thanks!")).is_ok());
+        assert!(
+            dm_on
+                .check_send("maria".into(), "thanks!", Kind::Message)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -141,7 +137,11 @@ mod tests {
                 password,
                 ..grants()
             };
-            assert!(grants.check_send(send("#bots", "hello")).is_ok());
+            assert!(
+                grants
+                    .check_send("#bots".into(), "hello", Kind::Message)
+                    .is_ok()
+            );
         }
     }
 }
