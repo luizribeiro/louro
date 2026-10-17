@@ -141,10 +141,16 @@ def events_until(predicate):
     return events
 
 
+def chat_from(nick, events):
+    return [event for event in events if event.get("from", {}).get("nick") == nick]
+
+
 def from_nick(nick, text):
-    return lambda events: any(
-        event["from"]["nick"] == nick and event["text"] == text for event in events
-    )
+    return lambda events: any(event["text"] == text for event in chat_from(nick, events))
+
+
+def connection_states(events):
+    return [event["state"] for event in events if event["type"] == "connection"]
 
 
 def human_file(nick, name):
@@ -266,7 +272,8 @@ with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows 
     assert "; reconnecting in " in status["last_error"]["message"], status
     start_humans()
     send_raw("luiz", "PRIVMSG #bots :welcome back")
-    events_until(from_nick("luiz", "welcome back"))
+    events = events_until(from_nick("luiz", "welcome back"))
+    assert connection_states(events) == ["disconnected", "reconnected"], events
     louro("send", "#bots", "glad to be back")
     heard("luiz", "#bots", "glad to be back")
     stop()
@@ -300,7 +307,10 @@ with subtest("chat sent while louro was cut off arrives from history after it re
         timeout=TIMEOUT,
     )
     louro_blocked(False)
-    [missed] = events_until(from_nick("luiz", "you missed this"))
+    events = events_until(from_nick("luiz", "you missed this"))
+    assert connection_states(events) == ["disconnected", "reconnected"], events
+    assert isinstance(events[0]["retry_in"], int) and "untrusted" not in events[0], events
+    [missed] = chat_from("luiz", events)
     assert missed["origin"] == "history" and missed["untrusted"], missed
     stop()
 

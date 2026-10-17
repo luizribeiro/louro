@@ -1,5 +1,5 @@
-//! The event inbox: buffers incoming chat and lets `wait` block for it, moving the read cursor
-//! only once the client has acked.
+//! The event inbox: buffers incoming chat and connection changes and lets `wait` block for
+//! them, moving the read cursor only once the client has acked.
 
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -21,23 +21,49 @@ pub const NOTICE: &str =
 pub struct Event {
     id: u64,
     #[serde(flatten)]
-    incoming: Incoming,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    truncated: bool,
-    untrusted: bool,
+    body: Body,
 }
 
-impl Event {
-    fn ingest(id: u64, mut incoming: Incoming) -> Self {
+#[derive(Clone, Serialize)]
+#[serde(untagged)]
+enum Body {
+    Chat {
+        #[serde(flatten)]
+        incoming: Incoming,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+        untrusted: bool,
+    },
+    Connection(Connection),
+}
+
+impl Body {
+    fn chat(mut incoming: Incoming) -> Self {
         let (text, truncated) = sanitize(&incoming.text);
         incoming.text = text;
-        Self {
-            id,
+        Self::Chat {
             incoming,
             truncated,
             untrusted: true,
         }
     }
+}
+
+/// louro's own report that the IRC connection dropped or came back; not chat, so not untrusted.
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename = "connection")]
+pub struct Connection {
+    pub time: String,
+    pub state: ConnectionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_in: Option<u64>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    Disconnected,
+    Reconnected,
 }
 
 #[derive(Serialize)]
@@ -57,12 +83,15 @@ struct Buffer {
 }
 
 impl Buffer {
-    fn push(&mut self, incoming: Incoming) {
+    fn push(&mut self, body: Body) {
         self.last_id += 1;
         if self.unread.len() == BUFFER_CAP {
             self.unread.pop_front();
         }
-        self.unread.push_back(Event::ingest(self.last_id, incoming));
+        self.unread.push_back(Event {
+            id: self.last_id,
+            body,
+        });
     }
 
     fn batch(&self, max: usize) -> Batch {
@@ -91,7 +120,15 @@ pub struct Inbox {
 
 impl Inbox {
     pub fn push(&self, incoming: Incoming) {
-        self.buffer().push(incoming);
+        self.push_body(Body::chat(incoming));
+    }
+
+    pub fn push_connection(&self, connection: Connection) {
+        self.push_body(Body::Connection(connection));
+    }
+
+    fn push_body(&self, body: Body) {
+        self.buffer().push(body);
         self.arrived.notify_waiters();
     }
 
@@ -183,14 +220,39 @@ mod tests {
         assert_eq!(sanitize("olá, joão! 🦜").0, "olá, joão! 🦜");
 
         let exactly = "ã".repeat(MAX_TEXT_CHARS);
-        let event = Event::ingest(1, from_maria(&exactly));
-        assert_eq!(event.incoming.text, exactly);
-        assert!(!event.truncated);
+        let event = serde_json::to_value(Body::chat(from_maria(&exactly))).unwrap();
+        assert_eq!(event["text"], exactly);
+        assert!(event.get("truncated").is_none());
 
-        let flood = Event::ingest(2, from_maria(&format!("{exactly}and more")));
-        assert_eq!(flood.incoming.text, exactly);
-        assert!(flood.truncated);
-        assert_eq!(serde_json::to_value(&flood).unwrap()["truncated"], true);
+        let flood = Body::chat(from_maria(&format!("{exactly}and more")));
+        let flood = serde_json::to_value(flood).unwrap();
+        assert_eq!(flood["text"], exactly);
+        assert_eq!(flood["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn a_connection_event_is_louros_own_so_not_untrusted() {
+        let inbox = Inbox::default();
+        inbox.push_connection(Connection {
+            time: "2026-10-16T21:05:00Z".into(),
+            state: ConnectionState::Disconnected,
+            retry_in: Some(4),
+        });
+        inbox.push_connection(Connection {
+            time: "2026-10-16T21:05:04Z".into(),
+            state: ConnectionState::Reconnected,
+            retry_in: None,
+        });
+        let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
+        assert_eq!(
+            batch["events"],
+            serde_json::json!([
+                {"id": 1, "type": "connection", "time": "2026-10-16T21:05:00Z",
+                 "state": "disconnected", "retry_in": 4},
+                {"id": 2, "type": "connection", "time": "2026-10-16T21:05:04Z",
+                 "state": "reconnected"},
+            ])
+        );
     }
 
     #[tokio::test(start_paused = true)]

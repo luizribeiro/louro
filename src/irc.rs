@@ -26,6 +26,8 @@ pub enum Update {
         cause: String,
         retry_in: Option<u64>,
     },
+    /// Registration completed, first at connect and again after each reconnect.
+    Registered,
 }
 
 #[derive(Clone, Serialize)]
@@ -210,6 +212,7 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             .filter_map(|message| to_incoming(message, state))
             .map(Update::Chat)
             .collect(),
+        Event::Registered(_) => vec![Update::Registered],
         Event::Disconnected(disconnected) => vec![Update::Disconnected {
             cause: disconnected.cause.to_string(),
             retry_in: disconnected.retry_in.map(whole_seconds),

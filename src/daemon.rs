@@ -3,6 +3,7 @@ use std::collections::hash_map::Entry;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 use std::{fs, io};
@@ -17,7 +18,7 @@ use tokio::sync::{Notify, mpsc};
 use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
-use crate::inbox::Inbox;
+use crate::inbox::{Connection, ConnectionState, Inbox};
 use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret, Sender, Update};
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -48,6 +49,8 @@ struct Daemon<I> {
     /// Lowercased nicks whose DM reached the agent, for `irc.dm.send`'s `$first` and `account:`.
     dm_senders: Mutex<HashMap<String, DmSender>>,
     last_error: Mutex<Option<Problem>>,
+    /// Set from a disconnect until the next registration, so the agent hears of each outage once.
+    offline: AtomicBool,
     quit: Notify,
 }
 
@@ -76,6 +79,7 @@ pub async fn run(
         inbox: Inbox::default(),
         dm_senders: Mutex::default(),
         last_error: Mutex::default(),
+        offline: AtomicBool::new(false),
         quit: Notify::new(),
     });
     tokio::pin!(stop);
@@ -164,8 +168,24 @@ impl<I: Irc> Daemon<I> {
             Update::Chat(incoming) => self.ingest(incoming),
             Update::Disconnected { cause, retry_in } => {
                 self.record_problem(disconnect_message(&cause, retry_in));
+                if retry_in.is_some() && !self.offline.swap(true, Ordering::Relaxed) {
+                    self.report_connection(ConnectionState::Disconnected, retry_in);
+                }
+            }
+            Update::Registered => {
+                if self.offline.swap(false, Ordering::Relaxed) {
+                    self.report_connection(ConnectionState::Reconnected, None);
+                }
             }
         }
+    }
+
+    fn report_connection(&self, state: ConnectionState, retry_in: Option<u64>) {
+        self.inbox.push_connection(Connection {
+            time: now(),
+            state,
+            retry_in,
+        });
     }
 
     /// Keeps `message` for `status`, unless it contains the password.
@@ -175,7 +195,7 @@ impl<I: Irc> Daemon<I> {
             Err(_) => "a problem whose description contained the bot's password".into(),
         };
         *self.last_error() = Some(Problem {
-            time: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
+            time: now(),
             message,
         });
     }
@@ -302,6 +322,10 @@ impl<I: Irc> Daemon<I> {
         let msgid = self.irc.send(message).await?;
         Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
     }
+}
+
+fn now() -> String {
+    humantime::format_rfc3339_seconds(SystemTime::now()).to_string()
 }
 
 fn disconnect_message(cause: &str, retry_in: Option<u64>) -> String {
@@ -580,6 +604,36 @@ mod tests {
             disconnect_message("the connection was lost", None),
             "the connection was lost; papo stopped reconnecting"
         );
+    }
+
+    #[tokio::test]
+    async fn wait_reports_each_outage_once_whatever_the_grants() {
+        let daemon = launch(Grants::default());
+        daemon.update(Update::Registered).await;
+        for retry_in in [Some(1), Some(2), Some(4)] {
+            daemon
+                .update(Update::Disconnected {
+                    cause: "the connection was lost".into(),
+                    retry_in,
+                })
+                .await;
+        }
+        daemon.update(Update::Registered).await;
+
+        let (_, reply) = daemon.wait(5).await;
+        let events = reply["Ok"]["events"].as_array().unwrap();
+        let states: Vec<_> = events
+            .iter()
+            .map(|event| (&event["type"], &event["state"], &event["retry_in"]))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (&json!("connection"), &json!("disconnected"), &json!(1)),
+                (&json!("connection"), &json!("reconnected"), &Value::Null),
+            ]
+        );
+        assert!(events.iter().all(|event| event.get("untrusted").is_none()));
     }
 
     #[tokio::test]
