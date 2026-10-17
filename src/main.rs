@@ -9,6 +9,7 @@ mod cli;
 mod connect;
 mod daemon;
 mod error;
+mod grants;
 mod inbox;
 mod irc;
 mod output;

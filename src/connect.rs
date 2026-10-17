@@ -12,8 +12,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli::ConnectArgs;
-use crate::daemon::{self, Config};
+use crate::daemon;
 use crate::error::{Code, Error, Result};
+use crate::grants::Grants;
 use crate::irc::{self, Secret};
 use crate::output;
 use crate::password::{self, Source};
@@ -113,12 +114,12 @@ async fn start(
         "channels": args.joins,
         "socket": socket,
     })));
-    let config = Config {
+    let grants = Grants {
         channels: args.joins,
         allow_dm: args.allow_dm,
         password,
     };
-    Ok(async move { daemon::run(config, irc, incoming, listener, &socket).await })
+    Ok(async move { daemon::run(grants, irc, incoming, listener, &socket).await })
 }
 
 fn read_password(args: &ConnectArgs) -> Result<Option<Secret>> {

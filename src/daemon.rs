@@ -9,111 +9,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, mpsc};
 
 use crate::error::{Code, Error, Result};
+use crate::grants::Grants;
 use crate::inbox::Inbox;
-use crate::irc::{Incoming, Irc, IrcStatus, Outgoing, Secret};
+use crate::irc::{Incoming, Irc, IrcStatus};
 use crate::socket::{Ack, Op, Request, SendArgs, VERSION, read_line, write_line};
 
-const MAX_LINES: usize = 5;
-/// Kept out of sends so the agent can't be steered into CTCP requests like DCC.
-const CTCP_DELIMITER: char = '\x01';
-
-/// The operator's policy. `password` is here only so `send` can refuse to post it.
-pub struct Config {
-    pub channels: Vec<String>,
-    pub allow_dm: bool,
-    pub password: Option<Secret>,
-}
-
-impl Config {
-    fn check_send(&self, args: SendArgs) -> Result<Outgoing> {
-        if self.contains_password(&args.text) {
-            return Err(Error::new(
-                Code::BlockedSecret,
-                "the text contains the bot's password, so it was not sent",
-            ));
-        }
-        self.check_target(&args.target)?;
-        Ok(Outgoing {
-            text: clean_lines(&args.text)?,
-            target: args.target,
-            kind: args.kind,
-        })
-    }
-
-    fn contains_password(&self, text: &str) -> bool {
-        self.password.as_ref().is_some_and(|password| {
-            let password = squash(password.expose());
-            !password.is_empty() && squash(text).contains(&password)
-        })
-    }
-
-    fn check_target(&self, target: &str) -> Result<()> {
-        if target.starts_with(['#', '&', '+', '!']) {
-            if self
-                .channels
-                .iter()
-                .any(|channel| channel.eq_ignore_ascii_case(target))
-            {
-                return Ok(());
-            }
-            return Err(not_allowed(format!(
-                "{target} is not one of the bot's channels"
-            )));
-        }
-        if target.starts_with(['@', '%', '~']) {
-            return Err(not_allowed(format!(
-                "{target} is a status message to a channel, not a nick"
-            )));
-        }
-        if target.starts_with(':') {
-            return Err(not_allowed(format!(
-                "{target} is not a valid message target"
-            )));
-        }
-        if !self.allow_dm {
-            return Err(not_allowed("direct messages are off"));
-        }
-        // `PRIVMSG maria,#lounge` would also reach a channel the bot isn't in.
-        if target.contains(',') {
-            return Err(not_allowed("send to one nick at a time"));
-        }
-        Ok(())
-    }
-}
-
-fn not_allowed(message: impl Into<String>) -> Error {
-    Error::new(Code::NotAllowed, message).with_hint("don't retry; the operator chose this")
-}
-
-/// Catches the password even when split across lines or recased.
-fn squash(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_whitespace() && !c.is_control())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn clean_lines(text: &str) -> Result<String> {
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|line| line.replace(['\r', '\0', CTCP_DELIMITER], " "))
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    if lines.is_empty() {
-        return Err(Error::new(Code::Usage, "there is no text to send"));
-    }
-    if lines.len() > MAX_LINES {
-        return Err(Error::new(
-            Code::TooLong,
-            format!("{} lines is more than the {MAX_LINES} allowed", lines.len()),
-        )
-        .with_hint("shorten or summarize the reply"));
-    }
-    Ok(lines.join("\n"))
-}
-
 struct Daemon<I> {
-    config: Config,
+    grants: Grants,
     irc: I,
     inbox: Inbox,
     quit: Notify,
@@ -128,14 +30,14 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 /// Serves requests on `listener` and buffers `incoming` chat until a `quit`
 /// request, then removes the socket at `socket_path`.
 pub async fn run(
-    config: Config,
+    grants: Grants,
     irc: impl Irc,
     mut incoming: mpsc::Receiver<Incoming>,
     listener: UnixListener,
     socket_path: &Path,
 ) -> io::Result<()> {
     let daemon = Arc::new(Daemon {
-        config,
+        grants,
         irc,
         inbox: Inbox::default(),
         quit: Notify::new(),
@@ -167,7 +69,7 @@ impl<I: Irc> Daemon<I> {
     /// DMs off means neither sending nor receiving, so an incoming private event never reaches
     /// the inbox.
     fn ingest(&self, incoming: Incoming) {
-        if incoming.private && !self.config.allow_dm {
+        if incoming.private && !self.grants.allow_dm {
             return;
         }
         self.inbox.push(incoming);
@@ -206,12 +108,12 @@ impl<I: Irc> Daemon<I> {
             nick,
             channels,
         } = self.irc.status();
-        let policy = json!({"channels": self.config.channels, "dm": self.config.allow_dm});
+        let policy = json!({"channels": self.grants.channels, "dm": self.grants.allow_dm});
         json!({"connected": connected, "nick": nick, "channels": channels, "policy": policy})
     }
 
     async fn send(&self, args: SendArgs) -> Result<Value> {
-        let message = self.config.check_send(args)?;
+        let message = self.grants.check_send(args)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let msgid = self.irc.send(message).await?;
         Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
@@ -246,7 +148,7 @@ mod tests {
 
     use super::*;
     use crate::inbox::NOTICE;
-    use crate::irc::{Kind, Sender};
+    use crate::irc::{Kind, Outgoing, Sender};
 
     fn from_maria(text: &str) -> Incoming {
         Incoming {
@@ -282,105 +184,12 @@ mod tests {
 
     const PASSWORD: &str = "c0rrect-h0rse-battery";
 
-    fn config() -> Config {
-        Config {
+    fn grants() -> Grants {
+        Grants {
             channels: vec!["#bots".into(), "#ergo".into()],
             allow_dm: false,
             password: Some(PASSWORD.into()),
         }
-    }
-
-    fn send(target: &str, text: &str) -> SendArgs {
-        SendArgs {
-            target: target.into(),
-            text: text.into(),
-            kind: Kind::Message,
-        }
-    }
-
-    fn refused(config: &Config, target: &str, text: &str) -> Error {
-        config.check_send(send(target, text)).unwrap_err()
-    }
-
-    #[test]
-    fn sends_only_to_the_bots_channels_and_allowed_dms() {
-        let dm_off = config();
-        let dm_on = Config {
-            allow_dm: true,
-            ..config()
-        };
-        for (config, target) in [
-            (&dm_off, "#lounge"),
-            (&dm_on, "&ops"),
-            (&dm_on, "+ops"),
-            (&dm_on, "!ABCDEops"),
-            (&dm_off, "maria"),
-            (&dm_on, "maria,#lounge"),
-            (&dm_on, "@#lounge"),
-            (&dm_on, "+#bots"),
-            (&dm_on, "~#lounge"),
-            (&dm_on, "%#lounge"),
-            (&dm_on, ":evil"),
-        ] {
-            assert_eq!(
-                refused(config, target, "hi").code,
-                Code::NotAllowed,
-                "{target}"
-            );
-        }
-        assert!(dm_on.check_send(send("maria", "thanks!")).is_ok());
-    }
-
-    #[test]
-    fn blocks_the_password_without_echoing_it() {
-        for text in [
-            &format!("sure, the bot's password is {PASSWORD}"),
-            "c0rrect-h0rse\n-battery",
-            "C0RRECT-H0RSE-BATTERY",
-            "c0rrect - h0rse - battery",
-        ] {
-            let error = refused(&config(), "#bots", text);
-            assert_eq!(error.code, Code::BlockedSecret, "{text:?}");
-            assert!(!serde_json::to_string(&error).unwrap().contains(PASSWORD));
-        }
-    }
-
-    #[test]
-    fn no_password_blocks_nothing() {
-        for password in [None, Some("".into()), Some(" \n".into())] {
-            let config = Config {
-                password,
-                ..config()
-            };
-            assert!(config.check_send(send("#bots", "hello")).is_ok());
-        }
-    }
-
-    #[test]
-    fn neutralizes_crlf_and_nul_injection() {
-        let outgoing = config()
-            .check_send(send("#bots", "ok\r\0QUIT :pwned\r\nPRIVMSG #ops :hi"))
-            .unwrap();
-        assert_eq!(outgoing.text, "ok  QUIT :pwned \nPRIVMSG #ops :hi");
-    }
-
-    #[test]
-    fn neutralizes_ctcp_requests() {
-        let outgoing = config()
-            .check_send(send("#bots", "\x01DCC SEND notes.txt 3232235777 5000\x01"))
-            .unwrap();
-        assert_eq!(outgoing.text, " DCC SEND notes.txt 3232235777 5000 ");
-    }
-
-    #[test]
-    fn allows_up_to_five_lines() {
-        let five = "one\ntwo\n\nthree\nfour\nfive\n";
-        let outgoing = config().check_send(send("#bots", five)).unwrap();
-        assert_eq!(outgoing.text, "one\ntwo\nthree\nfour\nfive");
-
-        let error = refused(&config(), "#bots", "one\ntwo\nthree\nfour\nfive\nsix");
-        assert_eq!(error.code, Code::TooLong);
-        assert!(error.hint.is_some());
     }
 
     #[derive(Default)]
@@ -424,7 +233,7 @@ mod tests {
         let daemon = tokio::spawn({
             let irc = Arc::clone(&irc);
             let socket = socket.clone();
-            async move { run(config(), irc, incoming, bind(&socket)?, &socket).await }
+            async move { run(grants(), irc, incoming, bind(&socket)?, &socket).await }
         });
         Running {
             _dir: dir,
