@@ -65,6 +65,11 @@ impl Grants {
         text::check_reaction(reaction)
     }
 
+    /// Showing typing needs `irc.typing` for the target on top of the right to send there.
+    pub fn check_typing(&self, target: &str, dm: &DmHistory) -> Result<()> {
+        self.check_also(&self.irc.typing, "irc.typing", target, dm)
+    }
+
     /// A grant that narrows sending, like `irc.react`: the target needs both.
     fn check_also(&self, grant: &Selector, name: &str, target: &str, dm: &DmHistory) -> Result<()> {
         self.check_target(target, dm)?;
@@ -328,6 +333,23 @@ mod tests {
         }
         let bad_msgid = grants.check_react("#bots", "4y8k q7j2", "👍", &DmHistory::default());
         assert_eq!(bad_msgid.unwrap_err().code, Code::Usage);
+    }
+
+    #[test]
+    fn shows_typing_only_where_irc_typing_and_irc_send_both_grant() {
+        let grants = grants(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.send = ["#bots"]
+            irc.typing = ["#bots", "#lounge"]
+            "##,
+        );
+        let dm = DmHistory::default();
+        assert!(grants.check_typing("#bots", &dm).is_ok());
+        for target in ["#lounge", "#ops", "luiz"] {
+            let error = grants.check_typing(target, &dm).unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{target}");
+        }
     }
 
     #[test]

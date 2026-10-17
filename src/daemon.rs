@@ -19,7 +19,7 @@ use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox};
-use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Member, Secret, Sender, Update};
+use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Member, Secret, Sender, Typing, Update};
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 use crate::text;
@@ -324,6 +324,9 @@ impl<I: Irc> Daemon<I> {
                 let reacted = self.react(&target, &msgid, &reaction, remove).await;
                 reply(conn, reacted).await
             }
+            Ok(Op::Typing { target, state }) => {
+                reply(conn, self.typing(&target, state).await).await
+            }
             Ok(Op::Quit {}) => {
                 let allowed = self.grants.check_quit();
                 let quitting = allowed.is_ok();
@@ -382,6 +385,12 @@ impl<I: Irc> Daemon<I> {
         self.grants.check_react(target, msgid, reaction, &dm)?;
         self.irc.react(target, msgid, reaction, remove).await?;
         Ok(json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove}))
+    }
+
+    async fn typing(&self, target: &str, state: Typing) -> Result<Value> {
+        self.grants.check_typing(target, &self.dm_history(target))?;
+        self.irc.typing(target, state).await?;
+        Ok(json!({"target": target, "state": state}))
     }
 
     async fn send(
@@ -509,6 +518,7 @@ mod tests {
             irc.dm.read = ["luiz", "maria"]
             irc.dm.send = ["$first"]
             irc.react = ["#bots"]
+            irc.typing = ["#bots"]
             "##,
         )
         .unwrap()
@@ -519,6 +529,7 @@ mod tests {
         sent: Mutex<Vec<Outgoing>>,
         /// Whether each reaction asked for was a removal.
         reactions: Mutex<Vec<bool>>,
+        typing: Mutex<Vec<Typing>>,
         quit: Notify,
     }
 
@@ -569,6 +580,11 @@ mod tests {
             remove: bool,
         ) -> impl Future<Output = Result<()>> + Send {
             self.reactions.lock().unwrap().push(remove);
+            future::ready(Ok(()))
+        }
+
+        fn typing(&self, _target: &str, state: Typing) -> impl Future<Output = Result<()>> + Send {
+            self.typing.lock().unwrap().push(state);
             future::ready(Ok(()))
         }
 
@@ -691,6 +707,7 @@ mod tests {
                     "send": ["#bots"],
                     "dm": {"read": ["luiz", "maria"], "send": ["$first"]},
                     "react": ["#bots"],
+                    "typing": ["#bots"],
                     "quit": false
                 }},
                 "last_error": null
@@ -955,6 +972,29 @@ mod tests {
         let reply = daemon.call(react_request("#bots", PASSWORD, false)).await;
         assert_eq!(reply["Err"]["code"], "blocked_secret");
         assert!(daemon.irc.reactions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn typing_reaches_irc_only_where_irc_typing_grants() {
+        let daemon = launch(grants());
+        for (target, state) in [
+            ("#bots", "active"),
+            ("#bots", "done"),
+            ("#lounge", "active"),
+        ] {
+            let request =
+                json!({"v": 1, "op": "typing", "args": {"target": target, "state": state}});
+            let reply = daemon.call(request).await;
+            if target == "#bots" {
+                assert_eq!(reply["Ok"]["state"], state);
+            } else {
+                assert_eq!(reply["Err"]["code"], "not_allowed");
+            }
+        }
+        assert_eq!(
+            *daemon.irc.typing.lock().unwrap(),
+            [Typing::Active, Typing::Done]
+        );
     }
 
     #[tokio::test]

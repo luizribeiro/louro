@@ -9,6 +9,7 @@ mod quit;
 mod react;
 mod send;
 mod status;
+mod typing;
 mod wait;
 
 #[derive(Subcommand)]
@@ -21,6 +22,8 @@ pub enum Command {
     Send(send::Args),
     /// React to a message with an emoji
     React(react::Args),
+    /// Show that the bot is typing
+    Typing(typing::Args),
     /// Members of a channel the bot is in
     Names(names::Args),
     /// Disconnect and stop the daemon
@@ -35,6 +38,7 @@ pub async fn dispatch(command: Command, socket: Option<&Path>) -> ExitCode {
         Command::Wait(args) => args.run(socket).await,
         Command::Send(args) => args.run(socket).await,
         Command::React(args) => args.run(socket).await,
+        Command::Typing(args) => args.run(socket).await,
         Command::Names(args) => args.run(socket).await,
         Command::Quit(args) => args.run(socket).await,
         Command::Connect(args) => args.run(socket).await,

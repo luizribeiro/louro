@@ -58,12 +58,13 @@ def toml_lines(table, prefix=""):
             yield f"{prefix}{key} = {json.dumps(value)}"
 
 
-def grants(dm_read=False, dm_send=False, quit=False, react=False):
+def grants(dm_read=False, dm_send=False, quit=False, react=False, typing=False):
     return {"irc": {
         "join": ["#bots"],
         "send": ["#bots"],
         "dm": {"read": dm_read, "send": dm_send},
         "react": react,
+        "typing": typing,
         "quit": quit,
     }}
 
@@ -281,6 +282,16 @@ with subtest("react tags luiz's message with a reaction, only where irc.react gr
     ))
     assert reply_tag(tags) == message["msgid"], tags
     refused("not_allowed", "react", "#lounge", message["msgid"], "👍")
+    stop()
+
+with subtest("typing shows in #bots as a +typing tag"):
+    start(grants(typing=["#bots"]))
+    assert louro("typing", "#bots", "active")["state"] == "active"
+    received("luiz", lambda tags, line: (
+        line.startswith(f":{BOT['user']}!") and " TAGMSG #bots" in line
+        and tags.get("+typing") == "active"
+    ))
+    refused("not_allowed", "typing", "#lounge", "active")
     stop()
 
 with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):

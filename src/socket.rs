@@ -11,7 +11,7 @@ use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, 
 use tokio::net::UnixStream;
 
 use crate::error::{Code, Error, Result};
-use crate::irc::Kind;
+use crate::irc::{Kind, Typing};
 
 pub const VERSION: u8 = 1;
 
@@ -50,6 +50,10 @@ pub enum Op {
         msgid: String,
         reaction: String,
         remove: bool,
+    },
+    Typing {
+        target: String,
+        state: Typing,
     },
     Quit {},
 }

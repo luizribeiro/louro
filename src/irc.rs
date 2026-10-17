@@ -86,6 +86,14 @@ pub struct Sent {
     pub threaded: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Typing {
+    Active,
+    Paused,
+    Done,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -109,6 +117,7 @@ pub trait Irc: Send + Sync + 'static {
         reaction: &str,
         remove: bool,
     ) -> impl Future<Output = Result<()>> + Send;
+    fn typing(&self, target: &str, state: Typing) -> impl Future<Output = Result<()>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
@@ -378,6 +387,18 @@ impl Irc for PapoIrc {
             self.client.react(target, msgid, reaction)
         };
         request
+            .await
+            .map_err(|error| Error::new(send_code(&error), error.to_string()))
+    }
+
+    async fn typing(&self, target: &str, state: Typing) -> Result<()> {
+        let state = match state {
+            Typing::Active => papo::Typing::Active,
+            Typing::Paused => papo::Typing::Paused,
+            Typing::Done => papo::Typing::Done,
+        };
+        self.client
+            .typing(target, state)
             .await
             .map_err(|error| Error::new(send_code(&error), error.to_string()))
     }
