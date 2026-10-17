@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod client;
+pub mod connect;
 pub mod daemon;
 pub mod error;
 pub mod output;

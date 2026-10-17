@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use louro::cli::{self, Cli, Command, PRIMER};
 use louro::client::Connection;
+use louro::connect;
 use louro::error::{Code, Error, Result};
 use louro::output;
 use louro::protocol::{Kind, Op, SendArgs, WaitArgs};
@@ -27,10 +28,7 @@ async fn main() -> ExitCode {
     };
 
     match command {
-        Command::Connect(_) => output::emit::<()>(Err(Error::new(
-            Code::Internal,
-            "connect is not wired to papo yet",
-        ))),
+        Command::Connect(args) => connect::foreground(args, cli.socket.as_deref()).await,
         Command::Status => output::emit(request(cli.socket.as_deref(), Op::Status {}).await),
         Command::Quit => output::emit(request(cli.socket.as_deref(), Op::Quit {}).await),
         Command::Send(args) => output::emit(send(cli.socket.as_deref(), args).await),

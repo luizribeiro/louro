@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::thread;
 
@@ -65,14 +66,52 @@ fn version_exits_cleanly_without_the_json_usage_error() {
         .stdout(format!("louro {}\n", env!("CARGO_PKG_VERSION")));
 }
 
+/// A local port with nothing listening on it.
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn connect(socket: &std::path::Path) -> Command {
+    let mut louro = louro();
+    louro.arg("--socket").arg(socket).args([
+        "connect",
+        "127.0.0.1",
+        "--nick",
+        "louro",
+        "--plaintext",
+    ]);
+    louro
+}
+
 #[test]
-fn connect_is_the_permanent_stub() {
-    louro()
-        .args(["connect", "irc.weblounge.org", "--nick", "louro"])
+fn connect_refuses_to_prompt_without_a_terminal() {
+    let dir = tempdir().unwrap();
+    connect(&dir.path().join("louro.sock"))
+        .args(["--sasl-user", "louro", "--foreground"])
         .assert()
         .failure()
-        .code(1)
-        .stdout(predicate::str::contains("connect is not wired to papo yet"));
+        .code(2)
+        .stdout(predicate::str::contains(r#""code":"usage""#))
+        .stdout(predicate::str::contains("--password-file"));
+}
+
+#[test]
+fn connect_in_the_foreground_reports_a_failed_connection() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("run").join("louro.sock");
+    connect(&socket)
+        .args(["--port", &closed_port().to_string(), "--foreground"])
+        .assert()
+        .failure()
+        .code(9)
+        .stdout(predicate::str::contains(r#""code":"connect_failed""#));
+    let mode = std::fs::metadata(socket.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+    assert!(!socket.exists());
 }
 
 #[test]

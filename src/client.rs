@@ -85,7 +85,11 @@ fn broken_connection(err: &std::io::Error) -> Error {
 
 /// `--socket`, else `$XDG_RUNTIME_DIR/louro/louro.sock`, else
 /// `$TMPDIR/louro-<uid>/louro.sock` (design §4.2).
-fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
+///
+/// # Errors
+///
+/// `internal` if the user id for the fallback path can't be determined.
+pub fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
     }
