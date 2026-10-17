@@ -3,9 +3,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
-use crate::cli::ConnectArgs;
-use crate::connect;
-
+pub mod connect;
 mod quit;
 mod send;
 mod status;
@@ -22,7 +20,7 @@ pub enum Command {
     /// Disconnect and stop the daemon
     Quit(quit::Args),
     /// Start the daemon (operator only)
-    Connect(ConnectArgs),
+    Connect(connect::Args),
 }
 
 pub async fn dispatch(command: Command, socket: Option<&Path>) -> ExitCode {
@@ -31,6 +29,6 @@ pub async fn dispatch(command: Command, socket: Option<&Path>) -> ExitCode {
         Command::Wait(args) => args.run(socket).await,
         Command::Send(args) => args.run(socket).await,
         Command::Quit(args) => args.run(socket).await,
-        Command::Connect(args) => connect::run(args, socket).await,
+        Command::Connect(args) => args.run(socket).await,
     }
 }

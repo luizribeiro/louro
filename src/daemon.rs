@@ -10,7 +10,7 @@ use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, mpsc};
 
-use crate::cli::ConnectArgs;
+use crate::commands::connect::Args as ConnectArgs;
 use crate::error::{Code, Error, Result};
 use crate::grants::Grants;
 use crate::inbox::Inbox;

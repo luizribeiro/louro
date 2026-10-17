@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 pub use papo::Secret;
 
-use crate::cli::ConnectArgs;
+use crate::commands::connect::Args as ConnectArgs;
 use crate::error::{Code, Error, Result};
 
 const INCOMING_CAPACITY: usize = 256;
