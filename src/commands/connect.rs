@@ -39,18 +39,25 @@ pub struct Args {
 
 impl Args {
     pub async fn run(self, socket: Option<&Path>) -> ExitCode {
-        let config = match config::load(self.config.as_deref(), socket) {
-            Ok(config) => config,
-            Err(err) => return output::emit::<()>(Err(err)),
-        };
+        self.connect(socket)
+            .await
+            .unwrap_or_else(|err| output::emit::<()>(Err(err)))
+    }
+
+    async fn connect(self, socket: Option<&Path>) -> Result<ExitCode> {
+        let config = config::load(self.config.as_deref(), socket)?;
         if is_running(config.server.socket.as_deref()).await {
-            return output::emit::<()>(Err(daemon::already_running()));
+            return Err(daemon::already_running());
         }
-        if self.foreground {
-            foreground(self.password_stdin, config).await
-        } else {
-            output::emit(background(&config))
+        if !self.foreground {
+            return Ok(output::emit(background(&config)));
         }
+        let password = read_password(self.password_stdin, &config.server)?;
+        if let Err(err) = daemon::start(config, password).await?.await {
+            eprintln!("louro: {err}");
+            return Ok(ExitCode::FAILURE);
+        }
+        Ok(ExitCode::SUCCESS)
     }
 }
 
@@ -108,22 +115,4 @@ fn background(config: &Config) -> Result<Value> {
 
 fn cannot_start(err: &io::Error) -> Error {
     Error::new(Code::Internal, format!("can't start the daemon: {err}"))
-}
-
-async fn foreground(password_stdin: bool, config: Config) -> ExitCode {
-    let password = match read_password(password_stdin, &config.server) {
-        Ok(password) => password,
-        Err(err) => return output::emit::<()>(Err(err)),
-    };
-    let daemon = match daemon::start(config, password).await {
-        Ok(daemon) => daemon,
-        Err(err) => return output::emit::<()>(Err(err)),
-    };
-    match daemon.await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("louro: {err}");
-            ExitCode::FAILURE
-        }
-    }
 }
