@@ -148,7 +148,7 @@ impl Irc for PapoIrc {
             Kind::Action => self.client.privmsg(&target, &ctcp_action(&text)).await,
         };
         sent.map(|sent| sent.id.map(|id| id.msgid().to_owned()))
-            .map_err(|error| to_send_error(&error))
+            .map_err(|error| Error::new(send_code(&error), error.to_string()))
     }
 
     async fn quit(&self) {
@@ -168,16 +168,6 @@ fn send_code(error: &papo::Error) -> Code {
         papo::Error::Server(_) => Code::ServerError,
         papo::Error::InvalidInput(_) => Code::Usage,
         _ => Code::Internal,
-    }
-}
-
-fn to_send_error(error: &papo::Error) -> Error {
-    let code = send_code(error);
-    let error = Error::new(code, error.to_string());
-    if code == Code::NotConnected {
-        error.with_hint("retry in a minute")
-    } else {
-        error
     }
 }
 
@@ -211,15 +201,6 @@ mod tests {
             Code::Usage
         );
         assert_eq!(send_code(&papo::Error::RequestLimit), Code::Internal);
-    }
-
-    #[test]
-    fn a_disconnected_send_hints_at_a_retry() {
-        let error = to_send_error(&connection_lost());
-        assert_eq!(error.code, Code::NotConnected);
-        assert_eq!(error.hint.as_deref(), Some("retry in a minute"));
-
-        assert!(to_send_error(&papo::Error::Timeout).hint.is_none());
     }
 
     #[test]
