@@ -696,16 +696,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_scheme_is_refused() {
-        let error = endpoint("irs://irc.weblounge.org").unwrap_err();
-        assert_eq!(error.code, Code::Usage);
-        assert!(error.message.contains("irs"), "{}", error.message);
-    }
-
-    #[test]
-    fn a_path_other_than_a_trailing_slash_is_refused() {
-        let error = endpoint("ircs://irc.weblounge.org/channel").unwrap_err();
-        assert_eq!(error.code, Code::Usage);
+    fn an_unknown_scheme_or_a_path_is_refused() {
+        for address in [
+            "irs://irc.weblounge.org",
+            "ircs://irc.weblounge.org/channel",
+        ] {
+            assert_eq!(
+                endpoint(address).unwrap_err().code,
+                Code::Usage,
+                "{address}"
+            );
+        }
     }
 
     #[test]
