@@ -212,6 +212,7 @@ mod tests {
             from: Sender {
                 nick: nick.into(),
                 account: account.map(String::from),
+                away: false,
                 bot: false,
             },
             text: "louro: ping".into(),

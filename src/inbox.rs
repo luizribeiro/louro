@@ -221,6 +221,7 @@ mod tests {
             from: Sender {
                 nick: "maria".into(),
                 account: Some("maria".into()),
+                away: false,
                 bot: false,
             },
             text: text.into(),
@@ -237,6 +238,7 @@ mod tests {
             from: Sender {
                 nick: "joao".into(),
                 account: None,
+                away: false,
                 bot: false,
             },
             mentions_me: false,
@@ -301,6 +303,7 @@ mod tests {
             from: Sender {
                 nick: "luiz".into(),
                 account: Some("lu\u{7}iz".into()),
+                away: false,
                 bot: false,
             },
             channel: "#lounge\u{1b}[2J".into(),
@@ -310,7 +313,7 @@ mod tests {
             batch["events"],
             serde_json::json!([
                 {"id": 1, "type": "invite", "time": "2026-10-16T21:05:00Z",
-                 "from": {"nick": "luiz", "account": "luiz", "bot": false},
+                 "from": {"nick": "luiz", "account": "luiz", "away": false, "bot": false},
                  "channel": "#lounge[2J", "untrusted": true},
             ])
         );

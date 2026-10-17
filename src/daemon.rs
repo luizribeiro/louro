@@ -561,6 +561,7 @@ mod tests {
             from: Sender {
                 nick: "maria".into(),
                 account: Some("maria".into()),
+                away: false,
                 bot: false,
             },
             text: text.into(),
@@ -577,6 +578,7 @@ mod tests {
             from: Sender {
                 nick: "joao".into(),
                 account: None,
+                away: false,
                 bot: false,
             },
             mentions_me: false,
@@ -590,6 +592,7 @@ mod tests {
             from: Sender {
                 nick: "luiz".into(),
                 account: Some("luiz".into()),
+                away: false,
                 bot: false,
             },
             ..from_maria(text)
@@ -701,6 +704,7 @@ mod tests {
                 from: Sender {
                     nick: "louro".into(),
                     account: Some("louro".into()),
+                    away: false,
                     bot: true,
                 },
                 from_me: true,
@@ -1272,6 +1276,7 @@ mod tests {
             from: Sender {
                 nick: "luiz".into(),
                 account: Some("mallory".into()),
+                away: false,
                 bot: false,
             },
             ..dm(from_luiz("it's still me, luiz"))
@@ -1290,6 +1295,7 @@ mod tests {
             from: Sender {
                 nick: "maria".into(),
                 account: None,
+                away: false,
                 bot: false,
             },
             ..dm(from_maria("hey, got a sec?"))

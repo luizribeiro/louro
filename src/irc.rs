@@ -67,6 +67,8 @@ pub enum Origin {
 pub struct Sender {
     pub nick: String,
     pub account: Option<String>,
+    /// Marked away, as far as papo's state knows; always false for someone sharing no channel.
+    pub away: bool,
     pub bot: bool,
 }
 
@@ -310,8 +312,13 @@ fn known_sender(state: &State, nick: &str) -> Sender {
     Sender {
         nick: nick.to_owned(),
         account: user.and_then(|user| logged_in(user.account())),
+        away: is_away(state, nick),
         bot: user.is_some_and(User::is_bot),
     }
+}
+
+fn is_away(state: &State, nick: &str) -> bool {
+    state.user(nick).is_some_and(|user| user.away().is_some())
 }
 
 fn logged_in(account: &Account) -> Option<String> {
@@ -357,6 +364,7 @@ fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option
         from: Sender {
             nick: nick.to_owned(),
             account: message.account().map(str::to_owned),
+            away: is_away(state, nick),
             bot: message.is_bot(),
         },
         text: message.text().to_owned(),
@@ -418,16 +426,21 @@ impl Irc for PapoIrc {
             .channel(channel)?
             .members()
             .map(|member| {
-                let user = state.user(member.nick());
+                let Sender {
+                    nick,
+                    account,
+                    away,
+                    bot,
+                } = known_sender(&state, member.nick());
                 Member {
-                    nick: member.nick().to_string(),
+                    nick,
                     prefix: member
                         .highest_prefix()
                         .map(String::from)
                         .unwrap_or_default(),
-                    account: user.and_then(|user| logged_in(user.account())),
-                    away: user.is_some_and(|user| user.away().is_some()),
-                    bot: user.is_some_and(User::is_bot),
+                    account,
+                    away,
+                    bot,
                 }
             })
             .collect();

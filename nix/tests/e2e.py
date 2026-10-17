@@ -256,7 +256,12 @@ with subtest("chat in #bots reaches wait, marked untrusted, and send reaches #bo
     assert event["target"] == "#bots" and not event["private"], event
     assert event["untrusted"] and event["mentions_me"], event
     assert event["origin"] == "live", event
-    assert event["from"]["account"] == "luiz", event
+    assert event["from"]["account"] == "luiz" and not event["from"]["away"], event
+    send_raw("luiz", "AWAY :lunch")
+    send_raw("luiz", "PRIVMSG #bots :brb")
+    [brb] = events_until(from_nick("luiz", "brb"))
+    assert brb["from"]["away"], brb
+    send_raw("luiz", "AWAY")
     sent = louro("send", "#bots", "it checks that references don't dangle")
     assert sent["target"] == "#bots" and sent["lines"] == 1, sent
     heard("luiz", "#bots", "it checks that references don't dangle")
