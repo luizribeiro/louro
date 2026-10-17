@@ -14,7 +14,7 @@ papo = { version = "=0.0.0", git = "https://github.com/luizribeiro/papo", rev = 
 clap = { version = "4.6.7", features = ["derive", "env"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154" }
-tokio = { version = "1.53.3", features = ["net", "io-util", "macros", "rt", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["net", "io-util", "macros", "rt", "signal", "sync", "time"] }
 rpassword = "7.5.4"
 toml = "1.1.8"
 

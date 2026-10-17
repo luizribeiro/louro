@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, mpsc};
 
 use crate::config::{Config, Grants};
@@ -57,7 +58,7 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 /// Serves requests on `listener` and buffers chat from `updates` until a `quit`
-/// request, then removes the socket at `socket_path`.
+/// request or `stop`, then quits IRC and removes the socket at `socket_path`.
 pub async fn run(
     grants: Grants,
     password: Option<Secret>,
@@ -65,6 +66,7 @@ pub async fn run(
     mut updates: mpsc::Receiver<Update>,
     listener: UnixListener,
     socket_path: &Path,
+    stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let daemon = Arc::new(Daemon {
         grants,
@@ -75,6 +77,7 @@ pub async fn run(
         last_error: Mutex::default(),
         quit: Notify::new(),
     });
+    tokio::pin!(stop);
     loop {
         tokio::select! {
             Ok((stream, _)) = listener.accept() => {
@@ -85,6 +88,7 @@ pub async fn run(
             }
             Some(update) = updates.recv() => daemon.update(update),
             () = daemon.quit.notified() => break,
+            () = &mut stop => break,
         }
     }
     daemon.irc.quit().await;
@@ -101,13 +105,27 @@ pub async fn start(
     create_runtime_dir(&socket)?;
     let (irc, updates) = irc::connect(&server, password.clone()).await?;
     let listener = bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
+    let stop = stop_signal()
+        .map_err(|err| Error::new(Code::Internal, format!("can't handle stop signals: {err}")))?;
     output::emit(Ok(json!({
         "server": server.address,
         "nick": server.nick,
         "channels": server.autojoin,
         "socket": socket,
     })));
-    Ok(async move { run(grants, password, irc, updates, listener, &socket).await })
+    Ok(async move { run(grants, password, irc, updates, listener, &socket, stop).await })
+}
+
+/// SIGTERM (a service manager) and SIGINT (Ctrl-C in the foreground) stop louro like `quit`.
+fn stop_signal() -> io::Result<impl Future<Output = ()>> {
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    })
 }
 
 fn create_runtime_dir(socket: &Path) -> Result<()> {
@@ -304,6 +322,7 @@ mod tests {
     use std::sync::Mutex;
 
     use tempfile::TempDir;
+    use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -405,6 +424,7 @@ mod tests {
         socket: PathBuf,
         updates: mpsc::Sender<Update>,
         irc: Arc<FakeIrc>,
+        stop: Option<oneshot::Sender<()>>,
         daemon: JoinHandle<io::Result<()>>,
     }
 
@@ -413,17 +433,25 @@ mod tests {
         let socket = dir.path().join("louro.sock");
         let irc = Arc::new(FakeIrc::default());
         let (updates, receiver) = mpsc::channel(16);
+        let (stop, stopped) = oneshot::channel();
         let daemon = tokio::spawn({
             let irc = Arc::clone(&irc);
             let socket = socket.clone();
             let password = Some(PASSWORD.into());
-            async move { run(grants, password, irc, receiver, bind(&socket)?, &socket).await }
+            let stopped = async {
+                let _ = stopped.await;
+            };
+            async move {
+                let listener = bind(&socket)?;
+                run(grants, password, irc, receiver, listener, &socket, stopped).await
+            }
         });
         Running {
             _dir: dir,
             socket,
             updates,
             irc,
+            stop: Some(stop),
             daemon,
         }
     }
@@ -739,6 +767,17 @@ mod tests {
         let daemon = launch(grants);
         let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
         assert_eq!(reply, json!({"Ok": {}}));
+
+        daemon.daemon.await.unwrap().unwrap();
+        daemon.irc.quit.notified().await;
+        assert!(!daemon.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn a_stop_signal_quits_irc_and_removes_the_socket() {
+        let mut daemon = launch(grants());
+        daemon.status().await;
+        daemon.stop.take().unwrap().send(()).unwrap();
 
         daemon.daemon.await.unwrap().unwrap();
         daemon.irc.quit.notified().await;

@@ -9,7 +9,7 @@ CONFIG = f"{HOME}/louro.toml"
 PASSWORD_FILE = f"{HOME}/password"
 SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
-DAEMON_RUNNING = f"pgrep -u {BOT['user']} -x louro"
+DAEMON = f"-u {BOT['user']} -f 'louro connect'"
 TIMEOUT = dt.timedelta(minutes=2)
 EXIT_CODES = {"not_connected": 4, "not_allowed": 5, "auth_failed": 9}
 
@@ -109,15 +109,14 @@ def start(grants):
 
 def assert_stopped():
     """The daemon exits and leaves no socket behind."""
-    machine.wait_until_fails(DAEMON_RUNNING, timeout=TIMEOUT)
+    machine.wait_until_fails(f"pgrep {DAEMON}", timeout=TIMEOUT)
     machine.fail(f"test -e {SOCKET}")
 
 
 def stop():
-    """What the operator does when irc.quit isn't granted."""
-    machine.succeed(f"pkill -u {BOT['user']} -x louro")
-    machine.wait_until_fails(DAEMON_RUNNING, timeout=TIMEOUT)
-    machine.succeed(f"rm -f {SOCKET}")
+    """What a service manager does; louro quits and cleans up after itself."""
+    machine.succeed(f"pkill -TERM {DAEMON}")
+    assert_stopped()
 
 
 def events_until(predicate):
@@ -239,6 +238,23 @@ with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows 
     louro("send", "#bots", "glad to be back")
     heard("luiz", "#bots", "glad to be back")
     stop()
+
+with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
+    start(grants())
+    machine.succeed(shlex.join([
+        "systemd-run", "--unit=blocked-wait", f"--uid={BOT['user']}",
+        f"--setenv=LOURO_SOCKET={SOCKET}",
+        "--property=StandardOutput=file:/tmp/wait.json",
+        "--property=StandardError=journal",
+        "/run/current-system/sw/bin/louro", "wait", "--timeout", "none",
+    ]))
+    machine.wait_until_succeeds(f"ss -xH | grep -qF {SOCKET}", timeout=TIMEOUT)
+    stop()
+    machine.wait_until_fails("systemctl is-active -q blocked-wait", timeout=TIMEOUT)
+    exit_code = machine.succeed("systemctl show -P ExecMainStatus blocked-wait").strip()
+    assert exit_code == str(EXIT_CODES["not_connected"]), exit_code
+    error = json.loads(machine.succeed("cat /tmp/wait.json"))["error"]
+    assert error["code"] == "not_connected" and "louro stopped" in error["message"], error
 
 with subtest("a wrong SASL password fails connect and leaves nothing running"):
     write_config(grants(), password="wrong-password")
