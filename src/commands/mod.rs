@@ -11,7 +11,7 @@ mod wait;
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Connection state, nick, channels
+    /// Connection state, nick, channels, and what the bot may do (grants)
     Status(status::Args),
     /// Block until matching events arrive
     Wait(wait::Args),

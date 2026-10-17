@@ -171,7 +171,12 @@ impl<I: Irc> Daemon<I> {
             nick,
             channels,
         } = self.irc.status();
-        json!({"connected": connected, "nick": nick, "channels": channels})
+        json!({
+            "connected": connected,
+            "nick": nick,
+            "channels": channels,
+            "grants": self.grants,
+        })
     }
 
     async fn send(&self, target: String, text: String, kind: Kind) -> Result<Value> {
@@ -381,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_the_connection() {
+    async fn status_reports_the_connection_and_the_grants() {
         let daemon = launch(grants());
         let reply = daemon
             .call(json!({"v": 1, "op": "status", "args": {}}))
@@ -391,7 +396,13 @@ mod tests {
             json!({"Ok": {
                 "connected": true,
                 "nick": "louro",
-                "channels": ["#bots", "#lounge"]
+                "channels": ["#bots", "#lounge"],
+                "grants": {"irc": {
+                    "join": ["#bots", "#lounge"],
+                    "send": ["#bots"],
+                    "dm": {"read": ["luiz", "maria"], "send": ["$first"]},
+                    "quit": false
+                }}
             }})
         );
     }

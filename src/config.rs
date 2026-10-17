@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Code, Error, Result};
 
@@ -53,13 +53,13 @@ impl Server {
 }
 
 /// Everything not granted is denied.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Grants {
     pub irc: Irc,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Irc {
     /// Channels it may sit and read in.
@@ -70,7 +70,7 @@ pub struct Irc {
     pub quit: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Dm {
     /// Whose DMs reach the agent.
@@ -81,7 +81,7 @@ pub struct Dm {
 
 /// `true` for everyone, or a list of names, each matched case-insensitively and allowed one
 /// trailing `*`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged, expecting = "true, false, or a list of names")]
 pub enum Selector {
     All(bool),
