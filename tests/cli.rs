@@ -287,3 +287,26 @@ fn wait_does_not_ack_after_a_daemon_error() {
         "expected no ack after a daemon error"
     );
 }
+
+#[test]
+fn wait_reports_not_connected_when_louro_stops_mid_wait() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(stream).read_line(&mut request).unwrap();
+    });
+
+    louro()
+        .arg("--socket")
+        .arg(&socket)
+        .arg("wait")
+        .assert()
+        .failure()
+        .code(4)
+        .stdout(predicate::str::contains(r#""code":"not_connected""#))
+        .stdout(predicate::str::contains("louro stopped"));
+    daemon.join().unwrap();
+}

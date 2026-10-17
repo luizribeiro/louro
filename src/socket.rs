@@ -91,13 +91,11 @@ impl Connection {
     pub async fn request(&mut self, op: Op) -> Result<Value> {
         write_line(&mut self.socket, &Request::new(op))
             .await
-            .map_err(broken_connection)?;
+            .map_err(louro_stopped)?;
         read_line(&mut self.socket)
             .await
-            .map_err(broken_connection)?
-            .ok_or_else(|| {
-                broken_connection("the daemon closed the connection without answering")
-            })?
+            .map_err(louro_stopped)?
+            .ok_or_else(|| louro_stopped("it closed the connection without answering"))?
     }
 
     /// Tells the daemon the CLI has printed the last `wait` result, so it
@@ -105,7 +103,7 @@ impl Connection {
     pub async fn ack(&mut self) -> Result<()> {
         write_line(&mut self.socket, &Ack { ack: true })
             .await
-            .map_err(broken_connection)
+            .map_err(louro_stopped)
     }
 }
 
@@ -122,11 +120,10 @@ fn no_session(path: &Path, err: impl Display) -> Error {
     .with_hint("louro isn't running; ask your operator to start it")
 }
 
-fn broken_connection(err: impl Display) -> Error {
-    Error::new(
-        Code::Internal,
-        format!("lost the connection to louro: {err}"),
-    )
+/// The daemon was reachable but went away mid-request, e.g. stopped while a `wait` blocked.
+fn louro_stopped(err: impl Display) -> Error {
+    Error::new(Code::NotConnected, format!("louro stopped ({err})"))
+        .with_hint("run `louro status`; if louro isn't running, ask your operator to start it")
 }
 
 /// `--socket`, else `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`.
