@@ -1,8 +1,8 @@
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
-use serde::{Deserialize, Serialize};
+use clap::{Args, Parser};
+
+use crate::commands::Command;
 
 /// Printed for both bare `louro` and `louro --help`, since an agent finds the tool through either.
 pub const PRIMER: &str = "\
@@ -55,53 +55,6 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-#[derive(Subcommand)]
-pub enum Command {
-    /// Connection state, nick, channels
-    Status,
-    /// Block until matching events arrive
-    Wait(WaitArgs),
-    /// Send a message, notice or action
-    Send(SendArgs),
-    /// Disconnect and stop the daemon
-    Quit,
-    /// Start the daemon (operator only)
-    Connect(ConnectArgs),
-}
-
-/// `none` is `u64::MAX` seconds, past any `Instant`, so the daemon sets no deadline.
-fn parse_timeout(raw: &str) -> Result<u64, String> {
-    if raw == "none" {
-        return Ok(u64::MAX);
-    }
-    raw.parse()
-        .map_err(|_| format!("expected a number of seconds or `none`, got `{raw}`"))
-}
-
-#[derive(Args, Deserialize, Serialize)]
-pub struct WaitArgs {
-    /// Seconds to block for, or `none` to wait forever; `0` polls
-    #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]
-    pub timeout: u64,
-    /// Maximum number of events to return
-    #[arg(long, default_value = "20", value_name = "N")]
-    pub max: NonZeroUsize,
-}
-
-#[derive(Args)]
-pub struct SendArgs {
-    /// Channel or nick to send to
-    pub target: String,
-    /// Text to send, or `-` to read it from stdin (multi-line)
-    pub text: String,
-    /// Send as a NOTICE instead of a message
-    #[arg(long, conflicts_with = "action")]
-    pub notice: bool,
-    /// Send as a CTCP ACTION ("/me ...")
-    #[arg(long)]
-    pub action: bool,
-}
-
 #[expect(clippy::struct_excessive_bools, reason = "each is an independent flag")]
 #[derive(Args)]
 pub struct ConnectArgs {
@@ -149,19 +102,6 @@ mod tests {
 
     fn parse(args: &[&str]) -> Command {
         Cli::try_parse_from(args).unwrap().command.unwrap()
-    }
-
-    #[test]
-    fn wait_timeout_takes_seconds_or_none() {
-        for (args, secs) in [
-            (&["louro", "wait"][..], 60),
-            (&["louro", "wait", "--timeout", "none"], u64::MAX),
-        ] {
-            let Command::Wait(wait) = parse(args) else {
-                panic!("expected wait");
-            };
-            assert_eq!(wait.timeout, secs);
-        }
     }
 
     #[test]

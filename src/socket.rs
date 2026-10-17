@@ -109,6 +109,11 @@ impl Connection {
     }
 }
 
+/// One-shot request/response for commands that don't need to keep the connection open.
+pub async fn request(socket: Option<&Path>, op: Op) -> Result<Value> {
+    Connection::connect(socket).await?.request(op).await
+}
+
 fn no_session(path: &Path, err: impl Display) -> Error {
     Error::new(
         Code::NoSession,
