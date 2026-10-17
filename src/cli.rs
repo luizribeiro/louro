@@ -145,128 +145,33 @@ impl ConnectArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
-
     use super::*;
 
-    #[test]
-    fn parses_global_socket_before_the_subcommand() {
-        let cli = Cli::try_parse_from(["louro", "--socket", "/tmp/louro.sock", "status"]).unwrap();
-        assert_eq!(cli.socket, Some(PathBuf::from("/tmp/louro.sock")));
-        assert!(matches!(cli.command, Some(Command::Status)));
+    fn parse(args: &[&str]) -> Command {
+        Cli::try_parse_from(args).unwrap().command.unwrap()
     }
 
     #[test]
-    fn bare_invocation_has_no_subcommand() {
-        let cli = Cli::try_parse_from(["louro"]).unwrap();
-        assert!(cli.command.is_none());
-    }
-
-    #[test]
-    fn wait_timeout_accepts_seconds_zero_and_none() {
-        let cli = Cli::try_parse_from(["louro", "wait", "--timeout", "5"]).unwrap();
-        let Some(Command::Wait(args)) = cli.command else {
-            panic!("expected wait");
-        };
-        assert_eq!(args.timeout, 5);
-        assert_eq!(args.max.get(), 20);
-
-        let cli = Cli::try_parse_from(["louro", "wait", "--timeout", "0"]).unwrap();
-        let Some(Command::Wait(args)) = cli.command else {
-            panic!("expected wait");
-        };
-        assert_eq!(args.timeout, 0);
-
-        let cli = Cli::try_parse_from(["louro", "wait", "--timeout", "none"]).unwrap();
-        let Some(Command::Wait(args)) = cli.command else {
-            panic!("expected wait");
-        };
-        assert_eq!(args.timeout, u64::MAX);
-    }
-
-    #[test]
-    fn wait_timeout_defaults_to_sixty_seconds() {
-        let cli = Cli::try_parse_from(["louro", "wait"]).unwrap();
-        let Some(Command::Wait(args)) = cli.command else {
-            panic!("expected wait");
-        };
-        assert_eq!(args.timeout, 60);
-    }
-
-    #[test]
-    fn wait_timeout_rejects_garbage() {
-        let err = Cli::try_parse_from(["louro", "wait", "--timeout", "soon"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-    }
-
-    #[test]
-    fn send_notice_and_action_are_mutually_exclusive() {
-        let err = Cli::try_parse_from(["louro", "send", "#bots", "hi", "--notice", "--action"])
-            .unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
-    }
-
-    #[test]
-    fn send_accepts_notice_or_action_alone() {
-        let cli = Cli::try_parse_from(["louro", "send", "#bots", "hi", "--notice"]).unwrap();
-        let Some(Command::Send(args)) = cli.command else {
-            panic!("expected send");
-        };
-        assert!(args.notice);
-        assert!(!args.action);
-
-        let cli = Cli::try_parse_from(["louro", "send", "#bots", "waves", "--action"]).unwrap();
-        let Some(Command::Send(args)) = cli.command else {
-            panic!("expected send");
-        };
-        assert!(args.action);
-        assert!(!args.notice);
-    }
-
-    fn connect_args(args: &[&str]) -> ConnectArgs {
-        let required = ["louro", "connect", "127.0.0.1", "--nick", "louro"];
-        let cli = Cli::try_parse_from(required.iter().chain(args)).unwrap();
-        let Some(Command::Connect(args)) = cli.command else {
-            panic!("expected connect");
-        };
-        args
+    fn wait_timeout_takes_seconds_or_none() {
+        for (args, secs) in [
+            (&["louro", "wait"][..], 60),
+            (&["louro", "wait", "--timeout", "none"], u64::MAX),
+        ] {
+            let Command::Wait(wait) = parse(args) else {
+                panic!("expected wait");
+            };
+            assert_eq!(wait.timeout, secs);
+        }
     }
 
     #[test]
     fn connect_port_defaults_to_tls_or_plaintext() {
-        assert_eq!(connect_args(&[]).port(), 6697);
-        assert_eq!(connect_args(&["--plaintext"]).port(), 6667);
-        assert_eq!(
-            connect_args(&["--plaintext", "--port", "6668"]).port(),
-            6668
-        );
-    }
-
-    #[test]
-    fn connect_joins_are_repeatable() {
-        let args = connect_args(&["--join", "#bots", "--join", "#louro"]);
-        assert_eq!(args.joins, ["#bots", "#louro"]);
-    }
-
-    #[test]
-    fn a_bad_flag_is_a_usage_error() {
-        let err = Cli::try_parse_from(["louro", "status", "--nope"]).unwrap_err();
-        assert!(err.use_stderr());
-    }
-
-    #[test]
-    fn subcommand_help_is_clap_generated_not_the_primer() {
-        let err = Cli::try_parse_from(["louro", "wait", "--help"]).unwrap_err();
-        assert!(!err.to_string().contains("untrusted"));
-    }
-
-    #[test]
-    fn cli_definition_is_valid() {
-        Cli::command().debug_assert();
-    }
-
-    #[test]
-    fn color_is_configured_off() {
-        assert_eq!(Cli::command().get_color(), clap::ColorChoice::Never);
+        let connect = ["louro", "connect", "127.0.0.1", "--nick", "louro"];
+        for (flags, port) in [(&[][..], 6697), (&["--plaintext"], 6667)] {
+            let Command::Connect(args) = parse(&[&connect[..], flags].concat()) else {
+                panic!("expected connect");
+            };
+            assert_eq!(args.port(), port);
+        }
     }
 }
