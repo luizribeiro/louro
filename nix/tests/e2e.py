@@ -11,7 +11,7 @@ SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON = f"-u {BOT['user']} -f 'louro connect'"
 TIMEOUT = dt.timedelta(minutes=2)
-EXIT_CODES = {"not_connected": 4, "not_allowed": 5, "auth_failed": 9}
+EXIT_CODES = {"no_session": 3, "not_connected": 4, "not_allowed": 5, "auth_failed": 9}
 
 
 def as_bot(command):
@@ -33,13 +33,21 @@ def refused(code, *args):
     return error
 
 
-def register(account, password):
+def ergo_api(endpoint, account, password):
     request = json.dumps({"accountName": account, "passphrase": password})
     response = machine.succeed(shlex.join([
         "curl", "-sf", "-H", f"Authorization: Bearer {settings['apiToken']}",
-        "-d", request, f"http://127.0.0.1:{settings['apiPort']}/v1/saregister",
+        "-d", request, f"http://127.0.0.1:{settings['apiPort']}/v1/{endpoint}",
     ]))
     assert json.loads(response)["success"], response
+
+
+def register(account, password):
+    ergo_api("saregister", account, password)
+
+
+def change_password(account, password):
+    ergo_api("ns/passwd", account, password)
 
 
 def toml_lines(table, prefix=""):
@@ -171,6 +179,10 @@ def louro_blocked(blocked):
 def cut_off_louro():
     """Drops louro's connection and keeps it from reconnecting, while Ergo keeps its history."""
     louro_blocked(True)
+    drop_louro_connection()
+
+
+def drop_louro_connection():
     sockets = machine.succeed(
         f"ss -tnpH state established '( dport = :{settings['ircPort']} )'"
     ).splitlines()
@@ -291,6 +303,14 @@ with subtest("chat sent while louro was cut off arrives from history after it re
     [missed] = events_until(from_nick("luiz", "you missed this"))
     assert missed["origin"] == "history" and missed["untrusted"], missed
     stop()
+
+with subtest("louro exits once papo gives up, and status then says it isn't running"):
+    start(grants())
+    change_password(BOT["user"], "rotated-password")
+    drop_louro_connection()
+    assert_stopped()
+    refused("no_session", "status")
+    change_password(BOT["user"], BOT["password"])
 
 with subtest("a wrong SASL password fails connect and leaves nothing running"):
     write_config(grants(), password="wrong-password")

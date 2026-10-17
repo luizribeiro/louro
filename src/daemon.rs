@@ -58,7 +58,8 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 /// Serves requests on `listener` and buffers chat from `updates` until a `quit`
-/// request or `stop`, then quits IRC and removes the socket at `socket_path`.
+/// request or `stop`, then quits IRC and removes the socket at `socket_path`. Fails once papo
+/// gives up reconnecting, so a supervisor can restart louro.
 pub async fn run(
     grants: Grants,
     password: Option<Secret>,
@@ -78,7 +79,7 @@ pub async fn run(
         quit: Notify::new(),
     });
     tokio::pin!(stop);
-    loop {
+    let outcome = loop {
         tokio::select! {
             Ok((stream, _)) = listener.accept() => {
                 let daemon = Arc::clone(&daemon);
@@ -86,13 +87,17 @@ pub async fn run(
                     let _ = daemon.serve(&mut BufReader::new(stream)).await;
                 });
             }
-            Some(update) = updates.recv() => daemon.update(update),
-            () = daemon.quit.notified() => break,
-            () = &mut stop => break,
+            update = updates.recv() => match update {
+                Some(update) => daemon.update(update),
+                None => break Err(daemon.gave_up()),
+            },
+            () = daemon.quit.notified() => break Ok(()),
+            () = &mut stop => break Ok(()),
         }
-    }
+    };
     daemon.irc.quit().await;
-    remove_socket(socket_path)
+    remove_socket(socket_path)?;
+    outcome
 }
 
 /// Connects and listens, prints the line `background` waits for, and returns the daemon to run.
@@ -173,6 +178,14 @@ impl<I: Irc> Daemon<I> {
             time: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
             message,
         });
+    }
+
+    fn gave_up(&self) -> io::Error {
+        let reason = self.last_error().as_ref().map_or_else(
+            || "papo's event stream ended".into(),
+            |problem| problem.message.clone(),
+        );
+        io::Error::other(reason)
     }
 
     fn last_error(&self) -> MutexGuard<'_, Option<Problem>> {
@@ -805,6 +818,25 @@ mod tests {
 
         daemon.daemon.await.unwrap().unwrap();
         daemon.irc.quit.notified().await;
+        assert!(!daemon.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn louro_fails_and_removes_the_socket_once_papo_gives_up() {
+        let daemon = launch(grants());
+        daemon
+            .update(Update::Disconnected {
+                cause: "the connection was lost".into(),
+                retry_in: None,
+            })
+            .await;
+        drop(daemon.updates);
+
+        let error = daemon.daemon.await.unwrap().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the connection was lost; papo stopped reconnecting"
+        );
         assert!(!daemon.socket.exists());
     }
 }
