@@ -154,8 +154,12 @@ impl<I: Irc> Daemon<I> {
                 Ok(())
             }
             Ok(Op::Quit {}) => {
-                reply(conn, Ok(json!({}))).await?;
-                self.quit.notify_one();
+                let allowed = self.grants.check_quit();
+                let quitting = allowed.is_ok();
+                reply(conn, allowed.map(|()| json!({}))).await?;
+                if quitting {
+                    self.quit.notify_one();
+                }
                 Ok(())
             }
         }
@@ -519,8 +523,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quit_replies_then_shuts_down_and_removes_the_socket() {
+    async fn quit_without_the_grant_is_refused_and_keeps_running() {
         let daemon = launch(grants());
+        let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
+        assert_eq!(reply["Err"]["code"], "not_allowed");
+        let status = daemon
+            .call(json!({"v": 1, "op": "status", "args": {}}))
+            .await;
+        assert_eq!(status["Ok"]["connected"], true);
+    }
+
+    #[tokio::test]
+    async fn quit_replies_then_shuts_down_and_removes_the_socket() {
+        let mut grants = grants();
+        grants.irc.quit = true;
+        let daemon = launch(grants);
         let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
         assert_eq!(reply, json!({"Ok": {}}));
 

@@ -34,6 +34,14 @@ impl Grants {
         })
     }
 
+    pub fn check_quit(&self) -> Result<()> {
+        if self.irc.quit {
+            return Ok(());
+        }
+        Err(Error::new(Code::NotAllowed, "irc.quit is not granted")
+            .with_hint("the operator stops louro"))
+    }
+
     fn check_target(&self, target: &str, dm_received: bool) -> Result<()> {
         // `PRIVMSG maria,#lounge` would also reach a target no grant covers.
         if target.contains(',') {
@@ -161,6 +169,14 @@ mod tests {
             let error = send(&grants, target, true).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
+    }
+
+    #[test]
+    fn quits_only_with_irc_quit() {
+        assert!(grants("irc.quit = true").check_quit().is_ok());
+        let error = Grants::default().check_quit().unwrap_err();
+        assert_eq!(error.code, Code::NotAllowed);
+        assert_eq!(error.hint.as_deref(), Some("the operator stops louro"));
     }
 
     #[test]
