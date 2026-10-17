@@ -136,10 +136,7 @@ impl Inbox {
         self.arrived.notify_waiters();
     }
 
-    async fn wait(&self, args: &WaitArgs) -> Result<Batch> {
-        if args.max == 0 {
-            return Err(Error::new(Code::Usage, "max must be at least 1"));
-        }
+    async fn wait(&self, args: &WaitArgs) -> Batch {
         let deadline = args
             .timeout_secs
             .and_then(|secs| Instant::now().checked_add(Duration::from_secs(secs)));
@@ -147,16 +144,16 @@ impl Inbox {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
-            let batch = self.buffer().batch(args.max);
+            let batch = self.buffer().batch(args.max.get());
             if !batch.events.is_empty() {
-                return Ok(batch);
+                return batch;
             }
             if let Some(deadline) = deadline {
                 if time::timeout_at(deadline, arrived).await.is_err() {
-                    return Ok(Batch {
+                    return Batch {
                         timed_out: true,
                         ..batch
-                    });
+                    };
                 }
             } else {
                 arrived.await;
@@ -399,11 +396,9 @@ impl<I: Irc> Daemon<I> {
             Ok(Op::Send(args)) => reply(conn, self.send(args).await).await,
             Ok(Op::Wait(args)) => {
                 let batch = self.inbox.wait(&args).await;
-                let cursor = batch.as_ref().ok().map(|batch| batch.cursor);
-                reply(conn, batch).await?;
-                if let Some(cursor) = cursor
-                    && let Some(Ack { ack: true }) = read_line(conn).await?
-                {
+                let cursor = batch.cursor;
+                reply(conn, Ok(batch)).await?;
+                if let Some(Ack { ack: true }) = read_line(conn).await? {
                     self.inbox.ack(cursor);
                 }
                 Ok(())
@@ -466,6 +461,7 @@ async fn reply(conn: &mut BufReader<UnixStream>, result: Result<impl Serialize>)
 #[cfg(test)]
 mod tests {
     use std::future;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
 
     use tempfile::TempDir;
@@ -514,7 +510,10 @@ mod tests {
     }
 
     fn wait_args(timeout_secs: Option<u64>, max: usize) -> WaitArgs {
-        WaitArgs { timeout_secs, max }
+        WaitArgs {
+            timeout_secs,
+            max: NonZeroUsize::new(max).unwrap(),
+        }
     }
 
     fn ids(batch: &Batch) -> Vec<u64> {
@@ -596,7 +595,7 @@ mod tests {
         time::sleep(Duration::from_secs(5)).await;
         inbox.push(from_maria("louro: does ergo support chathistory for DMs?"));
 
-        let batch = waiter.await.unwrap().unwrap();
+        let batch = waiter.await.unwrap();
         assert!(!batch.timed_out);
         assert_eq!(ids(&batch), [1]);
         assert_eq!(batch.cursor, 1);
@@ -608,10 +607,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_quiet_channel_times_out_successfully() {
-        let batch = Inbox::default()
-            .wait(&wait_args(Some(60), 20))
-            .await
-            .unwrap();
+        let batch = Inbox::default().wait(&wait_args(Some(60), 20)).await;
         assert_eq!(
             serde_json::to_value(&batch).unwrap(),
             json!({
@@ -627,10 +623,10 @@ mod tests {
     #[tokio::test]
     async fn a_zero_timeout_polls() {
         let inbox = Inbox::default();
-        assert!(inbox.wait(&wait_args(Some(0), 20)).await.unwrap().timed_out);
+        assert!(inbox.wait(&wait_args(Some(0), 20)).await.timed_out);
 
         inbox.push(from_joao("it does, it's a config option"));
-        let batch = inbox.wait(&wait_args(Some(0), 20)).await.unwrap();
+        let batch = inbox.wait(&wait_args(Some(0), 20)).await;
         assert!(!batch.timed_out);
         assert_eq!(ids(&batch), [1]);
     }
@@ -644,7 +640,7 @@ mod tests {
         });
         time::sleep(Duration::from_secs(3600)).await;
         inbox.push(from_maria("louro: still there?"));
-        assert_eq!(ids(&waiter.await.unwrap().unwrap()), [1]);
+        assert_eq!(ids(&waiter.await.unwrap()), [1]);
     }
 
     #[tokio::test]
@@ -653,18 +649,18 @@ mod tests {
         inbox.push(from_maria("louro: does ergo support chathistory for DMs?"));
         inbox.push(from_joao("it does, it's a config option"));
 
-        let unacked = inbox.wait(&wait_args(Some(0), 20)).await.unwrap();
+        let unacked = inbox.wait(&wait_args(Some(0), 20)).await;
         assert_eq!(ids(&unacked), [1, 2]);
-        let again = inbox.wait(&wait_args(Some(0), 20)).await.unwrap();
+        let again = inbox.wait(&wait_args(Some(0), 20)).await;
         assert_eq!(ids(&again), [1, 2]);
 
         inbox.push(from_maria("louro: which config option?"));
         inbox.ack(again.cursor);
-        let after_ack = inbox.wait(&wait_args(Some(0), 20)).await.unwrap();
+        let after_ack = inbox.wait(&wait_args(Some(0), 20)).await;
         assert_eq!(ids(&after_ack), [3]);
 
         inbox.ack(after_ack.cursor);
-        let drained = inbox.wait(&wait_args(Some(0), 20)).await.unwrap();
+        let drained = inbox.wait(&wait_args(Some(0), 20)).await;
         assert!(drained.timed_out);
         assert_eq!(drained.cursor, 3);
     }
@@ -676,24 +672,15 @@ mod tests {
         inbox.push(from_joao("it does, it's a config option"));
         inbox.push(from_maria("louro: which one?"));
 
-        let first = inbox.wait(&wait_args(Some(0), 2)).await.unwrap();
+        let first = inbox.wait(&wait_args(Some(0), 2)).await;
         assert_eq!(ids(&first), [1, 2]);
         assert!(first.more);
         assert_eq!(first.cursor, 2);
 
         inbox.ack(first.cursor);
-        let rest = inbox.wait(&wait_args(Some(0), 2)).await.unwrap();
+        let rest = inbox.wait(&wait_args(Some(0), 2)).await;
         assert_eq!(ids(&rest), [3]);
         assert!(!rest.more);
-    }
-
-    #[tokio::test]
-    async fn a_max_of_zero_is_a_usage_error() {
-        let error = Inbox::default()
-            .wait(&wait_args(Some(0), 0))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, Code::Usage);
     }
 
     #[tokio::test]
@@ -702,7 +689,7 @@ mod tests {
         for n in 0..BUFFER_CAP + 5 {
             inbox.push(from_joao(&format!("spam {n}")));
         }
-        let batch = inbox.wait(&wait_args(Some(0), 1)).await.unwrap();
+        let batch = inbox.wait(&wait_args(Some(0), 1)).await;
         assert_eq!(ids(&batch), [6]);
         assert!(batch.more);
     }
@@ -1052,7 +1039,7 @@ mod tests {
         };
         daemon.ingest(from_maria_dm("hey, got a sec?"));
 
-        let batch = daemon.inbox.wait(&wait_args(Some(0), 20)).await.unwrap();
+        let batch = daemon.inbox.wait(&wait_args(Some(0), 20)).await;
         assert_eq!(ids(&batch), [1]);
     }
 

@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -103,8 +104,8 @@ pub struct WaitArgs {
     #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]
     pub timeout: Timeout,
     /// Maximum number of events to return
-    #[arg(long, default_value_t = 20, value_name = "N")]
-    pub max: usize,
+    #[arg(long, default_value = "20", value_name = "N")]
+    pub max: NonZeroUsize,
 }
 
 #[derive(Debug, Args)]
@@ -189,7 +190,7 @@ mod tests {
             panic!("expected wait");
         };
         assert_eq!(args.timeout.as_secs(), Some(5));
-        assert_eq!(args.max, 20);
+        assert_eq!(args.max.get(), 20);
 
         let cli = Cli::try_parse_from(["louro", "wait", "--timeout", "0"]).unwrap();
         let Some(Command::Wait(args)) = cli.command else {

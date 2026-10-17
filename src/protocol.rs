@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -30,7 +32,7 @@ pub enum Op {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WaitArgs {
     pub timeout_secs: Option<u64>,
-    pub max: usize,
+    pub max: NonZeroUsize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,7 +110,7 @@ mod tests {
             parse(json!({"v": 1, "op": "wait", "args": {"timeout_secs": 60, "max": 5}})).op,
             Op::Wait(WaitArgs {
                 timeout_secs: Some(60),
-                max: 5
+                max: NonZeroUsize::new(5).unwrap()
             })
         );
         assert_eq!(
@@ -128,7 +130,7 @@ mod tests {
     fn serializes_requests_in_the_wire_shape() {
         let request = Request::new(Op::Wait(WaitArgs {
             timeout_secs: Some(0),
-            max: 20,
+            max: NonZeroUsize::new(20).unwrap(),
         }));
         assert_eq!(
             serde_json::to_value(&request).unwrap(),
