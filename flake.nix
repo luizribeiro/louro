@@ -150,6 +150,7 @@
             toolchain
             pkgs.cargo-nextest
             pkgs.cargo-deny
+            pkgs.cargo-mutants
             pkgs.git-absorb
             pkgs.gnumake
           ]
