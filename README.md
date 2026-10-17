@@ -65,7 +65,9 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 `louro.toml` has two tables: `[server]` says what the bot connects as,
 `[grants]` says what the agent may do. Everything not granted is denied. A
 grant is `true` (everyone/everywhere), `false`, or a list of names matched
-case-insensitively, with one trailing `*` allowed as a prefix glob.
+case-insensitively, with one trailing `*` allowed as a prefix glob; for DM
+grants, prefer an `account:NAME` entry over a bare nick, since the server
+verifies accounts but nicks can be taken by someone else.
 
 <details>
 <summary>A fuller example</summary>
@@ -82,7 +84,7 @@ autojoin = ["#bots", "#lounge"]
 [grants]
 irc.join = ["#bots", "#lounge"]     # channels it may sit in and read
 irc.send = ["#bots"]                # channels it may speak in; must be within irc.join
-irc.dm.read = ["luiz", "maria"]     # whose DMs reach the agent
+irc.dm.read = ["account:luiz", "maria"]  # whose DMs reach the agent
 irc.dm.send = ["$first"]            # whom it may DM; $first = only people whose DM it received
 # irc.quit = true                   # let the agent run `louro quit`
 ```
