@@ -350,11 +350,6 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
     Some(Incoming { origin, ..incoming })
 }
 
-/// A history message in the conversation `target`, which the bot's own lines are part of.
-fn history_chat(message: &Message, state: &State, target: &str) -> Option<Incoming> {
-    chat(message, state, target, message.is_private())
-}
-
 fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option<Incoming> {
     let kind = chat_kind(message.kind())?;
     let nick = message.sender.as_ref().and_then(Source::nick)?;
@@ -510,9 +505,10 @@ impl Irc for PapoIrc {
         let page = request.limit(query.limit).await?;
         let state = self.client.state();
         Ok(History {
+            // Filed under the conversation asked for, which the bot's own lines are part of.
             events: page
                 .messages()
-                .filter_map(|message| history_chat(message, &state, target))
+                .filter_map(|message| chat(message, &state, target, message.is_private()))
                 .collect(),
             complete: page.end,
         })
