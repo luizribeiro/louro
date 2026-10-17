@@ -10,8 +10,8 @@ mod client;
 mod connect;
 mod daemon;
 mod error;
+mod irc;
 mod output;
-mod papo;
 mod password;
 mod protocol;
 

@@ -12,7 +12,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::{self, Instant};
 
 use crate::error::{Code, Error, Result};
-use crate::papo::Secret;
+use crate::irc::Secret;
 use crate::protocol::{Ack, Kind, Op, Request, SendArgs, VERSION, WaitArgs, read_line, write_line};
 
 const MAX_TEXT_CHARS: usize = 1000;

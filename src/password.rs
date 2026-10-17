@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Code, Error, Result};
-use crate::papo::Secret;
+use crate::irc::Secret;
 
 pub enum Source {
     /// A file only its owner can read, e.g. a systemd credential.

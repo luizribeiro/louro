@@ -15,8 +15,8 @@ use crate::cli::ConnectArgs;
 use crate::client::{self, Connection};
 use crate::daemon::{self, Config};
 use crate::error::{Code, Error, Result};
+use crate::irc::{self, Secret};
 use crate::output;
-use crate::papo::{self, Secret};
 use crate::password::{self, Source};
 use crate::protocol::Op;
 
@@ -106,7 +106,7 @@ async fn start(
     let socket = client::resolve_socket_path(socket)?;
     let password = read_password(&args)?;
     create_runtime_dir(&socket)?;
-    let (irc, incoming) = papo::connect(&args, password.clone()).await?;
+    let (irc, incoming) = irc::connect(&args, password.clone()).await?;
     let listener = daemon::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     output::emit(Ok(json!({
         "server": format!("{}:{}", args.server, args.port()),
