@@ -61,6 +61,7 @@ Exit codes that matter:
   3  louro isn't running: ask the operator to start it
   4  disconnected: retry later
   5  not allowed: don't retry, the operator set this
+  6  rate limited: wait retry_after seconds, or send/react less
   7  unsupported: the server lacks the feature; do without it
 
 Run `louro <command> --help` for a command's flags.

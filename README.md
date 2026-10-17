@@ -63,12 +63,15 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 
 ## Config
 
-`louro.toml` has two tables: `[server]` says what the bot connects as,
-`[grants]` says what the agent may do. Everything not granted is denied. A
-grant is `true` (everyone/everywhere), `false`, or a list of names matched
-case-insensitively, with one trailing `*` allowed as a prefix glob; for DM
-grants, prefer an `account:NAME` entry over a bare nick, since the server
-verifies accounts but nicks can be taken by someone else.
+`louro.toml` has three tables: `[server]` says what the bot connects as,
+`[grants]` says what the agent may do, `[limits]` how much. Everything not
+granted is denied. A grant is `true` (everyone/everywhere), `false`, or a
+list of names matched case-insensitively, with one trailing `*` allowed as
+a prefix glob; for DM grants, prefer an `account:NAME` entry over a bare
+nick, since the server verifies accounts but nicks can be taken by someone
+else. `[limits]` caps how fast the agent may send and react, a backstop
+against runaway loops, retries and prompt-injected spam; `louro status`
+shows the effective limits.
 
 <details>
 <summary>A fuller example</summary>
@@ -88,6 +91,12 @@ irc.send = ["#bots"]                # channels it may speak in; must be within i
 irc.dm.read = ["account:luiz", "maria"]  # whose DMs reach the agent
 irc.dm.send = ["$first"]            # whom it may DM; $first = only people whose DM it received
 # irc.quit = true                   # let the agent run `louro quit`
+
+[limits]
+send = "3/10s"         # per target (channel or nick); default
+send_total = "10/1m"   # across every target; default
+react = "10/1m"        # per target; default; typing has no limit
+# send = "off"         # any limit can be turned off
 ```
 
 </details>
