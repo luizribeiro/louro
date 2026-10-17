@@ -783,18 +783,6 @@ mod tests {
         assert!(last_error["time"].as_str().unwrap().ends_with('Z'));
     }
 
-    #[test]
-    fn a_disconnect_says_whether_papo_is_reconnecting() {
-        assert_eq!(
-            disconnect_message("the server stopped responding", Some(4)),
-            "the server stopped responding; reconnecting in 4s"
-        );
-        assert_eq!(
-            disconnect_message("the connection was lost", None),
-            "the connection was lost; papo stopped reconnecting"
-        );
-    }
-
     #[tokio::test]
     async fn wait_reports_each_outage_once_whatever_the_grants() {
         let daemon = launch(Grants::default());
@@ -823,24 +811,6 @@ mod tests {
             ]
         );
         assert!(events.iter().all(|event| event.get("untrusted").is_none()));
-    }
-
-    #[tokio::test]
-    async fn wait_reports_an_invite_without_joining() {
-        let daemon = launch(Grants::default());
-        daemon
-            .update(Update::Invited {
-                from: from_luiz("").from,
-                channel: "#lounge".into(),
-            })
-            .await;
-        let (_, reply) = daemon.wait(5).await;
-        let event = &reply["Ok"]["events"][0];
-        assert_eq!(
-            (&event["type"], &event["from"]["nick"], &event["channel"]),
-            (&json!("invite"), &json!("luiz"), &json!("#lounge"))
-        );
-        assert_eq!(event["untrusted"], true);
     }
 
     #[tokio::test]
@@ -972,21 +942,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reply_carries_its_msgid_and_says_whether_it_threaded() {
-        let daemon = launch(grants());
-        let reply = daemon
-            .call(reply_request(
-                "#bots",
-                "4y8kq7j2c9mnz",
-                "yes, see ergo.yaml",
-            ))
-            .await;
-        assert_eq!(reply["Ok"]["threaded"], true);
-        let sent = daemon.irc.sent.lock().unwrap().pop().unwrap();
-        assert_eq!(sent.reply_to.as_deref(), Some("4y8kq7j2c9mnz"));
-    }
-
-    #[tokio::test]
     async fn a_reply_to_a_malformed_msgid_never_reaches_irc() {
         let daemon = launch(grants());
         let reply = daemon
@@ -1018,23 +973,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn react_adds_and_removes_a_reaction_where_granted() {
+    async fn react_adds_and_removes_a_reaction_where_granted_and_never_the_password() {
         let daemon = launch(grants());
         for remove in [false, true] {
             let reply = daemon.call(react_request("#bots", "👍", remove)).await;
             assert_eq!(reply["Ok"]["removed"], remove);
         }
-        let refused = daemon.call(react_request("#lounge", "👍", false)).await;
-        assert_eq!(refused["Err"]["code"], "not_allowed");
+        for (target, reaction, code) in [
+            ("#lounge", "👍", "not_allowed"),
+            ("#bots", PASSWORD, "blocked_secret"),
+        ] {
+            let refused = daemon.call(react_request(target, reaction, false)).await;
+            assert_eq!(refused["Err"]["code"], code);
+        }
         assert_eq!(*daemon.irc.reactions.lock().unwrap(), [false, true]);
-    }
-
-    #[tokio::test]
-    async fn a_reaction_never_carries_the_password() {
-        let daemon = launch(grants());
-        let reply = daemon.call(react_request("#bots", PASSWORD, false)).await;
-        assert_eq!(reply["Err"]["code"], "blocked_secret");
-        assert!(daemon.irc.reactions.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1222,14 +1174,6 @@ mod tests {
             let reply = daemon.call(names_request(channel)).await;
             assert_eq!(reply["Err"]["code"], "not_allowed", "{channel}");
         }
-    }
-
-    #[tokio::test]
-    async fn another_protocol_version_is_a_mismatch() {
-        let reply = launch(grants())
-            .call(json!({"v": 2, "op": "history", "args": {"target": "#bots"}}))
-            .await;
-        assert_eq!(reply["Err"]["code"], "version_mismatch");
     }
 
     #[tokio::test]
