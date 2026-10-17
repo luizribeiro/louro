@@ -1,7 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -71,12 +71,6 @@ struct Daemon<I> {
     quit: Notify,
 }
 
-/// Binds the daemon's socket at `path`, replacing a stale one.
-pub fn bind(path: &Path) -> io::Result<UnixListener> {
-    remove_socket(path)?;
-    UnixListener::bind(path)
-}
-
 /// Serves requests on `listener` and buffers chat from `updates` until a `quit`
 /// request or `stop`, then quits IRC and removes the socket at `socket_path`. Fails once papo
 /// gives up reconnecting, so a supervisor can restart louro.
@@ -131,8 +125,9 @@ pub async fn start(
     let socket = resolve_socket_path(server.socket.as_deref())?;
     create_runtime_dir(&socket)?;
     let lock = lock_session(&socket)?;
+    remove_socket(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let (irc, updates) = irc::connect(&server, password.clone()).await?;
-    let listener = bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
+    let listener = UnixListener::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let stop = stop_signal()
         .map_err(|err| Error::new(Code::Internal, format!("can't handle stop signals: {err}")))?;
     output::emit(Ok(json!({
@@ -197,10 +192,17 @@ fn cannot_listen(socket: &Path, err: &io::Error) -> Error {
     )
 }
 
+/// Removes a socket at `path`, such as one a crashed louro left; anything else there, a symlink
+/// included, is refused, since `connect` may be pointed at any path.
 fn remove_socket(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(path),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "something other than a socket is there",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -660,7 +662,7 @@ mod tests {
                 let _ = stopped.await;
             };
             async move {
-                let listener = bind(&socket)?;
+                let listener = UnixListener::bind(&socket)?;
                 run(grants, password, irc, receiver, listener, &socket, stopped).await
             }
         });
@@ -1225,6 +1227,34 @@ mod tests {
             "the connection was lost; papo stopped reconnecting"
         );
         assert!(!daemon.socket.exists());
+    }
+
+    #[test]
+    fn only_a_socket_is_removed_from_the_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        remove_socket(&stale).unwrap();
+        assert!(fs::symlink_metadata(&stale).is_err());
+
+        let notes = dir.path().join("notes.txt");
+        fs::write(&notes, "keep me").unwrap();
+        let live = dir.path().join("live.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        let link = dir.path().join("link.sock");
+        std::os::unix::fs::symlink(&live, &link).unwrap();
+        for path in [&notes, &link] {
+            let error = remove_socket(path).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists,
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(fs::read_to_string(&notes).unwrap(), "keep me");
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert!(fs::metadata(&live).unwrap().file_type().is_socket());
     }
 
     #[test]

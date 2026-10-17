@@ -223,6 +223,20 @@ fn connect_in_the_foreground_reports_a_failed_connection() {
 }
 
 #[test]
+fn connect_refuses_a_socket_path_that_holds_a_regular_file() {
+    let dir = tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    fs::write(&notes, "keep me").unwrap();
+    let config = config(dir.path(), closed_port(), "");
+    connect(&notes, &config)
+        .arg("--foreground")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("something other than a socket"));
+    assert_eq!(fs::read_to_string(&notes).unwrap(), "keep me");
+}
+
+#[test]
 fn the_socket_defaults_to_the_runtime_dir_else_a_per_user_tmp_dir() {
     let dir = tempdir().unwrap();
     let uid = fs::metadata(dir.path()).unwrap().uid();
