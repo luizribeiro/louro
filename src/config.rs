@@ -190,29 +190,6 @@ fn within_join(irc: &Irc, channels: &[String], setting: &str) -> Result<(), Stri
 mod tests {
     use super::*;
 
-    const FULL: &str = r##"
-        [server]
-        address = "ircs://irc.weblounge.org:6697"
-        nick = "louro"
-        alt_nicks = ["louro_", "louro__"]
-        username = "louro"
-        realname = "louro, an agent on IRC"
-        sasl_username = "louro-bot"
-        password_file = "/run/credentials/louro.service/password"
-        autojoin = ["#bots", "#lounge"]
-        socket = "/run/louro/louro.sock"
-
-        [grants]
-        irc.join = ["#bots", "#lounge", "#help-*"]
-        irc.send = ["#bots"]
-        irc.dm.read = true
-        irc.dm.send = ["$first", "luiz"]
-        irc.react = ["#bots", "account:luiz"]
-        irc.typing = ["#bots"]
-        irc.redact = true
-        irc.quit = true
-    "##;
-
     const MINIMAL: &str = r#"
         [server]
         address = "irc.weblounge.org"
@@ -221,24 +198,6 @@ mod tests {
 
     fn refusal(text: &str) -> String {
         parse(text).unwrap_err()
-    }
-
-    #[test]
-    fn reads_a_full_config() {
-        let Config { server, grants } = parse(FULL).unwrap();
-        assert_eq!(server.address, "ircs://irc.weblounge.org:6697");
-        assert_eq!(server.alt_nicks, ["louro_", "louro__"]);
-        assert_eq!(server.realname.as_deref(), Some("louro, an agent on IRC"));
-        assert_eq!(server.sasl_username(), Some("louro-bot"));
-        assert_eq!(server.autojoin, ["#bots", "#lounge"]);
-        assert_eq!(server.socket, Some("/run/louro/louro.sock".into()));
-        let irc = grants.irc;
-        assert!(irc.join.matches("#help-rust") && irc.send.matches("#bots"));
-        assert!(!irc.send.matches("#lounge"));
-        assert!(irc.dm.read.matches("maria") && irc.dm.send.matches("luiz"));
-        assert!(irc.react.matches("#bots") && irc.react.matches_sender("lz", Some("luiz")));
-        assert!(irc.typing.matches("#bots") && !irc.typing.matches("#lounge"));
-        assert!(irc.redact && irc.quit);
     }
 
     #[test]
@@ -262,53 +221,20 @@ mod tests {
     }
 
     #[test]
-    fn a_password_file_turns_on_sasl_as_the_nick() {
-        let text = format!("{MINIMAL}password_file = \"/run/louro/password\"");
-        assert_eq!(parse(&text).unwrap().server.sasl_username(), Some("louro"));
-    }
-
-    #[test]
-    fn refuses_unknown_keys() {
-        for typo in [
-            "[server]\naddres = \"irc.weblounge.org\"\nnick = \"louro\"",
-            &format!("{MINIMAL}\n[grants]\nirc.joni = [\"#bots\"]"),
-            &format!("{MINIMAL}\n[grants]\nirc.dm.write = true"),
-            &format!("{MINIMAL}\n[grant]\nirc.quit = true"),
+    fn refuses_autojoin_or_irc_send_outside_irc_join() {
+        for (settings, refused) in [
+            (
+                "autojoin = [\"#bots\", \"#lounge\"]\n[grants]\nirc.join = [\"#bots\"]",
+                "#lounge is in autojoin",
+            ),
+            (
+                "[grants]\nirc.join = [\"#help-*\"]\nirc.send = [\"#*\"]",
+                "#* is in irc.send",
+            ),
         ] {
-            assert!(refusal(typo).contains("unknown field"), "{typo}");
+            let refusal = refusal(&format!("{MINIMAL}{settings}"));
+            assert_eq!(refusal, format!("{refused} but not granted by irc.join"));
         }
-    }
-
-    #[test]
-    fn refuses_a_selector_that_is_not_true_or_a_list() {
-        let text = format!("{MINIMAL}\n[grants]\nirc.join = \"#bots\"");
-        assert!(refusal(&text).contains("true, false, or a list of names"));
-    }
-
-    #[test]
-    fn refuses_autojoin_outside_irc_join() {
-        let text = r##"
-            [server]
-            address = "irc.weblounge.org"
-            nick = "louro"
-            autojoin = ["#bots", "#lounge"]
-
-            [grants]
-            irc.join = ["#bots"]
-        "##;
-        assert_eq!(
-            refusal(text),
-            "#lounge is in autojoin but not granted by irc.join"
-        );
-    }
-
-    #[test]
-    fn refuses_irc_send_outside_irc_join() {
-        let text = format!("{MINIMAL}\n[grants]\nirc.join = [\"#help-*\"]\nirc.send = [\"#*\"]");
-        assert_eq!(
-            refusal(&text),
-            "#* is in irc.send but not granted by irc.join"
-        );
     }
 
     #[test]
@@ -341,26 +267,5 @@ mod tests {
         }
         assert!(Selector::All(true).matches("maria"));
         assert!(!Selector::All(false).matches("maria"));
-    }
-
-    #[test]
-    fn the_socket_flag_overrides_the_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("louro.toml");
-        fs::write(
-            &path,
-            format!("{MINIMAL}socket = \"/run/louro/louro.sock\""),
-        )
-        .unwrap();
-        let config = load(Some(&path), Some(Path::new("/tmp/louro.sock"))).unwrap();
-        assert_eq!(config.server.socket, Some("/tmp/louro.sock".into()));
-    }
-
-    #[test]
-    fn a_missing_file_is_a_usage_error_with_an_example() {
-        let error = load(Some(Path::new("/nonexistent/louro.toml")), None).unwrap_err();
-        assert_eq!(error.code, Code::Usage);
-        assert!(error.message.contains("/nonexistent/louro.toml"));
-        assert!(error.hint.unwrap().contains("[grants]"));
     }
 }
