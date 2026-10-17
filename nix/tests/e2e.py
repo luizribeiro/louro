@@ -351,6 +351,13 @@ with running(dm_read=["account:luiz"], dm_send=["$first"]):
         refused("not_allowed", "history", "#lounge")
         refused("not_allowed", "history", "mallory")
 
+with running(dm_read=["account:luiz"], dm_send=["account:luiz"]):
+    with subtest("an account: grant in irc.dm.send lets louro DM luiz back by his nick"):
+        refused("not_allowed", "send", "luiz", "hi")
+        say("luiz", "louro", "are you there?")
+        louro("send", "luiz", "yes, I'm here")
+        heard("luiz", "luiz", "yes, I'm here")
+
 start(grants())
 with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows again"):
     # Stopped and started separately, so the outage lasts until louro notices it.
