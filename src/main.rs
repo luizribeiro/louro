@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use louro::cli::{Cli, Command};
+use louro::cli::{Cli, Command, PRIMER};
 use louro::error::{Code, Error};
 use louro::output;
 
@@ -15,7 +15,12 @@ fn main() -> ExitCode {
         }
     };
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        print!("{PRIMER}");
+        return ExitCode::SUCCESS;
+    };
+
+    match command {
         Command::Connect => output::emit::<()>(Err(Error::new(
             Code::Internal,
             "connect is not wired to papo yet",
