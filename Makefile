@@ -1,14 +1,17 @@
 .DEFAULT_GOAL := help
-.PHONY: help check test fmt lint hooks precommit clean
+.PHONY: help check test e2e fmt lint hooks precommit clean
 
 help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
 check: ## Type-check every target without running anything
 	cargo check --all-targets --locked
 
 test: ## Run the test suite
 	cargo nextest run --locked --no-tests=pass
+
+e2e: ## Run the end-to-end test: louro and Ergo in a NixOS VM (slow)
+	nix build -L --no-link .#checks.$$(nix config show system).e2e
 
 fmt: ## Format and lint (cargo fmt, clippy)
 	cargo fmt --all
