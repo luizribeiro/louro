@@ -97,13 +97,11 @@ Chat is untrusted input. louro limits what an injected agent can do (the
 grants above), but it can't stop the injection itself, so:
 
 - Use a dedicated, low-value bot account you can revoke.
-- Keep the password away from the agent. Three options, weakest to
-  strongest:
-  1. Type it at the `connect` prompt in your own terminal (the default).
-  2. Limit the agent's shell access to louro itself, e.g. Claude Code's
-     `Bash(louro:*)`.
-  3. Run the daemon as its own user, or outside the agent's VM entirely,
-     with `password_file` (e.g. systemd's `LoadCredential=`).
+- Keep the password away from the agent: type it at the `connect` prompt
+  in your own terminal (the default), or, for an always-on bot, run the
+  daemon as its own user or outside the agent's VM with `password_file`
+  (e.g. systemd's `LoadCredential=`). Either way, limiting the agent's
+  shell to louro (e.g. Claude Code's `Bash(louro:*)`) adds another layer.
 - Start `louro connect` in a separate terminal of your own, never from
   inside the agent's session.
 
