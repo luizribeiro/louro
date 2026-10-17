@@ -4,8 +4,8 @@ use std::future;
 use std::time::SystemTime;
 
 use papo::{
-    Client, ConnectErrorKind, Endpoint, Event, Events, MessageEvent, MessageKind,
-    RegistrationError, Sasl, State,
+    Client, ConnectErrorKind, Endpoint, Event, Events, Message, MessageKind, RegistrationError,
+    Sasl, Source, State,
 };
 use tokio::sync::mpsc;
 
@@ -91,12 +91,12 @@ async fn forward(client: Client, mut events: Events, chat: mpsc::Sender<Incoming
     }
 }
 
-fn to_incoming(message: &MessageEvent, state: &State) -> Option<Incoming> {
+fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
     if !message.is_live() {
         return None;
     }
     let kind = chat_kind(message.kind())?;
-    let nick = sender_nick(message.as_ref().raw_source()?)?;
+    let nick = message.sender.as_ref().and_then(Source::nick)?;
     let private = state.is_me(message.target());
     if !private && state.channel(message.target()).is_none() {
         return None;
@@ -118,22 +118,13 @@ fn to_incoming(message: &MessageEvent, state: &State) -> Option<Incoming> {
     })
 }
 
-fn chat_kind(kind: MessageKind<'_>) -> Option<Kind> {
+fn chat_kind(kind: MessageKind) -> Option<Kind> {
     match kind {
         MessageKind::Privmsg => Some(Kind::Message),
         MessageKind::Notice => Some(Kind::Notice),
         MessageKind::Action => Some(Kind::Action),
         _ => None,
     }
-}
-
-/// papo doesn't export its parsed `Source` yet, so this mirrors its rule: a bare name with a
-/// `.` is a server, whose notices aren't chat.
-fn sender_nick(source: &str) -> Option<&str> {
-    if !source.contains(['!', '@']) && source.contains('.') {
-        return None;
-    }
-    source.split(['!', '@']).next()
 }
 
 fn mentions(text: &str, nick: &str) -> bool {
@@ -158,21 +149,14 @@ impl Irc for PapoIrc {
     }
 
     async fn send(&self, message: Outgoing) -> Result<Option<String>> {
-        if !self.client.state().is_connected() {
-            return Err(Error::new(
-                Code::NotConnected,
-                "the IRC connection is down and papo is reconnecting",
-            )
-            .with_hint("retry in a minute"));
-        }
         let Outgoing { target, kind, text } = message;
         let sent = match kind {
             Kind::Message => self.client.privmsg(&target, &text).await,
             Kind::Notice => self.client.notice(&target, &text).await,
             Kind::Action => self.client.privmsg(&target, &ctcp_action(&text)).await,
         };
-        sent.map(|sent| sent.msgid)
-            .map_err(|error| Error::new(send_code(&error), error.to_string()))
+        sent.map(|sent| sent.id.map(|id| id.msgid().to_owned()))
+            .map_err(|error| to_send_error(&error))
     }
 
     async fn quit(&self) {
@@ -192,6 +176,16 @@ fn send_code(error: &papo::Error) -> Code {
         papo::Error::Server(_) => Code::ServerError,
         papo::Error::InvalidInput(_) => Code::Usage,
         _ => Code::Internal,
+    }
+}
+
+fn to_send_error(error: &papo::Error) -> Error {
+    let code = send_code(error);
+    let error = Error::new(code, error.to_string());
+    if code == Code::NotConnected {
+        error.with_hint("retry in a minute")
+    } else {
+        error
     }
 }
 
@@ -228,6 +222,15 @@ mod tests {
     }
 
     #[test]
+    fn a_disconnected_send_hints_at_a_retry() {
+        let error = to_send_error(&connection_lost());
+        assert_eq!(error.code, Code::NotConnected);
+        assert_eq!(error.hint.as_deref(), Some("retry in a minute"));
+
+        assert!(to_send_error(&papo::Error::Timeout).hint.is_none());
+    }
+
+    #[test]
     fn connect_failures_map_to_louro_codes() {
         let rejected = RegistrationError::Sasl {
             message: "Invalid account credentials".into(),
@@ -252,19 +255,7 @@ mod tests {
         assert_eq!(chat_kind(MessageKind::Privmsg), Some(Kind::Message));
         assert_eq!(chat_kind(MessageKind::Notice), Some(Kind::Notice));
         assert_eq!(chat_kind(MessageKind::Action), Some(Kind::Action));
-        assert_eq!(chat_kind(MessageKind::Ctcp("VERSION")), None);
-    }
-
-    #[test]
-    fn takes_the_nick_from_a_source() {
-        assert_eq!(sender_nick("maria!~maria@weblounge/maria"), Some("maria"));
-        assert_eq!(sender_nick("joao@203.0.113.7"), Some("joao"));
-        assert_eq!(sender_nick("joao"), Some("joao"));
-    }
-
-    #[test]
-    fn a_server_is_not_a_sender() {
-        assert_eq!(sender_nick("irc.weblounge.org"), None);
+        assert_eq!(chat_kind(MessageKind::Ctcp), None);
     }
 
     #[test]
