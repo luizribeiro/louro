@@ -18,7 +18,8 @@ mod protocol;
 use cli::{Cli, Command, PRIMER};
 use client::Connection;
 use error::{Code, Error, Result};
-use protocol::{Kind, Op, SendArgs};
+use irc::Kind;
+use protocol::{Op, SendArgs};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {

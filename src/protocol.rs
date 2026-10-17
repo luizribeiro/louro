@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 pub use crate::cli::WaitArgs;
+use crate::irc::Kind;
 
 pub const VERSION: u8 = 1;
 
@@ -33,14 +34,6 @@ pub struct SendArgs {
     pub target: String,
     pub text: String,
     pub kind: Kind,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
-    Message,
-    Notice,
-    Action,
 }
 
 /// What the client writes after printing a wait result; only then does the daemon move its cursor.

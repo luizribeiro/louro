@@ -4,16 +4,66 @@ use papo::{
     Client, ConnectErrorKind, Endpoint, Event, Events, Message, MessageKind, RegistrationError,
     Sasl, Source, State,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 pub use papo::Secret;
 
 use crate::cli::ConnectArgs;
-use crate::daemon::{Incoming, Irc, IrcStatus, Outgoing, Sender};
 use crate::error::{Code, Error, Result};
-use crate::protocol::Kind;
 
 const INCOMING_CAPACITY: usize = 256;
+
+#[derive(Clone, Serialize)]
+pub struct Incoming {
+    #[serde(rename = "type")]
+    pub kind: Kind,
+    pub time: String,
+    pub msgid: Option<String>,
+    pub target: String,
+    pub private: bool,
+    pub from: Sender,
+    pub text: String,
+    pub mentions_me: bool,
+    pub reply_to: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct Sender {
+    pub nick: String,
+    pub account: Option<String>,
+    pub bot: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Outgoing {
+    pub target: String,
+    pub kind: Kind,
+    /// At most five lines joined by `\n`, with no CR, NUL or CTCP delimiter.
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Message,
+    Notice,
+    Action,
+}
+
+/// The IRC connection as the daemon sees it; `PapoIrc` below implements it over a papo client.
+pub trait Irc: Send + Sync + 'static {
+    fn status(&self) -> IrcStatus;
+    /// Sends one message (several lines become a multiline batch) and returns its msgid, if any.
+    fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send;
+    fn quit(&self) -> impl Future<Output = ()> + Send;
+}
+
+pub struct IrcStatus {
+    pub connected: bool,
+    pub nick: String,
+    pub channels: Vec<String>,
+}
 
 pub struct PapoIrc {
     client: Client,
