@@ -504,63 +504,8 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender};
     use crate::irc::{IrcStatus, Kind, Origin, Sender, Sent};
-
-    fn from_maria(text: &str) -> Incoming {
-        Incoming {
-            kind: Kind::Message,
-            time: "2026-10-16T21:04:11.392Z".into(),
-            msgid: Some("4y8kq7j2c9mnz".into()),
-            target: "#bots".into(),
-            private: false,
-            from: Sender {
-                nick: "maria".into(),
-                account: Some("maria".into()),
-                away: false,
-                bot: false,
-            },
-            text: text.into(),
-            mentions_me: true,
-            reply_to: None,
-            origin: Origin::Live,
-            from_me: false,
-        }
-    }
-
-    fn from_joao(text: &str) -> Incoming {
-        Incoming {
-            msgid: Some("9qq1v0x3hdk2a".into()),
-            from: Sender {
-                nick: "joao".into(),
-                account: None,
-                away: false,
-                bot: false,
-            },
-            mentions_me: false,
-            reply_to: Some("4y8kq7j2c9mnz".into()),
-            ..from_maria(text)
-        }
-    }
-
-    fn from_luiz(text: &str) -> Incoming {
-        Incoming {
-            from: Sender {
-                nick: "luiz".into(),
-                account: Some("luiz".into()),
-                away: false,
-                bot: false,
-            },
-            ..from_maria(text)
-        }
-    }
-
-    fn dm(incoming: Incoming) -> Incoming {
-        Incoming {
-            private: true,
-            target: incoming.from.nick.clone(),
-            ..incoming
-        }
-    }
 
     const PASSWORD: &str = "c0rrect-h0rse-battery";
 
@@ -1227,12 +1172,7 @@ mod tests {
         assert_eq!(before["Ok"]["target"], "luiz");
 
         let hijacked = Incoming {
-            from: Sender {
-                nick: "luiz".into(),
-                account: Some("mallory".into()),
-                away: false,
-                bot: false,
-            },
+            from: sender("luiz", Some("mallory")),
             ..dm(from_luiz("it's still me, luiz"))
         };
         daemon.say(hijacked).await;
@@ -1246,12 +1186,7 @@ mod tests {
     async fn first_still_works_once_an_accountless_sender_logs_in() {
         let daemon = launch(grants());
         let first_without_account = Incoming {
-            from: Sender {
-                nick: "maria".into(),
-                account: None,
-                away: false,
-                bot: false,
-            },
+            from: sender("maria", None),
             ..dm(from_maria("hey, got a sec?"))
         };
         daemon.say(first_without_account).await;

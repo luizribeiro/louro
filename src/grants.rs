@@ -146,7 +146,7 @@ fn not_allowed(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::irc::{Kind, Origin, Sender};
+    use crate::irc::fixtures::{from_maria, sender};
 
     fn grants(toml: &str) -> Grants {
         toml::from_str(toml).unwrap()
@@ -169,22 +169,10 @@ mod tests {
 
     fn incoming_as(target: &str, nick: &str, account: Option<&str>, private: bool) -> Incoming {
         Incoming {
-            kind: Kind::Message,
-            time: "2026-10-16T21:04:11.392Z".into(),
-            msgid: None,
             target: target.into(),
             private,
-            from: Sender {
-                nick: nick.into(),
-                account: account.map(String::from),
-                away: false,
-                bot: false,
-            },
-            text: "louro: ping".into(),
-            mentions_me: true,
-            reply_to: None,
-            origin: Origin::Live,
-            from_me: false,
+            from: sender(nick, account),
+            ..from_maria("louro: ping")
         }
     }
 

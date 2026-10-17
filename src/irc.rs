@@ -543,6 +543,62 @@ impl From<papo::Error> for Error {
 }
 
 #[cfg(test)]
+/// Chat from the people the unit tests use.
+pub mod fixtures {
+    use super::{Incoming, Kind, Origin, Sender};
+
+    pub fn sender(nick: &str, account: Option<&str>) -> Sender {
+        Sender {
+            nick: nick.into(),
+            account: account.map(String::from),
+            away: false,
+            bot: false,
+        }
+    }
+
+    pub fn from_maria(text: &str) -> Incoming {
+        Incoming {
+            kind: Kind::Message,
+            time: "2026-10-16T21:04:11.392Z".into(),
+            msgid: Some("4y8kq7j2c9mnz".into()),
+            target: "#bots".into(),
+            private: false,
+            from: sender("maria", Some("maria")),
+            text: text.into(),
+            mentions_me: true,
+            reply_to: None,
+            origin: Origin::Live,
+            from_me: false,
+        }
+    }
+
+    pub fn from_joao(text: &str) -> Incoming {
+        Incoming {
+            msgid: Some("9qq1v0x3hdk2a".into()),
+            from: sender("joao", None),
+            mentions_me: false,
+            reply_to: Some("4y8kq7j2c9mnz".into()),
+            ..from_maria(text)
+        }
+    }
+
+    pub fn from_luiz(text: &str) -> Incoming {
+        Incoming {
+            from: sender("luiz", Some("luiz")),
+            ..from_maria(text)
+        }
+    }
+
+    pub fn dm(incoming: Incoming) -> Incoming {
+        Incoming {
+            private: true,
+            target: incoming.from.nick.clone(),
+            ..incoming
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use papo::{DisconnectCause, Disconnected, InvalidInput, Unsupported, UnsupportedReason};
 

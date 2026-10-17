@@ -196,44 +196,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::irc::{Kind, Origin, Sender};
+    use crate::irc::fixtures::{from_joao, from_maria, sender};
     use crate::text::MAX_TEXT_CHARS;
-
-    fn from_maria(text: &str) -> Incoming {
-        Incoming {
-            kind: Kind::Message,
-            time: "2026-10-16T21:04:11.392Z".into(),
-            msgid: Some("4y8kq7j2c9mnz".into()),
-            target: "#bots".into(),
-            private: false,
-            from: Sender {
-                nick: "maria".into(),
-                account: Some("maria".into()),
-                away: false,
-                bot: false,
-            },
-            text: text.into(),
-            mentions_me: true,
-            reply_to: None,
-            origin: Origin::Live,
-            from_me: false,
-        }
-    }
-
-    fn from_joao(text: &str) -> Incoming {
-        Incoming {
-            msgid: Some("9qq1v0x3hdk2a".into()),
-            from: Sender {
-                nick: "joao".into(),
-                account: None,
-                away: false,
-                bot: false,
-            },
-            mentions_me: false,
-            reply_to: Some("4y8kq7j2c9mnz".into()),
-            ..from_maria(text)
-        }
-    }
 
     fn max(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).unwrap()
@@ -288,12 +252,7 @@ mod tests {
         let inbox = Inbox::default();
         inbox.push_invite(Invite {
             time: "2026-10-16T21:05:00Z".into(),
-            from: Sender {
-                nick: "luiz".into(),
-                account: Some("lu\u{7}iz".into()),
-                away: false,
-                bot: false,
-            },
+            from: sender("luiz", Some("lu\u{7}iz")),
             channel: "#lounge\u{1b}[2J".into(),
         });
         let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
