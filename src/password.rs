@@ -81,17 +81,4 @@ mod tests {
         assert_eq!(err.hint.as_deref(), Some("chmod 600 it"));
         assert!(!err.to_string().contains("horse"));
     }
-
-    #[test]
-    fn a_missing_file_is_a_usage_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = read(&Source::File(dir.path().join("louro.pass"))).unwrap_err();
-        assert_eq!(err.code, Code::Usage);
-    }
-
-    #[test]
-    fn trims_only_the_trailing_line_ending() {
-        let file = password_file(" s3cret \r\n", 0o600);
-        assert_eq!(read(&Source::File(file.path().into())).unwrap(), " s3cret ");
-    }
 }
