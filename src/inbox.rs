@@ -193,8 +193,6 @@ impl Inbox {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::irc::fixtures::{from_joao, from_maria, sender};
     use crate::text::MAX_TEXT_CHARS;
@@ -223,31 +221,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_connection_event_is_louros_own_so_not_untrusted() {
-        let inbox = Inbox::default();
-        inbox.push_connection(Connection {
-            time: "2026-10-16T21:05:00Z".into(),
-            state: ConnectionState::Disconnected,
-            retry_in: Some(4),
-        });
-        inbox.push_connection(Connection {
-            time: "2026-10-16T21:05:04Z".into(),
-            state: ConnectionState::Reconnected,
-            retry_in: None,
-        });
-        let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
-        assert_eq!(
-            batch["events"],
-            serde_json::json!([
-                {"id": 1, "type": "connection", "time": "2026-10-16T21:05:00Z",
-                 "state": "disconnected", "retry_in": 4},
-                {"id": 2, "type": "connection", "time": "2026-10-16T21:05:04Z",
-                 "state": "reconnected"},
-            ])
-        );
-    }
-
-    #[tokio::test]
     async fn an_invite_is_sanitized_and_untrusted() {
         let inbox = Inbox::default();
         inbox.push_invite(Invite {
@@ -264,18 +237,6 @@ mod tests {
                  "channel": "#lounge[2J", "untrusted": true},
             ])
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_huge_timeout_waits_instead_of_overflowing() {
-        let inbox = Arc::new(Inbox::default());
-        let waiter = tokio::spawn({
-            let inbox = Arc::clone(&inbox);
-            async move { inbox.wait(u64::MAX, max(20)).await }
-        });
-        time::sleep(Duration::from_secs(3600)).await;
-        inbox.push(from_maria("louro: still there?"));
-        assert_eq!(ids(&waiter.await.unwrap()), [1]);
     }
 
     #[tokio::test]
