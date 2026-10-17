@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use std::{fmt, fs, io};
+use std::{fs, io};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -175,16 +175,6 @@ pub struct Config {
     pub channels: Vec<String>,
     pub allow_dm: bool,
     pub password: Option<String>,
-}
-
-impl fmt::Debug for Config {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Config")
-            .field("channels", &self.channels)
-            .field("allow_dm", &self.allow_dm)
-            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
-            .finish()
-    }
 }
 
 /// A send that passed the policy, ready for the IRC side.
@@ -847,13 +837,6 @@ mod tests {
     #[test]
     fn refuses_blank_text() {
         assert_eq!(refused(&config(), "#bots", " \n\r\n").code, Code::Usage);
-    }
-
-    #[test]
-    fn debug_redacts_the_password() {
-        let debug = format!("{:?}", config());
-        assert!(!debug.contains(PASSWORD));
-        assert!(debug.contains("#bots"));
     }
 
     #[derive(Default)]
