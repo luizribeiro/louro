@@ -85,6 +85,25 @@ fn connect(socket: &std::path::Path) -> Command {
 }
 
 #[test]
+fn connect_refuses_when_louro_is_already_running() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let daemon = fake_daemon_expecting_one_request(
+        &socket,
+        json!({"v": 1, "ok": true, "result": {"connected": true, "nick": "louro", "channels": ["#bots"]}}),
+    );
+
+    connect(&socket)
+        .args(["--port", &closed_port().to_string()])
+        .assert()
+        .failure()
+        .code(3)
+        .stdout(predicate::str::contains(r#""code":"session_exists""#))
+        .stdout(predicate::str::contains("run `louro quit` first"));
+    daemon.join().unwrap();
+}
+
+#[test]
 fn connect_refuses_to_prompt_without_a_terminal() {
     let dir = tempdir().unwrap();
     connect(&dir.path().join("louro.sock"))

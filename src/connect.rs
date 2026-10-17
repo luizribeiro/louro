@@ -14,12 +14,13 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 
 use crate::cli::ConnectArgs;
-use crate::client;
+use crate::client::{self, Connection};
 use crate::daemon::{self, Config, Incoming};
 use crate::error::{Code, Error, Result};
 use crate::output;
 use crate::papo::{self, ConnectOptions, PapoIrc};
 use crate::password::{self, Source};
+use crate::protocol::Op;
 
 /// The one line `connect` prints once the bot is registered and the socket is up.
 #[derive(Serialize)]
@@ -46,11 +47,25 @@ struct Ready {
 }
 
 pub async fn run(args: ConnectArgs, socket: Option<&Path>) -> ExitCode {
+    if is_running(socket).await {
+        return output::emit::<()>(Err(Error::new(
+            Code::SessionExists,
+            "louro is already running",
+        )
+        .with_hint("run `louro quit` first")));
+    }
     if args.foreground {
         foreground(args, socket).await
     } else {
         output::emit(background(&args))
     }
+}
+
+async fn is_running(socket: Option<&Path>) -> bool {
+    let Ok(mut louro) = Connection::connect(socket).await else {
+        return false;
+    };
+    louro.request(Op::Status {}).await.is_ok()
 }
 
 /// Re-runs this binary as `connect --foreground` in its own process group,
