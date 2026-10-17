@@ -5,6 +5,9 @@ use crate::error::{Code, Error, Result};
 use crate::irc::{Incoming, Kind, Outgoing};
 use crate::text;
 
+/// In `irc.dm.send`: anyone whose DM the daemon has received.
+const FIRST: &str = "$first";
+
 impl Grants {
     /// Channel chat only from `irc.join` channels, DMs only from `irc.dm.read` senders.
     pub fn may_read(&self, incoming: &Incoming) -> bool {
@@ -15,8 +18,15 @@ impl Grants {
         }
     }
 
-    pub fn check_send(&self, target: String, text: &str, kind: Kind) -> Result<Outgoing> {
-        self.check_target(&target)?;
+    /// `dm_received` says whether `target` has sent the bot a DM, for `$first`.
+    pub fn check_send(
+        &self,
+        target: String,
+        text: &str,
+        kind: Kind,
+        dm_received: bool,
+    ) -> Result<Outgoing> {
+        self.check_target(&target, dm_received)?;
         Ok(Outgoing {
             text: text::clean_lines(text)?,
             target,
@@ -24,7 +34,7 @@ impl Grants {
         })
     }
 
-    fn check_target(&self, target: &str) -> Result<()> {
+    fn check_target(&self, target: &str, dm_received: bool) -> Result<()> {
         // `PRIVMSG maria,#lounge` would also reach a target no grant covers.
         if target.contains(',') {
             return Err(not_allowed("send to one target at a time"));
@@ -40,12 +50,14 @@ impl Grants {
                 "{target} is a status message to a channel, not a nick"
             )));
         }
-        if target.starts_with(':') {
+        // `$` starts a server mask, and keeps `$first` from naming a nick.
+        if target.starts_with([':', '$']) {
             return Err(not_allowed(format!(
                 "{target} is not a valid message target"
             )));
         }
-        if !self.irc.dm.send.matches(target) {
+        let dm_send = &self.irc.dm.send;
+        if !(dm_send.matches(target) || dm_received && dm_send.matches(FIRST)) {
             return Err(not_allowed(format!("irc.dm.send does not grant {target}")));
         }
         Ok(())
@@ -94,6 +106,22 @@ mod tests {
         }
     }
 
+    fn send(grants: &Grants, target: &str, dm_received: bool) -> Result<Outgoing> {
+        grants.check_send(target.into(), "hi", Kind::Message, dm_received)
+    }
+
+    #[test]
+    fn first_allows_dms_only_to_people_who_dmed_the_bot() {
+        let grants = grants(r#"irc.dm.send = ["$first", "luiz"]"#);
+        assert_eq!(
+            send(&grants, "maria", false).unwrap_err().code,
+            Code::NotAllowed
+        );
+        assert!(send(&grants, "maria", true).is_ok());
+        assert!(send(&grants, "luiz", false).is_ok());
+        assert!(send(&grants, "$first", true).is_err());
+    }
+
     #[test]
     fn reads_only_joined_channels_and_dms_from_dm_read() {
         let grants = bots_and_dms();
@@ -113,11 +141,7 @@ mod tests {
     fn sends_only_where_irc_send_and_irc_dm_send_grant() {
         let grants = bots_and_dms();
         for target in ["#bots", "#BOTS", "maria"] {
-            assert!(
-                grants
-                    .check_send(target.into(), "hi", Kind::Message)
-                    .is_ok()
-            );
+            assert!(send(&grants, target, false).is_ok());
         }
         for target in [
             "#lounge",
@@ -132,10 +156,9 @@ mod tests {
             "~#lounge",
             "%#lounge",
             ":evil",
+            "$*.weblounge.org",
         ] {
-            let error = grants
-                .check_send(target.into(), "hi", Kind::Message)
-                .unwrap_err();
+            let error = send(&grants, target, true).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
     }
@@ -146,7 +169,7 @@ mod tests {
         assert!(!none.may_read(&incoming("#bots", "maria", false)));
         assert!(!none.may_read(&incoming("luiz", "luiz", true)));
         for target in ["#bots", "luiz"] {
-            assert!(none.check_send(target.into(), "hi", Kind::Message).is_err());
+            assert!(send(&none, target, true).is_err());
         }
     }
 }

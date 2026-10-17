@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs, io};
 
 use serde::Serialize;
@@ -24,6 +25,8 @@ struct Daemon<I> {
     password: Option<Secret>,
     irc: I,
     inbox: Inbox,
+    /// Lowercased nicks whose DM reached the agent, for `$first` in `irc.dm.send`.
+    dm_senders: Mutex<HashSet<String>>,
     quit: Notify,
 }
 
@@ -48,6 +51,7 @@ pub async fn run(
         password,
         irc,
         inbox: Inbox::default(),
+        dm_senders: Mutex::default(),
         quit: Notify::new(),
     });
     loop {
@@ -112,9 +116,20 @@ fn remove_socket(path: &Path) -> io::Result<()> {
 
 impl<I: Irc> Daemon<I> {
     fn ingest(&self, incoming: Incoming) {
-        if self.grants.may_read(&incoming) {
-            self.inbox.push(incoming);
+        if !self.grants.may_read(&incoming) {
+            return;
         }
+        if incoming.private {
+            self.dm_senders()
+                .insert(incoming.from.nick.to_ascii_lowercase());
+        }
+        self.inbox.push(incoming);
+    }
+
+    fn dm_senders(&self) -> MutexGuard<'_, HashSet<String>> {
+        self.dm_senders
+            .lock()
+            .expect("no code panics while holding the DM senders lock")
     }
 
     async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
@@ -157,7 +172,8 @@ impl<I: Irc> Daemon<I> {
 
     async fn send(&self, target: String, text: String, kind: Kind) -> Result<Value> {
         text::check_secret(self.password.as_ref(), &text)?;
-        let message = self.grants.check_send(target, &text, kind)?;
+        let dm_received = self.dm_senders().contains(&target.to_ascii_lowercase());
+        let message = self.grants.check_send(target, &text, kind, dm_received)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let msgid = self.irc.send(message).await?;
         Ok(json!({"target": target, "msgid": msgid, "lines": lines}))
@@ -252,7 +268,8 @@ mod tests {
             r##"
             irc.join = ["#bots", "#lounge"]
             irc.send = ["#bots"]
-            irc.dm.read = ["luiz"]
+            irc.dm.read = ["luiz", "maria"]
+            irc.dm.send = ["$first"]
             "##,
         )
         .unwrap()
@@ -405,7 +422,7 @@ mod tests {
     #[tokio::test]
     async fn wait_gets_only_granted_channels_and_dms() {
         let daemon = launch(grants());
-        daemon.say(dm(from_maria("hey, got a sec?"))).await;
+        daemon.say(dm(from_joao("hey, got a sec?"))).await;
         daemon
             .say(Incoming {
                 target: "#ops".into(),
@@ -478,6 +495,19 @@ mod tests {
         let elsewhere = daemon.call(send_request("#lounge", "hi all")).await;
         assert_eq!(elsewhere["Err"]["code"], "not_allowed");
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_lets_the_bot_dm_only_someone_who_dmed_it() {
+        let daemon = launch(grants());
+        let before = daemon.call(send_request("maria", "hi maria")).await;
+        assert_eq!(before["Err"]["code"], "not_allowed");
+
+        daemon.say(dm(from_maria("louro, got a sec?"))).await;
+        let (_, reply) = daemon.wait(5).await;
+        assert_eq!(texts(&reply), ["louro, got a sec?"]);
+        let after = daemon.call(send_request("Maria", "sure, what's up?")).await;
+        assert_eq!(after["Ok"]["target"], "Maria");
     }
 
     #[tokio::test]
