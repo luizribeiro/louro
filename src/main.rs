@@ -4,6 +4,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod commands;
+#[expect(dead_code, reason = "connect reads louro.toml in a later commit")]
+mod config;
 mod daemon;
 mod error;
 mod grants;
