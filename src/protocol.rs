@@ -1,9 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
-
-use crate::error::{Code, Error, Result};
 
 pub const VERSION: u8 = 1;
 
@@ -64,59 +61,6 @@ pub struct Ack {
     pub ack: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Response {
-    pub v: u8,
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<Error>,
-}
-
-impl Response {
-    /// # Errors
-    ///
-    /// Returns the daemon's error, or `version_mismatch` when the daemon speaks another version.
-    pub fn into_result(self) -> Result<Value> {
-        if self.v != VERSION {
-            return Err(version_mismatch());
-        }
-        match (self.ok, self.error) {
-            (true, _) => Ok(self.result.unwrap_or_default()),
-            (false, Some(error)) => Err(error),
-            (false, None) => Err(Error::new(
-                Code::Internal,
-                "the daemon failed without saying why",
-            )),
-        }
-    }
-}
-
-impl From<Result<Value>> for Response {
-    fn from(result: Result<Value>) -> Self {
-        let (result, error) = match result {
-            Ok(value) => (Some(value), None),
-            Err(error) => (None, Some(error)),
-        };
-        Self {
-            v: VERSION,
-            ok: error.is_none(),
-            result,
-            error,
-        }
-    }
-}
-
-#[must_use]
-pub fn version_mismatch() -> Error {
-    Error::new(
-        Code::VersionMismatch,
-        "the louro client and daemon speak different protocol versions",
-    )
-    .with_hint("restart the daemon with `louro quit` then `louro connect`")
-}
-
 /// Reads one JSON line, or `None` once the peer has closed the connection.
 ///
 /// # Errors
@@ -147,7 +91,7 @@ pub async fn write_line(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tokio::io::BufReader;
     use tokio::net::UnixStream;
 
@@ -217,44 +161,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Request::new(Op::Quit {})).unwrap(),
             json!({"v": 1, "op": "quit", "args": {}})
-        );
-    }
-
-    #[test]
-    fn responses_carry_either_a_result_or_an_error() {
-        let ok = Response::from(Ok(json!({"target": "#bots", "lines": 1})));
-        assert_eq!(
-            serde_json::to_value(&ok).unwrap(),
-            json!({"v": 1, "ok": true, "result": {"target": "#bots", "lines": 1}})
-        );
-
-        let not_allowed = Error::new(Code::NotAllowed, "#lounge is not an allowed channel");
-        let failed = Response::from(Err(not_allowed.clone()));
-        assert_eq!(
-            serde_json::to_value(&failed).unwrap(),
-            json!({"v": 1, "ok": false, "error": {
-                "code": "not_allowed", "message": "#lounge is not an allowed channel"
-            }})
-        );
-        assert_eq!(failed.into_result(), Err(not_allowed));
-    }
-
-    #[test]
-    fn into_result_returns_the_result_or_a_fallback_error() {
-        let sent = json!({"target": "#bots", "msgid": "c2m8w1u0pq7rs", "lines": 1});
-        assert_eq!(Response::from(Ok(sent.clone())).into_result(), Ok(sent));
-
-        let silent: Response = serde_json::from_value(json!({"v": 1, "ok": false})).unwrap();
-        assert_eq!(silent.into_result().unwrap_err().code, Code::Internal);
-    }
-
-    #[test]
-    fn a_response_from_another_version_is_a_mismatch() {
-        let response: Response =
-            serde_json::from_value(json!({"v": 2, "ok": true, "result": {}})).unwrap();
-        assert_eq!(
-            response.into_result().unwrap_err().code,
-            Code::VersionMismatch
         );
     }
 

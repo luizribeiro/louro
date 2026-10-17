@@ -90,7 +90,7 @@ fn connect_refuses_when_louro_is_already_running() {
     let socket = dir.path().join("louro.sock");
     let daemon = fake_daemon_expecting_one_request(
         &socket,
-        json!({"v": 1, "ok": true, "result": {"connected": true, "nick": "louro", "channels": ["#bots"]}}),
+        json!({"Ok": {"connected": true, "nick": "louro", "channels": ["#bots"]}}),
     );
 
     connect(&socket)
@@ -213,9 +213,7 @@ fn wait_acks_the_daemon_only_after_a_successful_response() {
     let daemon = fake_daemon_expecting_one_request(
         &socket,
         json!({
-            "v": 1,
-            "ok": true,
-            "result": {
+            "Ok": {
                 "cursor": "k3f9.1845",
                 "timed_out": false,
                 "more": false,
@@ -253,9 +251,7 @@ fn wait_does_not_ack_after_a_daemon_error() {
     let daemon = fake_daemon_expecting_one_request(
         &socket,
         json!({
-            "v": 1,
-            "ok": false,
-            "error": {
+            "Err": {
                 "code": "not_connected",
                 "message": "the connection to irc.weblounge.org dropped; reconnecting"
             }

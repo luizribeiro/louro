@@ -12,10 +12,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::{self, Instant};
 
 use crate::error::{Code, Error, Result};
-use crate::protocol::{
-    Ack, Kind, Op, Request, Response, SendArgs, VERSION, WaitArgs, read_line, version_mismatch,
-    write_line,
-};
+use crate::protocol::{Ack, Kind, Op, Request, SendArgs, VERSION, WaitArgs, read_line, write_line};
 
 const MAX_TEXT_CHARS: usize = 1000;
 const BUFFER_CAP: usize = 10_000;
@@ -448,7 +445,11 @@ impl<I: Irc> Daemon<I> {
 
 fn parse_request(request: Value) -> Result<Op> {
     if request.get("v") != Some(&Value::from(VERSION)) {
-        return Err(version_mismatch());
+        return Err(Error::new(
+            Code::VersionMismatch,
+            "the louro client and daemon speak different protocol versions",
+        )
+        .with_hint("restart the daemon with `louro quit` then `louro connect`"));
     }
     serde_json::from_value::<Request>(request)
         .map(|request| request.op)
@@ -463,9 +464,7 @@ fn is_malformed(error: &io::Error) -> bool {
 }
 
 async fn reply(conn: &mut BufReader<UnixStream>, result: Result<impl Serialize>) -> io::Result<()> {
-    let result =
-        result.map(|value| serde_json::to_value(value).expect("replies serialize to JSON"));
-    write_line(conn, &Response::from(result)).await
+    write_line(conn, &result).await
 }
 
 #[cfg(test)]
@@ -984,7 +983,7 @@ mod tests {
     }
 
     fn texts(reply: &Value) -> Vec<&str> {
-        reply["result"]["events"]
+        reply["Ok"]["events"]
             .as_array()
             .unwrap()
             .iter()
@@ -1000,7 +999,7 @@ mod tests {
             .await;
         assert_eq!(
             reply,
-            json!({"v": 1, "ok": true, "result": {
+            json!({"Ok": {
                 "connected": true,
                 "nick": "louro",
                 "channels": ["#bots", "#ergo"],
@@ -1027,10 +1026,10 @@ mod tests {
             .await;
 
         let reply = waiting.await.unwrap();
-        assert_eq!(reply["ok"], true);
-        assert_eq!(reply["result"]["timed_out"], false);
-        assert_eq!(reply["result"]["notice"], NOTICE);
-        assert_eq!(reply["result"]["events"][0]["untrusted"], true);
+        assert!(reply["Ok"].is_object());
+        assert_eq!(reply["Ok"]["timed_out"], false);
+        assert_eq!(reply["Ok"]["notice"], NOTICE);
+        assert_eq!(reply["Ok"]["events"][0]["untrusted"], true);
         assert_eq!(
             texts(&reply),
             ["louro: does ergo support chathistory for DMs?"]
@@ -1074,9 +1073,9 @@ mod tests {
         let status = daemon
             .call(json!({"v": 1, "op": "status", "args": {}}))
             .await;
-        assert_eq!(status["ok"], true);
+        assert!(status["Ok"].is_object());
         let sent = daemon.call(send_request("#bots", "one moment")).await;
-        assert_eq!(sent["ok"], true);
+        assert!(sent["Ok"].is_object());
 
         daemon.say(from_joao("louro: any news?")).await;
         let reply: Value = read_line(&mut parked).await.unwrap().unwrap();
@@ -1096,7 +1095,7 @@ mod tests {
         let (_, reply) = daemon.wait(60).await;
         assert_eq!(
             reply,
-            json!({"v": 1, "ok": true, "result": {
+            json!({"Ok": {
                 "cursor": 0, "timed_out": true, "more": false, "notice": NOTICE, "events": []
             }})
         );
@@ -1119,8 +1118,8 @@ mod tests {
         write_line(&mut conn, &Ack { ack: true }).await.unwrap();
         assert_eq!(read_line::<Value>(&mut conn).await.unwrap(), None);
         let (_, after_ack) = daemon.wait(0).await;
-        assert_eq!(after_ack["result"]["timed_out"], true);
-        assert_eq!(after_ack["result"]["cursor"], 2);
+        assert_eq!(after_ack["Ok"]["timed_out"], true);
+        assert_eq!(after_ack["Ok"]["cursor"], 2);
     }
 
     #[tokio::test]
@@ -1134,7 +1133,7 @@ mod tests {
             .await;
         assert_eq!(
             reply,
-            json!({"v": 1, "ok": true, "result": {
+            json!({"Ok": {
                 "target": "#bots", "msgid": "c2m8w1u0pq7rs", "lines": 2
             }})
         );
@@ -1154,12 +1153,12 @@ mod tests {
         let leak = daemon
             .call(send_request("#bots", &format!("sure, it's {PASSWORD}")))
             .await;
-        assert_eq!(leak["ok"], false);
-        assert_eq!(leak["error"]["code"], "blocked_secret");
+        assert!(leak["Ok"].is_null());
+        assert_eq!(leak["Err"]["code"], "blocked_secret");
         assert!(!leak.to_string().contains(PASSWORD));
 
         let elsewhere = daemon.call(send_request("#lounge", "hi all")).await;
-        assert_eq!(elsewhere["error"]["code"], "not_allowed");
+        assert_eq!(elsewhere["Err"]["code"], "not_allowed");
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
     }
 
@@ -1172,8 +1171,7 @@ mod tests {
             json!({"op": "status", "args": {}}),
         ] {
             let reply = daemon.call(request).await;
-            assert_eq!(reply["v"], 1);
-            assert_eq!(reply["error"]["code"], "version_mismatch");
+            assert_eq!(reply["Err"]["code"], "version_mismatch");
         }
     }
 
@@ -1185,19 +1183,19 @@ mod tests {
             .await
             .unwrap();
         let reply: Value = read_line(&mut conn).await.unwrap().unwrap();
-        assert_eq!(reply["error"]["code"], "usage");
+        assert_eq!(reply["Err"]["code"], "usage");
 
         let unknown = daemon
             .call(json!({"v": 1, "op": "join", "args": {"channel": "#ops"}}))
             .await;
-        assert_eq!(unknown["error"]["code"], "usage");
+        assert_eq!(unknown["Err"]["code"], "usage");
     }
 
     #[tokio::test]
     async fn quit_replies_then_shuts_down_and_removes_the_socket() {
         let daemon = start();
         let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
-        assert_eq!(reply, json!({"v": 1, "ok": true, "result": {}}));
+        assert_eq!(reply, json!({"Ok": {}}));
 
         daemon.daemon.await.unwrap().unwrap();
         daemon.irc.quit.notified().await;
@@ -1212,6 +1210,6 @@ mod tests {
         let reply = daemon
             .call(json!({"v": 1, "op": "status", "args": {}}))
             .await;
-        assert_eq!(reply["ok"], true);
+        assert!(reply["Ok"].is_object());
     }
 }

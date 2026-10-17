@@ -8,7 +8,7 @@ use tokio::io::BufReader;
 use tokio::net::UnixStream;
 
 use crate::error::{Code, Error, Result};
-use crate::protocol::{self, Ack, Op, Request, Response};
+use crate::protocol::{self, Ack, Op, Request};
 
 /// One request-response round trip with the daemon over its Unix socket.
 ///
@@ -44,15 +44,14 @@ impl Connection {
         protocol::write_line(&mut self.socket, &Request::new(op))
             .await
             .map_err(|err| broken_connection(&err))?;
-        let response: Response = protocol::read_line(&mut self.socket)
+        protocol::read_line(&mut self.socket)
             .await
             .map_err(|err| broken_connection(&err))?
             .ok_or_else(|| {
                 broken_connection(&std::io::Error::other(
                     "the daemon closed the connection without answering",
                 ))
-            })?;
-        response.into_result()
+            })?
     }
 
     /// Tells the daemon the CLI has printed the last `wait` result, so it
@@ -213,9 +212,9 @@ mod tests {
                     kind: Kind::Notice,
                 })
             );
-            let response = Response::from(Ok(serde_json::json!({
+            let response: Result<Value> = Ok(serde_json::json!({
                 "target": "#bots", "msgid": "9qq1v0x3hdk2a", "lines": 1
-            })));
+            }));
             protocol::write_line(&mut stream, &response).await.unwrap();
 
             let ack: Ack = protocol::read_line(&mut stream).await.unwrap().unwrap();
