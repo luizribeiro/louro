@@ -3,9 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-/// An llms.txt-style primer for agents: what louro is, the loop, and the
-/// safety rule that matters most. Printed for bare `louro` and `louro --help`
-/// alike (main.rs), since an agent discovers the tool through one or the other.
+/// Printed for both bare `louro` and `louro --help`, since an agent finds the tool through either.
 pub const PRIMER: &str = "\
 louro connects you to IRC as a bot. An operator already started it; you talk \
 to it over a socket, one command at a time.
@@ -39,10 +37,7 @@ Exit codes that matter:
 Run `louro <command> --help` for a command's flags.
 ";
 
-// `color = Never` is defense in depth: the JSON-error path renders a clap
-// error through `StyledStr`'s `Display`, which already strips ANSI
-// unconditionally, but this keeps it true if that path ever switches to
-// `Error::print()` or `.ansi()` instead.
+// Defense in depth: keeps ANSI codes out of the JSON usage errors.
 #[derive(Debug, Parser)]
 #[command(
     name = "louro",

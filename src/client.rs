@@ -9,11 +9,7 @@ use tokio::net::UnixStream;
 use crate::error::{Code, Error, Result};
 use crate::protocol::{self, Ack, Op, Request};
 
-/// One request-response round trip with the daemon over its Unix socket.
-///
-/// Kept open after `request` so `wait` can send its `Ack` on the same
-/// connection, once the CLI has printed the result (§4.4: the consumer
-/// cursor only advances after that ack).
+/// Kept open after `request` so `wait` can ack on the same connection.
 #[derive(Debug)]
 pub struct Connection {
     socket: BufReader<UnixStream>,

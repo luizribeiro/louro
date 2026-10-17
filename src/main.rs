@@ -48,9 +48,7 @@ async fn request(socket: Option<&Path>, op: Op) -> Result<Value> {
     Connection::connect(socket).await?.request(op).await
 }
 
-/// Prints the result before acking: the daemon only advances the consumer
-/// cursor once it knows the CLI showed the agent what arrived (design §4.4),
-/// so the ack must follow the print, not race it.
+/// Acks only after printing, so the daemon never drops events the agent didn't see.
 async fn wait(socket: Option<&Path>, args: cli::WaitArgs) -> ExitCode {
     let mut connection = match Connection::connect(socket).await {
         Ok(connection) => connection,
