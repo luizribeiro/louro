@@ -75,7 +75,7 @@ pub async fn connect(
     server: &Server,
     password: Option<Secret>,
 ) -> Result<(PapoIrc, mpsc::Receiver<Incoming>)> {
-    let mut builder = Client::builder(endpoint(&server.address))
+    let mut builder = Client::builder(endpoint(&server.address)?)
         .nick(&server.nick)
         .alt_nicks(server.alt_nicks.clone())
         .bot()
@@ -100,24 +100,48 @@ pub async fn connect(
 }
 
 /// papo's builder takes a bare host or an `Endpoint`, but has no public parser for `irc://` and
-/// `ircs://` URLs.
-fn endpoint(address: &str) -> Endpoint {
+/// `ircs://` URLs, and papo deliberately won't parse IRC URLs at all: a typo'd scheme could
+/// silently downgrade to plaintext, and credentials can hide in userinfo.
+fn endpoint(address: &str) -> Result<Endpoint> {
+    const USAGE: &str =
+        "use a host, `irc://host[:port]`, `ircs://host[:port]`, `ws://...` or `wss://...`";
     let (scheme, rest) = address.split_once("://").unwrap_or(("ircs", address));
-    let (tls, default_port) = match scheme.to_ascii_lowercase().as_str() {
-        "irc" => (false, 6667),
-        "ircs" => (true, 6697),
-        _ => return Endpoint::websocket(address),
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "irc" | "ircs" | "ws" | "wss") {
+        return Err(
+            Error::new(Code::Usage, format!("unsupported scheme {scheme:?}")).with_hint(USAGE),
+        );
+    }
+    if rest.contains('@') {
+        return Err(
+            Error::new(Code::Usage, "server address can't carry credentials")
+                .with_hint("use sasl_username and password_file instead"),
+        );
+    }
+    if scheme == "ws" || scheme == "wss" {
+        return Ok(Endpoint::websocket(address));
+    }
+    let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if !path.is_empty() {
+        return Err(
+            Error::new(Code::Usage, "server address can't contain a path").with_hint(USAGE),
+        );
+    }
+    let (tls, default_port) = if scheme == "ircs" {
+        (true, 6697)
+    } else {
+        (false, 6667)
     };
-    let (host, port) = rest
+    let (host, port) = host_port
         .rsplit_once(':')
         .and_then(|(host, port)| Some((host, port.parse().ok()?)))
-        .unwrap_or((rest, default_port));
+        .unwrap_or((host_port, default_port));
     let host = host.trim_matches(['[', ']']);
-    if tls {
+    Ok(if tls {
         Endpoint::tls(host, port)
     } else {
         Endpoint::plaintext(host, port)
-    }
+    })
 }
 
 fn connect_code(error: &papo::Error) -> Code {
@@ -275,11 +299,53 @@ mod tests {
             ("irc://[::1]:6667", Endpoint::plaintext("::1", 6667)),
             ("ircs://[::1]", Endpoint::tls("::1", 6697)),
             (
+                "IRC://irc.weblounge.org",
+                Endpoint::plaintext("irc.weblounge.org", 6667),
+            ),
+            (
+                "ircs://irc.weblounge.org:6697/",
+                Endpoint::tls("irc.weblounge.org", 6697),
+            ),
+            (
+                "ircs://[2001:db8::1]:6697",
+                Endpoint::tls("2001:db8::1", 6697),
+            ),
+            (
                 "wss://irc.weblounge.org/webirc",
                 Endpoint::websocket("wss://irc.weblounge.org/webirc"),
             ),
         ] {
-            assert_eq!(endpoint(address), expected, "{address}");
+            assert_eq!(endpoint(address).unwrap(), expected, "{address}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_scheme_is_refused() {
+        let error = endpoint("irs://irc.weblounge.org").unwrap_err();
+        assert_eq!(error.code, Code::Usage);
+        assert!(error.message.contains("irs"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_path_other_than_a_trailing_slash_is_refused() {
+        let error = endpoint("ircs://irc.weblounge.org/channel").unwrap_err();
+        assert_eq!(error.code, Code::Usage);
+    }
+
+    #[test]
+    fn userinfo_is_refused_without_echoing_the_secret() {
+        for address in [
+            "irc://louro:secret@irc.weblounge.org",
+            "wss://louro:secret@irc.weblounge.org/webirc",
+        ] {
+            let error = endpoint(address).unwrap_err();
+            assert_eq!(error.code, Code::Usage, "{address}");
+            assert!(!format!("{error}").contains("secret"), "{address}: {error}");
+            let hint = error.hint.as_ref().unwrap();
+            assert!(
+                hint.contains("sasl_username") && hint.contains("password_file"),
+                "{address}"
+            );
         }
     }
 
