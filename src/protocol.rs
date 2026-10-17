@@ -6,7 +6,7 @@ pub use crate::cli::WaitArgs;
 
 pub const VERSION: u8 = 1;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Request {
     pub v: u8,
     #[serde(flatten)]
@@ -19,7 +19,7 @@ impl Request {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "op", content = "args", rename_all = "snake_case")]
 pub enum Op {
     Status {},
@@ -28,7 +28,7 @@ pub enum Op {
     Quit {},
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SendArgs {
     pub target: String,
     pub text: String,
@@ -44,7 +44,7 @@ pub enum Kind {
 }
 
 /// What the client writes after printing a wait result; only then does the daemon move its cursor.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Ack {
     pub ack: bool,
 }

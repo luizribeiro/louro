@@ -39,7 +39,7 @@ Run `louro <command> --help` for a command's flags.
 ";
 
 // Defense in depth: keeps ANSI codes out of the JSON usage errors.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "louro",
     version,
@@ -55,7 +55,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 pub enum Command {
     /// Connection state, nick, channels
     Status,
@@ -78,7 +78,7 @@ fn parse_timeout(raw: &str) -> Result<u64, String> {
         .map_err(|_| format!("expected a number of seconds or `none`, got `{raw}`"))
 }
 
-#[derive(Clone, Debug, Args, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Args, Deserialize, Serialize)]
 pub struct WaitArgs {
     /// Seconds to block for, or `none` to wait forever; `0` polls
     #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]
@@ -88,7 +88,7 @@ pub struct WaitArgs {
     pub max: NonZeroUsize,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub struct SendArgs {
     /// Channel or nick to send to
     pub target: String,
@@ -103,7 +103,7 @@ pub struct SendArgs {
 }
 
 #[expect(clippy::struct_excessive_bools, reason = "each is an independent flag")]
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub struct ConnectArgs {
     /// IRC server host name
     pub server: String,

@@ -11,7 +11,6 @@ use crate::error::{Code, Error, Result};
 use crate::protocol::{self, Ack, Op, Request};
 
 /// Kept open after `request` so `wait` can ack on the same connection.
-#[derive(Debug)]
 pub struct Connection {
     socket: BufReader<UnixStream>,
 }
