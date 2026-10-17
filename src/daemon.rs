@@ -10,13 +10,11 @@ use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, mpsc};
 
-use crate::commands::connect::Args as ConnectArgs;
-use crate::config::{self, Grants, Selector};
+use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
 use crate::inbox::Inbox;
 use crate::irc::{self, Incoming, Irc, IrcStatus, Kind, Secret};
 use crate::output;
-use crate::password::{self, Source};
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 use crate::text;
 
@@ -70,50 +68,21 @@ pub async fn run(
 
 /// Connects and listens, prints the line `background` waits for, and returns the daemon to run.
 pub async fn start(
-    args: ConnectArgs,
-    socket: Option<&Path>,
+    config: Config,
+    password: Option<Secret>,
 ) -> Result<impl Future<Output = io::Result<()>>> {
-    let socket = resolve_socket_path(socket)?;
-    let password = read_password(&args)?;
+    let Config { server, grants } = config;
+    let socket = resolve_socket_path(server.socket.as_deref())?;
     create_runtime_dir(&socket)?;
-    let (irc, incoming) = irc::connect(&args, password.clone()).await?;
+    let (irc, incoming) = irc::connect(&server, password.clone()).await?;
     let listener = bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     output::emit(Ok(json!({
-        "server": format!("{}:{}", args.server, args.port()),
-        "nick": args.nick,
-        "channels": args.joins,
+        "server": server.address,
+        "nick": server.nick,
+        "channels": server.autojoin,
         "socket": socket,
     })));
-    let grants = Grants {
-        irc: config::Irc {
-            join: Selector::Only(args.joins.clone()),
-            send: Selector::Only(args.joins),
-            dm: config::Dm {
-                read: Selector::All(args.allow_dm),
-                send: Selector::All(args.allow_dm),
-            },
-            quit: true,
-        },
-    };
     Ok(async move { run(grants, password, irc, incoming, listener, &socket).await })
-}
-
-pub fn read_password(args: &ConnectArgs) -> Result<Option<Secret>> {
-    password_source(args)
-        .map(|source| password::read(&source))
-        .transpose()
-}
-
-/// A password is only wanted for SASL.
-fn password_source(args: &ConnectArgs) -> Option<Source> {
-    if args.password_stdin {
-        return Some(Source::Stdin);
-    }
-    if let Some(path) = &args.password_file {
-        return Some(Source::File(path.clone()));
-    }
-    let user = args.sasl_user.as_ref()?;
-    Some(Source::Tty(user.clone()))
 }
 
 fn create_runtime_dir(socket: &Path) -> Result<()> {

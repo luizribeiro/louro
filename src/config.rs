@@ -29,7 +29,7 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
-    /// A host (TLS on 6697), or an `irc://`, `ircs://` or `wss://` URL.
+    /// A host (TLS on 6697), or an `irc://`, `ircs://` or `wss://` URL; IPv6 goes in brackets.
     pub address: String,
     pub nick: String,
     #[serde(default)]

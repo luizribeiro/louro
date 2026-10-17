@@ -45,7 +45,9 @@ fn from_tty(user: &str) -> Result<String> {
             Code::Usage,
             "there is no terminal to ask for the password on",
         )
-        .with_hint("run `louro connect` in your own terminal, or use --password-file"));
+        .with_hint(
+            "run `louro connect` in your own terminal, or set password_file in louro.toml",
+        ));
     }
     rpassword::prompt_password(format!("SASL password for {user}: ")).map_err(unreadable)
 }

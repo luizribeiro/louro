@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 pub use papo::Secret;
 
-use crate::commands::connect::Args as ConnectArgs;
+use crate::config::Server;
 use crate::error::{Code, Error, Result};
 
 const INCOMING_CAPACITY: usize = 256;
@@ -71,20 +71,21 @@ pub struct PapoIrc {
 
 /// Connects, registers, and forwards chat from the joined channels and DMs.
 pub async fn connect(
-    args: &ConnectArgs,
+    server: &Server,
     password: Option<Secret>,
 ) -> Result<(PapoIrc, mpsc::Receiver<Incoming>)> {
-    let endpoint = if args.plaintext {
-        Endpoint::plaintext(&args.server, args.port())
-    } else {
-        Endpoint::tls(&args.server, args.port())
-    };
-    let mut builder = Client::builder(endpoint)
-        .nick(&args.nick)
+    let mut builder = Client::builder(endpoint(&server.address))
+        .nick(&server.nick)
+        .alt_nicks(server.alt_nicks.clone())
         .bot()
-        .autojoin(args.joins.clone());
-    if let Some(password) = password {
-        let user = args.sasl_user.as_ref().unwrap_or(&args.nick);
+        .autojoin(server.autojoin.clone());
+    if let Some(username) = &server.username {
+        builder = builder.username(username);
+    }
+    if let Some(realname) = &server.realname {
+        builder = builder.realname(realname);
+    }
+    if let (Some(user), Some(password)) = (server.sasl_username(), password) {
         builder = builder.sasl(Sasl::any(user, password));
     }
     let (client, events) = builder
@@ -94,6 +95,27 @@ pub async fn connect(
     let (chat, incoming) = mpsc::channel(INCOMING_CAPACITY);
     tokio::spawn(forward(client.clone(), events, chat));
     Ok((PapoIrc { client }, incoming))
+}
+
+/// papo's builder takes a bare host or an `Endpoint`, but has no public parser for `irc://` and
+/// `ircs://` URLs.
+fn endpoint(address: &str) -> Endpoint {
+    let (scheme, rest) = address.split_once("://").unwrap_or(("ircs", address));
+    let (tls, default_port) = match scheme.to_ascii_lowercase().as_str() {
+        "irc" => (false, 6667),
+        "ircs" => (true, 6697),
+        _ => return Endpoint::websocket(address),
+    };
+    let (host, port) = rest
+        .rsplit_once(':')
+        .and_then(|(host, port)| Some((host, port.parse().ok()?)))
+        .unwrap_or((rest, default_port));
+    let host = host.trim_matches(['[', ']']);
+    if tls {
+        Endpoint::tls(host, port)
+    } else {
+        Endpoint::plaintext(host, port)
+    }
 }
 
 fn connect_code(error: &papo::Error) -> Code {
@@ -225,6 +247,37 @@ mod tests {
             ctcp_action("checks the logs\nfinds nothing"),
             "\x01ACTION checks the logs finds nothing\x01"
         );
+    }
+
+    #[test]
+    fn addresses_are_hosts_or_irc_urls() {
+        for (address, expected) in [
+            (
+                "irc.weblounge.org",
+                Endpoint::tls("irc.weblounge.org", 6697),
+            ),
+            (
+                "ircs://irc.weblounge.org",
+                Endpoint::tls("irc.weblounge.org", 6697),
+            ),
+            (
+                "IRCS://irc.weblounge.org:7000",
+                Endpoint::tls("irc.weblounge.org", 7000),
+            ),
+            (
+                "irc://127.0.0.1:6667",
+                Endpoint::plaintext("127.0.0.1", 6667),
+            ),
+            ("irc://localhost", Endpoint::plaintext("localhost", 6667)),
+            ("irc://[::1]:6667", Endpoint::plaintext("::1", 6667)),
+            ("ircs://[::1]", Endpoint::tls("::1", 6697)),
+            (
+                "wss://irc.weblounge.org/webirc",
+                Endpoint::websocket("wss://irc.weblounge.org/webirc"),
+            ),
+        ] {
+            assert_eq!(endpoint(address), expected, "{address}");
+        }
     }
 
     #[test]
