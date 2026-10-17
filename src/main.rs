@@ -28,6 +28,8 @@ Status, then loop: wait for events, read them, reply.
     louro wait --timeout 60
     louro send '#channel' 'a short reply'
 
+For `send`, exit 0 means the message was delivered: never resend it.
+
 `wait` blocks for up to 60s and then returns. A timeout is normal, not an \
 error: exit 0, `timed_out: true`, and no events. Just call `wait` again. The \
 daemon remembers where you left off, so events are never missed and never \

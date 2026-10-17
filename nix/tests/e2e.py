@@ -263,7 +263,7 @@ with subtest("chat in #bots reaches wait, marked untrusted, and send reaches #bo
     assert brb["from"]["away"], brb
     send_raw("luiz", "AWAY")
     sent = louro("send", "#bots", "it checks that references don't dangle")
-    assert sent["target"] == "#bots" and sent["lines"] == 1, sent
+    assert sent["sent"] and sent["target"] == "#bots" and sent["lines"] == 1, sent
     heard("luiz", "#bots", "it checks that references don't dangle")
 
 with subtest("send --reply-to threads the answer under luiz's message"):

@@ -456,10 +456,11 @@ impl<I: Irc> Daemon<I> {
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let is_reply = message.reply_to.is_some();
         let sent = self.irc.send(message).await?;
-        if let Some(msgid) = &sent.msgid {
+        let mut result = json!({"sent": true, "target": target, "lines": lines});
+        if let Some(msgid) = sent.msgid {
             self.sent.lock().unwrap().record(&target, msgid.clone());
+            result["msgid"] = msgid.into();
         }
-        let mut result = json!({"target": target, "msgid": sent.msgid, "lines": lines});
         if is_reply {
             result["threaded"] = sent.threaded.into();
         }
@@ -534,6 +535,8 @@ mod tests {
         typing: Mutex<Vec<Typing>>,
         history_limits: Mutex<Vec<usize>>,
         redacted: Mutex<Vec<String>>,
+        /// Sends get no msgid, as from a server without echo-message.
+        without_msgid: AtomicBool,
         quit: Notify,
     }
 
@@ -569,10 +572,9 @@ mod tests {
         fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send {
             let threaded = message.reply_to.is_some();
             self.sent.lock().unwrap().push(message);
-            future::ready(Ok(Sent {
-                msgid: Some("c2m8w1u0pq7rs".into()),
-                threaded,
-            }))
+            let msgid =
+                (!self.without_msgid.load(Ordering::Relaxed)).then(|| "c2m8w1u0pq7rs".into());
+            future::ready(Ok(Sent { msgid, threaded }))
         }
 
         fn react(
@@ -929,7 +931,7 @@ mod tests {
         assert_eq!(
             reply,
             json!({"Ok": {
-                "target": "#bots", "msgid": "c2m8w1u0pq7rs", "lines": 2
+                "sent": true, "target": "#bots", "msgid": "c2m8w1u0pq7rs", "lines": 2
             }})
         );
         assert_eq!(
@@ -940,6 +942,17 @@ mod tests {
                 text: "yes: set history.persistent.direct-messages \nin ergo.yaml".into(),
                 reply_to: None,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_without_a_msgid_still_says_it_was_sent() {
+        let daemon = launch(grants());
+        daemon.irc.without_msgid.store(true, Ordering::Relaxed);
+        let reply = daemon.call(send_request("#bots", "on it")).await;
+        assert_eq!(
+            reply,
+            json!({"Ok": {"sent": true, "target": "#bots", "lines": 1}})
         );
     }
 
