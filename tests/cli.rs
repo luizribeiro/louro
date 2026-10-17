@@ -49,3 +49,22 @@ fn a_subcommand_help_is_clap_generated_not_the_primer() {
         .stdout(predicate::str::contains("--timeout"))
         .stdout(predicate::str::contains("untrusted").not());
 }
+
+#[test]
+fn version_exits_cleanly_without_the_json_usage_error() {
+    louro()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(format!("louro {}\n", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn connect_is_the_permanent_stub() {
+    louro()
+        .arg("connect")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("connect is not wired to papo yet"));
+}

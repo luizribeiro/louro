@@ -38,8 +38,17 @@ Exit codes that matter:
 Run `louro <command> --help` for a command's flags.
 ";
 
+// `color = Never` is defense in depth: the JSON-error path renders a clap
+// error through `StyledStr`'s `Display`, which already strips ANSI
+// unconditionally, but this keeps it true if that path ever switches to
+// `Error::print()` or `.ansi()` instead.
 #[derive(Debug, Parser)]
-#[command(name = "louro", version, override_help = PRIMER)]
+#[command(
+    name = "louro",
+    version,
+    override_help = PRIMER,
+    color = clap::ColorChoice::Never
+)]
 pub struct Cli {
     /// Unix socket to the daemon
     #[arg(long, global = true, env = "LOURO_SOCKET", value_name = "PATH")]
@@ -183,6 +192,13 @@ mod tests {
         };
         assert!(args.notice);
         assert!(!args.action);
+
+        let cli = Cli::try_parse_from(["louro", "send", "#bots", "waves", "--action"]).unwrap();
+        let Some(Command::Send(args)) = cli.command else {
+            panic!("expected send");
+        };
+        assert!(args.action);
+        assert!(!args.notice);
     }
 
     #[test]
@@ -200,5 +216,10 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn color_is_configured_off() {
+        assert_eq!(Cli::command().get_color(), clap::ColorChoice::Never);
     }
 }
