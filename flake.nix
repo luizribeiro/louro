@@ -25,6 +25,13 @@
       rust-overlay,
       ...
     }:
+    let
+      e2eSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+    in
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -143,6 +150,12 @@
               cargoNextestPartitionsExtraArgs = "--no-tests=pass";
             }
           );
+        }
+        // pkgs.lib.optionalAttrs (builtins.elem system e2eSystems) {
+          e2e = import ./nix/tests/e2e.nix {
+            inherit pkgs;
+            inherit (self) packages;
+          };
         };
 
         devShells.default = pkgs.mkShell {
