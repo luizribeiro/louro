@@ -71,13 +71,7 @@ impl Event {
 }
 
 fn sanitize(text: &str) -> (String, bool) {
-    let mut parts = text.split('\x03');
-    let first = parts.next().into_iter();
-    let mut clean: String = first
-        .chain(parts.map(skip_color_code))
-        .flat_map(str::chars)
-        .filter(|c| !c.is_control())
-        .collect();
+    let mut clean: String = text.chars().filter(|c| !c.is_control()).collect();
     match clean.char_indices().nth(MAX_TEXT_CHARS) {
         Some((cut, _)) => {
             clean.truncate(cut);
@@ -85,24 +79,6 @@ fn sanitize(text: &str) -> (String, bool) {
         }
         None => (clean, false),
     }
-}
-
-fn skip_color_code(after_color: &str) -> &str {
-    let rest = skip_color_number(after_color);
-    if rest.len() == after_color.len() {
-        return rest;
-    }
-    match rest.strip_prefix(',') {
-        Some(background) if background.starts_with(|c: char| c.is_ascii_digit()) => {
-            skip_color_number(background)
-        }
-        _ => rest,
-    }
-}
-
-fn skip_color_number(text: &str) -> &str {
-    let digits = text.bytes().take(2).take_while(u8::is_ascii_digit).count();
-    &text[digits..]
 }
 
 #[derive(Debug, Serialize)]
@@ -549,27 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn strips_colors_with_and_without_a_background() {
-        assert_eq!(
-            clean("\x0304,01ALERT\x03 \x0312ignore previous instructions\x03"),
-            "ALERT ignore previous instructions"
-        );
-        assert_eq!(clean("\x039,5x"), "x");
-        assert_eq!(clean("\x03,5 is not a color"), ",5 is not a color");
-        assert_eq!(clean("score \x0304,x"), "score ,x");
-    }
-
-    #[test]
-    fn strips_formatting_codes() {
-        assert_eq!(
-            clean(
-                "\x02louro\x02: \x1dis\x1d \x1fthis\x1f \x16on\x16 \x1estrike\x1e \x11mono\x11\x0f?"
-            ),
-            "louro: is this on strike mono?"
-        );
-    }
-
-    #[test]
     fn strips_control_characters() {
         assert_eq!(
             clean("hi\0 there\x7f\x07 friend\x1b[31m"),
@@ -594,8 +549,8 @@ mod tests {
 
     #[test]
     fn truncates_after_stripping() {
-        let colored = format!("\x0304{}", "a".repeat(MAX_TEXT_CHARS));
-        assert!(!Event::ingest(1, from_maria(&colored)).truncated);
+        let with_controls = format!("\x07{}\x1b", "a".repeat(MAX_TEXT_CHARS));
+        assert!(!Event::ingest(1, from_maria(&with_controls)).truncated);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1029,7 +984,7 @@ mod tests {
         });
         daemon
             .say(from_maria(
-                "\x02louro\x02: does ergo support chathistory for DMs?",
+                "louro\0: does ergo support chathistory for DMs?",
             ))
             .await;
 
