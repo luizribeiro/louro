@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -35,12 +35,13 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
+    let socket = cli.socket.as_deref();
     match command {
-        Command::Connect(args) => connect::run(args, cli.socket.as_deref()).await,
-        Command::Status => output::emit(request(cli.socket.as_deref(), Op::Status {}).await),
-        Command::Quit => output::emit(request(cli.socket.as_deref(), Op::Quit {}).await),
-        Command::Send(args) => output::emit(send(cli.socket.as_deref(), args).await),
-        Command::Wait(args) => wait(cli.socket.as_deref(), args).await,
+        Command::Connect(args) => connect::run(args, socket).await,
+        Command::Status => output::emit(request(socket, Op::Status {}).await),
+        Command::Quit => output::emit(request(socket, Op::Quit {}).await),
+        Command::Send(args) => output::emit(send(socket, args).await),
+        Command::Wait(args) => wait(socket, args).await,
     }
 }
 
@@ -89,12 +90,10 @@ fn read_text(text: String) -> Result<String> {
     if text != "-" {
         return Ok(text);
     }
-    let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf).map_err(|err| {
+    io::read_to_string(io::stdin()).map_err(|err| {
         Error::new(
             Code::Usage,
             format!("could not read text from stdin: {err}"),
         )
-    })?;
-    Ok(buf)
+    })
 }
