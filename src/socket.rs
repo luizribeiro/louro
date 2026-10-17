@@ -3,12 +3,73 @@ use std::fmt::Display;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::BufReader;
+use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+pub use crate::cli::WaitArgs;
 use crate::error::{Code, Error, Result};
-use crate::protocol::{self, Ack, Op, Request};
+use crate::irc::Kind;
+
+pub const VERSION: u8 = 1;
+
+#[derive(Deserialize, Serialize)]
+pub struct Request {
+    pub v: u8,
+    #[serde(flatten)]
+    pub op: Op,
+}
+
+impl Request {
+    pub const fn new(op: Op) -> Self {
+        Self { v: VERSION, op }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "op", content = "args", rename_all = "snake_case")]
+pub enum Op {
+    Status {},
+    Wait(WaitArgs),
+    Send(SendArgs),
+    Quit {},
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SendArgs {
+    pub target: String,
+    pub text: String,
+    pub kind: Kind,
+}
+
+/// What the client writes after printing a wait result; only then does the daemon move its cursor.
+#[derive(Deserialize, Serialize)]
+pub struct Ack {
+    pub ack: bool,
+}
+
+/// Reads one JSON line, or `None` once the peer has closed the connection.
+pub async fn read_line<T: DeserializeOwned>(
+    reader: &mut (impl AsyncBufRead + Unpin),
+) -> io::Result<Option<T>> {
+    let mut line = String::new();
+    if reader.read_line(&mut line).await? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&line)?))
+}
+
+pub async fn write_line(
+    writer: &mut (impl AsyncWrite + Unpin),
+    value: &impl Serialize,
+) -> io::Result<()> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    writer.write_all(&line).await?;
+    writer.flush().await
+}
 
 /// Kept open after `request` so `wait` can ack on the same connection.
 pub struct Connection {
@@ -28,10 +89,10 @@ impl Connection {
 
     /// Sends `op` and returns the daemon's result or error.
     pub async fn request(&mut self, op: Op) -> Result<Value> {
-        protocol::write_line(&mut self.socket, &Request::new(op))
+        write_line(&mut self.socket, &Request::new(op))
             .await
             .map_err(broken_connection)?;
-        protocol::read_line(&mut self.socket)
+        read_line(&mut self.socket)
             .await
             .map_err(broken_connection)?
             .ok_or_else(|| {
@@ -42,7 +103,7 @@ impl Connection {
     /// Tells the daemon the CLI has printed the last `wait` result, so it
     /// can advance the consumer cursor. Call only after printing.
     pub async fn ack(&mut self) -> Result<()> {
-        protocol::write_line(&mut self.socket, &Ack { ack: true })
+        write_line(&mut self.socket, &Ack { ack: true })
             .await
             .map_err(broken_connection)
     }

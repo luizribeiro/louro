@@ -13,7 +13,7 @@ use tokio::time::{self, Instant};
 
 use crate::error::{Code, Error, Result};
 use crate::irc::{Incoming, Irc, IrcStatus, Outgoing, Secret};
-use crate::protocol::{Ack, Op, Request, SendArgs, VERSION, WaitArgs, read_line, write_line};
+use crate::socket::{Ack, Op, Request, SendArgs, VERSION, WaitArgs, read_line, write_line};
 
 const MAX_TEXT_CHARS: usize = 1000;
 const BUFFER_CAP: usize = 10_000;

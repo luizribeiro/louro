@@ -12,13 +12,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli::ConnectArgs;
-use crate::client::{self, Connection};
 use crate::daemon::{self, Config};
 use crate::error::{Code, Error, Result};
 use crate::irc::{self, Secret};
 use crate::output;
 use crate::password::{self, Source};
-use crate::protocol::Op;
+use crate::socket::{self, Connection, Op};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -103,7 +102,7 @@ async fn start(
     args: ConnectArgs,
     socket: Option<&Path>,
 ) -> Result<impl Future<Output = io::Result<()>>> {
-    let socket = client::resolve_socket_path(socket)?;
+    let socket = socket::resolve_socket_path(socket)?;
     let password = read_password(&args)?;
     create_runtime_dir(&socket)?;
     let (irc, incoming) = irc::connect(&args, password.clone()).await?;

@@ -6,20 +6,18 @@ use clap::Parser;
 use serde_json::Value;
 
 mod cli;
-mod client;
 mod connect;
 mod daemon;
 mod error;
 mod irc;
 mod output;
 mod password;
-mod protocol;
+mod socket;
 
 use cli::{Cli, Command, PRIMER};
-use client::Connection;
 use error::{Code, Error, Result};
 use irc::Kind;
-use protocol::{Op, SendArgs};
+use socket::{Connection, Op, SendArgs};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
