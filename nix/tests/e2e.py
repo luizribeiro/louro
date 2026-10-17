@@ -114,10 +114,62 @@ def stop():
     machine.succeed(f"rm -f {SOCKET}")
 
 
+def events_until(predicate):
+    """Collects events from `louro wait` until predicate(events) holds."""
+    events = []
+
+    def check(_last_try):
+        batch = louro("wait", "--timeout", "10")
+        assert "untrusted" in batch["notice"], batch
+        events.extend(batch["events"])
+        return predicate(events)
+
+    retry(check, timeout=TIMEOUT)
+    return events
+
+
+def from_nick(nick, text):
+    return lambda events: any(
+        event["from"]["nick"] == nick and event["text"] == text for event in events
+    )
+
+
+def human_file(nick, name):
+    """irc-human's FIFO ("in") or log, as e2e.nix's service sets them."""
+    return f"/run/irc-human-{nick}/{name}"
+
+
+def send_raw(nick, line):
+    machine.succeed(f"echo {shlex.quote(line)} > {human_file(nick, 'in')}")
+
+
+def heard(nick, target, text):
+    """Waits until nick receives text from the bot, sent to target."""
+    prefix, suffix = f":{BOT['user']}!", f" PRIVMSG {target} :{text}"
+
+    def check(_last_try):
+        log = machine.succeed(f"cat {human_file(nick, 'log')}").splitlines()
+        return any(line.startswith(prefix) and line.endswith(suffix) for line in log)
+
+    retry(check, timeout=TIMEOUT)
+
+
+def start_humans():
+    for nick in settings["humans"]:
+        machine.succeed(f"systemctl restart irc-human-{nick}")
+    for nick in settings["humans"]:
+        machine.wait_until_succeeds(
+            f"grep -q ' 366 {nick} #bots ' {human_file(nick, 'log')}", timeout=TIMEOUT
+        )
+
+
 machine.wait_for_unit("ergochat.service")
 machine.wait_for_open_port(settings["ircPort"])
 machine.wait_for_open_port(settings["apiPort"])
 register(BOT["user"], BOT["password"])
+for nick, password in settings["humans"].items():
+    register(nick, password)
+start_humans()
 
 with subtest("louro connects, joins #bots, and status shows its grants"):
     granted = grants()
@@ -126,6 +178,18 @@ with subtest("louro connects, joins #bots, and status shows its grants"):
     status = status_until(joined)
     assert status["nick"] == BOT["user"], status
     assert status["grants"] == granted, status
+    stop()
+
+with subtest("chat in #bots reaches wait, marked untrusted, and send reaches #bots"):
+    start(grants())
+    send_raw("luiz", "PRIVMSG #bots :louro: what's a borrow checker?")
+    [event] = events_until(from_nick("luiz", "louro: what's a borrow checker?"))
+    assert event["target"] == "#bots" and not event["private"], event
+    assert event["untrusted"] and event["mentions_me"], event
+    assert event["from"]["account"] == "luiz", event
+    sent = louro("send", "#bots", "it checks that references don't dangle")
+    assert sent["target"] == "#bots" and sent["lines"] == 1, sent
+    heard("luiz", "#bots", "it checks that references don't dangle")
     stop()
 
 with subtest("sends outside the grants, and quit without irc.quit, are refused"):

@@ -1,5 +1,5 @@
 # One VM running Ergo and louro, driven by e2e.py: louro as an unprivileged
-# user with a louro.toml per scenario.
+# user with a louro.toml per scenario, and people on IRC (irc-human.py).
 { pkgs, packages }:
 
 pkgs.testers.runNixOSTest (
@@ -7,6 +7,7 @@ pkgs.testers.runNixOSTest (
   let
     guestPkgs = config.node.pkgs;
     inherit (guestPkgs.stdenv.hostPlatform) system;
+    ircHuman = guestPkgs.writers.writePython3Bin "irc-human" { } ./irc-human.py;
     settings = {
       apiToken = "e2e-api-token";
       apiPort = 8089;
@@ -15,7 +16,30 @@ pkgs.testers.runNixOSTest (
         user = "louro";
         password = "squawk-squawk";
       };
+      humans = {
+        luiz = "luiz-password";
+      };
     };
+    humanService =
+      nick: password:
+      let
+        dir = "irc-human-${nick}";
+      in
+      {
+        description = "${nick}, on IRC";
+        serviceConfig = {
+          RuntimeDirectory = dir;
+          ExecStart = lib.escapeShellArgs [
+            (lib.getExe ircHuman)
+            "127.0.0.1:${toString settings.ircPort}"
+            nick
+            "--password=${password}"
+            "--join=#bots"
+            "--fifo=/run/${dir}/in"
+            "--log=/run/${dir}/log"
+          ];
+        };
+      };
   in
   {
     name = "louro-e2e";
@@ -40,6 +64,9 @@ pkgs.testers.runNixOSTest (
           };
         };
       };
+      systemd.services = lib.mapAttrs' (
+        nick: password: lib.nameValuePair "irc-human-${nick}" (humanService nick password)
+      ) settings.humans;
       users.users.${settings.bot.user}.isNormalUser = true;
       environment.systemPackages = [
         packages.${system}.louro
