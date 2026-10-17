@@ -11,7 +11,7 @@ SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON_RUNNING = f"pgrep -u {BOT['user']} -x louro"
 TIMEOUT = dt.timedelta(minutes=2)
-EXIT_CODES = {"not_allowed": 5}
+EXIT_CODES = {"not_connected": 4, "not_allowed": 5}
 
 
 def as_bot(command):
@@ -215,6 +215,22 @@ with subtest("sends outside the grants, and quit without irc.quit, are refused")
     refused("not_allowed", "send", "@#bots", "hi")
     refused("not_allowed", "quit")
     assert louro("status")["connected"], "a refused quit leaves louro running"
+    stop()
+
+with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows again"):
+    start(grants())
+    # Stopped and started separately, so the outage lasts until louro notices it.
+    machine.succeed("systemctl stop ergochat")
+    status_until(lambda status: not status["connected"])
+    refused("not_connected", "send", "#bots", "anyone there?")
+    machine.succeed("systemctl start ergochat")
+    machine.wait_for_open_port(settings["ircPort"])
+    status_until(joined)
+    start_humans()
+    send_raw("luiz", "PRIVMSG #bots :welcome back")
+    events_until(from_nick("luiz", "welcome back"))
+    louro("send", "#bots", "glad to be back")
+    heard("luiz", "#bots", "glad to be back")
     stop()
 
 with subtest("with irc.quit granted, louro quit stops the daemon and removes the socket"):
