@@ -1,3 +1,5 @@
+use std::fs::DirBuilder;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fs, io};
@@ -8,11 +10,16 @@ use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, mpsc};
 
+use crate::cli::ConnectArgs;
 use crate::error::{Code, Error, Result};
 use crate::grants::Grants;
 use crate::inbox::Inbox;
-use crate::irc::{Incoming, Irc, IrcStatus};
-use crate::socket::{Ack, Op, Request, SendArgs, VERSION, read_line, write_line};
+use crate::irc::{self, Incoming, Irc, IrcStatus, Secret};
+use crate::output;
+use crate::password::{self, Source};
+use crate::socket::{
+    Ack, Op, Request, SendArgs, VERSION, read_line, resolve_socket_path, write_line,
+};
 
 struct Daemon<I> {
     grants: Grants,
@@ -56,6 +63,66 @@ pub async fn run(
     }
     daemon.irc.quit().await;
     remove_socket(socket_path)
+}
+
+/// Connects and listens, prints the line `background` waits for, and returns the daemon to run.
+pub async fn start(
+    args: ConnectArgs,
+    socket: Option<&Path>,
+) -> Result<impl Future<Output = io::Result<()>>> {
+    let socket = resolve_socket_path(socket)?;
+    let password = read_password(&args)?;
+    create_runtime_dir(&socket)?;
+    let (irc, incoming) = irc::connect(&args, password.clone()).await?;
+    let listener = bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
+    output::emit(Ok(json!({
+        "server": format!("{}:{}", args.server, args.port()),
+        "nick": args.nick,
+        "channels": args.joins,
+        "socket": socket,
+    })));
+    let grants = Grants {
+        channels: args.joins,
+        allow_dm: args.allow_dm,
+        password,
+    };
+    Ok(async move { run(grants, irc, incoming, listener, &socket).await })
+}
+
+pub fn read_password(args: &ConnectArgs) -> Result<Option<Secret>> {
+    password_source(args)
+        .map(|source| password::read(&source))
+        .transpose()
+}
+
+/// A password is only wanted for SASL.
+fn password_source(args: &ConnectArgs) -> Option<Source> {
+    if args.password_stdin {
+        return Some(Source::Stdin);
+    }
+    if let Some(path) = &args.password_file {
+        return Some(Source::File(path.clone()));
+    }
+    let user = args.sasl_user.as_ref()?;
+    Some(Source::Tty(user.clone()))
+}
+
+fn create_runtime_dir(socket: &Path) -> Result<()> {
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|err| cannot_listen(socket, &err))
+}
+
+fn cannot_listen(socket: &Path, err: &io::Error) -> Error {
+    Error::new(
+        Code::Internal,
+        format!("can't listen on {}: {err}", socket.display()),
+    )
 }
 
 fn remove_socket(path: &Path) -> io::Result<()> {
