@@ -6,6 +6,8 @@ use papo::{
 };
 use tokio::sync::mpsc;
 
+pub use papo::Secret;
+
 use crate::cli::ConnectArgs;
 use crate::daemon::{Incoming, Irc, IrcStatus, Outgoing, Sender};
 use crate::error::{Code, Error, Result};
@@ -20,7 +22,7 @@ pub struct PapoIrc {
 /// Connects, registers, and forwards chat from the joined channels and DMs.
 pub async fn connect(
     args: &ConnectArgs,
-    password: Option<String>,
+    password: Option<Secret>,
 ) -> Result<(PapoIrc, mpsc::Receiver<Incoming>)> {
     let endpoint = if args.plaintext {
         Endpoint::plaintext(&args.server, args.port())

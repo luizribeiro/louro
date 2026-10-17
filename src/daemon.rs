@@ -12,6 +12,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::{self, Instant};
 
 use crate::error::{Code, Error, Result};
+use crate::papo::Secret;
 use crate::protocol::{Ack, Kind, Op, Request, SendArgs, VERSION, WaitArgs, read_line, write_line};
 
 const MAX_TEXT_CHARS: usize = 1000;
@@ -173,7 +174,7 @@ impl Inbox {
 pub struct Config {
     pub channels: Vec<String>,
     pub allow_dm: bool,
-    pub password: Option<String>,
+    pub password: Option<Secret>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,10 +202,10 @@ impl Config {
     }
 
     fn contains_password(&self, text: &str) -> bool {
-        let Some(password) = self.password.as_deref().map(squash) else {
-            return false;
-        };
-        !password.is_empty() && squash(text).contains(&password)
+        self.password.as_ref().is_some_and(|password| {
+            let password = squash(password.expose());
+            !password.is_empty() && squash(text).contains(&password)
+        })
     }
 
     fn check_target(&self, target: &str) -> Result<()> {
@@ -583,7 +584,7 @@ mod tests {
 
     #[test]
     fn no_password_blocks_nothing() {
-        for password in [None, Some(String::new()), Some(" \n".into())] {
+        for password in [None, Some("".into()), Some(" \n".into())] {
             let config = Config {
                 password,
                 ..config()

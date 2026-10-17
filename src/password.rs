@@ -6,6 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Code, Error, Result};
+use crate::papo::Secret;
 
 pub enum Source {
     /// A file only its owner can read, e.g. a systemd credential.
@@ -16,14 +17,14 @@ pub enum Source {
     Tty(String),
 }
 
-pub fn read(source: &Source) -> Result<String> {
+pub fn read(source: &Source) -> Result<Secret> {
     let mut password = match source {
         Source::File(path) => from_file(path)?,
         Source::Stdin => io::read_to_string(io::stdin()).map_err(unreadable)?,
         Source::Tty(user) => from_tty(user)?,
     };
     password.truncate(password.trim_end_matches(['\r', '\n']).len());
-    Ok(password)
+    Ok(Secret::new(password))
 }
 
 fn from_file(path: &Path) -> Result<String> {
@@ -70,7 +71,7 @@ mod tests {
     fn reads_an_owner_only_file_without_its_newline() {
         let file = password_file("correct horse battery staple\n", 0o600);
         let password = read(&Source::File(file.path().into())).unwrap();
-        assert_eq!(password, "correct horse battery staple");
+        assert_eq!(password.expose(), "correct horse battery staple");
     }
 
     #[test]

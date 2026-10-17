@@ -16,7 +16,7 @@ use crate::client::{self, Connection};
 use crate::daemon::{self, Config};
 use crate::error::{Code, Error, Result};
 use crate::output;
-use crate::papo;
+use crate::papo::{self, Secret};
 use crate::password::{self, Source};
 use crate::protocol::Op;
 
@@ -64,7 +64,7 @@ fn background(args: &ConnectArgs) -> Result<Value> {
         .spawn()
         .map_err(|err| cannot_start(&err))?;
     if let (Some(mut stdin), Some(password)) = (daemon.stdin.take(), password) {
-        let _ = stdin.write_all(password.as_bytes());
+        let _ = stdin.write_all(password.expose().as_bytes());
     }
     let mut line = String::new();
     if let Some(stdout) = daemon.stdout.take() {
@@ -122,7 +122,7 @@ async fn start(
     Ok(async move { daemon::run(config, irc, incoming, listener, &socket).await })
 }
 
-fn read_password(args: &ConnectArgs) -> Result<Option<String>> {
+fn read_password(args: &ConnectArgs) -> Result<Option<Secret>> {
     password_source(args)
         .map(|source| password::read(&source))
         .transpose()
