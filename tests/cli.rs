@@ -88,12 +88,30 @@ fn connect(socket: &std::path::Path) -> Command {
 fn connect_refuses_to_prompt_without_a_terminal() {
     let dir = tempdir().unwrap();
     connect(&dir.path().join("louro.sock"))
-        .args(["--sasl-user", "louro", "--foreground"])
+        .args(["--sasl-user", "louro"])
         .assert()
         .failure()
         .code(2)
         .stdout(predicate::str::contains(r#""code":"usage""#))
         .stdout(predicate::str::contains("--password-file"));
+}
+
+#[test]
+fn connect_in_the_background_relays_the_daemons_failure() {
+    let dir = tempdir().unwrap();
+    let password_file = dir.path().join("louro.pass");
+    std::fs::write(&password_file, "correct horse battery staple\n").unwrap();
+    std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    connect(&dir.path().join("louro.sock"))
+        .args(["--port", &closed_port().to_string()])
+        .arg("--password-file")
+        .arg(&password_file)
+        .assert()
+        .failure()
+        .code(9)
+        .stdout(predicate::str::contains(r#""code":"connect_failed""#))
+        .stdout(predicate::str::contains("horse").not());
 }
 
 #[test]

@@ -1,11 +1,15 @@
 //! `louro connect`: the operator starts the daemon that holds the IRC connection.
 
+use std::env;
 use std::fs::DirBuilder;
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{self, ExitCode, Stdio};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 
@@ -26,6 +30,13 @@ struct Connected {
     socket: PathBuf,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReadyLine {
+    Failed { error: Error },
+    Connected(Value),
+}
+
 struct Ready {
     connected: Connected,
     config: Config,
@@ -34,8 +45,51 @@ struct Ready {
     listener: UnixListener,
 }
 
+pub async fn run(args: ConnectArgs, socket: Option<&Path>) -> ExitCode {
+    if args.foreground {
+        foreground(args, socket).await
+    } else {
+        output::emit(background(&args))
+    }
+}
+
+/// Re-runs this binary as `connect --foreground` in its own process group,
+/// hands it the password on stdin, and relays the line it prints once ready.
+fn background(args: &ConnectArgs) -> Result<Value> {
+    let password = read_password(args)?;
+    let mut daemon = process::Command::new(env::current_exe().map_err(|err| cannot_start(&err))?)
+        .args(env::args_os().skip(1))
+        .arg("--foreground")
+        .args(password.is_some().then_some("--password-stdin"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|err| cannot_start(&err))?;
+    if let (Some(mut stdin), Some(password)) = (daemon.stdin.take(), password) {
+        let _ = stdin.write_all(password.as_bytes());
+    }
+    let mut line = String::new();
+    if let Some(stdout) = daemon.stdout.take() {
+        let _ = BufReader::new(stdout).read_line(&mut line);
+    }
+    match serde_json::from_str(&line) {
+        Ok(ReadyLine::Failed { error }) => Err(error),
+        Ok(ReadyLine::Connected(connected)) => Ok(connected),
+        Err(_) => Err(
+            Error::new(Code::ConnectFailed, "the daemon exited before connecting")
+                .with_hint("run it with --foreground to see why"),
+        ),
+    }
+}
+
+fn cannot_start(err: &io::Error) -> Error {
+    Error::new(Code::Internal, format!("can't start the daemon: {err}"))
+}
+
 /// Connects, prints the result line, then serves the socket until `quit`.
-pub async fn foreground(args: ConnectArgs, socket: Option<&Path>) -> ExitCode {
+async fn foreground(args: ConnectArgs, socket: Option<&Path>) -> ExitCode {
     let ready = match start(args, socket).await {
         Ok(ready) => ready,
         Err(err) => return output::emit::<()>(Err(err)),
@@ -119,7 +173,7 @@ fn create_runtime_dir(socket: &Path) -> Result<()> {
         .map_err(|err| cannot_listen(socket, &err))
 }
 
-fn cannot_listen(socket: &Path, err: &std::io::Error) -> Error {
+fn cannot_listen(socket: &Path, err: &io::Error) -> Error {
     Error::new(
         Code::Internal,
         format!("can't listen on {}: {err}", socket.display()),

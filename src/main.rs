@@ -28,7 +28,7 @@ async fn main() -> ExitCode {
     };
 
     match command {
-        Command::Connect(args) => connect::foreground(args, cli.socket.as_deref()).await,
+        Command::Connect(args) => connect::run(args, cli.socket.as_deref()).await,
         Command::Status => output::emit(request(cli.socket.as_deref(), Op::Status {}).await),
         Command::Quit => output::emit(request(cli.socket.as_deref(), Op::Quit {}).await),
         Command::Send(args) => output::emit(send(cli.socket.as_deref(), args).await),
