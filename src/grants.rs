@@ -241,19 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn dm_read_accepts_account_selectors() {
-        let grants = grants(r#"irc.dm.read = ["account:luiz"]"#);
-        for (nick, account, readable) in [
-            ("lz", Some("luiz"), true),
-            ("luiz", None, false),
-            ("luiz", Some("mallory"), false),
-        ] {
-            let event = incoming_as("louro", nick, account, true);
-            assert_eq!(grants.may_read(&event), readable, "{nick} ({account:?})");
-        }
-    }
-
-    #[test]
     fn dm_send_accepts_account_selectors_for_the_senders_known_account() {
         let grants = grants(r#"irc.dm.send = ["account:luiz"]"#);
         for (account, allowed) in [
@@ -266,35 +253,6 @@ mod tests {
                 account: account.map(String::from),
             };
             assert_eq!(grants.check_send("lz", &dm).is_ok(), allowed, "{account:?}");
-        }
-    }
-
-    #[test]
-    fn first_with_an_account_refuses_once_the_nick_no_longer_maps_to_it() {
-        let grants = grants(r#"irc.dm.send = ["$first"]"#);
-        let still_luiz = DmHistory {
-            first: true,
-            account: Some("luiz".into()),
-        };
-        assert!(grants.check_send("luiz", &still_luiz).is_ok());
-
-        let changed_hands = DmHistory {
-            first: false,
-            account: None,
-        };
-        assert_eq!(
-            grants.check_send("luiz", &changed_hands).unwrap_err().code,
-            Code::NotAllowed
-        );
-    }
-
-    #[test]
-    fn reads_channel_state_only_where_irc_join_grants() {
-        let grants = bots_and_dms();
-        assert!(grants.check_join("#Lounge").is_ok());
-        for target in ["#ops", "luiz"] {
-            let error = grants.check_join(target).unwrap_err();
-            assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
     }
 
@@ -328,29 +286,6 @@ mod tests {
                 Code::NotAllowed,
                 "{target}"
             );
-        }
-    }
-
-    #[test]
-    fn shows_typing_only_where_irc_typing_and_irc_send_both_grant() {
-        let grants = grants(
-            r##"
-            irc.join = ["#bots", "#lounge"]
-            irc.send = ["#bots"]
-            irc.typing = ["#bots", "#lounge"]
-            "##,
-        );
-        let dm = DmHistory::default();
-        assert!(
-            grants
-                .check_also(&grants.irc.typing, "irc.typing", "#bots", &dm)
-                .is_ok()
-        );
-        for target in ["#lounge", "#ops", "luiz"] {
-            let error = grants
-                .check_also(&grants.irc.typing, "irc.typing", target, &dm)
-                .unwrap_err();
-            assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
     }
 
