@@ -363,7 +363,7 @@ pub async fn run(
                     let _ = daemon.serve(&mut BufReader::new(stream)).await;
                 });
             }
-            Some(incoming) = incoming.recv() => daemon.inbox.push(incoming),
+            Some(incoming) = incoming.recv() => daemon.ingest(incoming),
             () = daemon.quit.notified() => break,
         }
     }
@@ -379,6 +379,15 @@ fn remove_socket(path: &Path) -> io::Result<()> {
 }
 
 impl<I: Irc> Daemon<I> {
+    /// DMs off means neither sending nor receiving, so an incoming private event never reaches
+    /// the inbox.
+    fn ingest(&self, incoming: Incoming) {
+        if incoming.private && !self.config.allow_dm {
+            return;
+        }
+        self.inbox.push(incoming);
+    }
+
     async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
         let op = match read_line::<Value>(conn).await {
             Ok(Some(request)) => parse_request(request),
@@ -494,6 +503,14 @@ mod tests {
             },
             mentions_me: false,
             reply_to: Some("4y8kq7j2c9mnz".into()),
+            ..from_maria(text)
+        }
+    }
+
+    fn from_maria_dm(text: &str) -> Incoming {
+        Incoming {
+            private: true,
+            target: "louro".into(),
             ..from_maria(text)
         }
     }
@@ -1007,6 +1024,33 @@ mod tests {
             texts(&reply),
             ["louro: does ergo support chathistory for DMs?"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_dm_is_dropped_when_dms_are_off() {
+        let daemon = start();
+        daemon.say(from_maria_dm("hey, got a sec?")).await;
+        daemon.say(from_joao("louro: any news?")).await;
+
+        let (_, reply) = daemon.wait(5).await;
+        assert_eq!(texts(&reply), ["louro: any news?"]);
+    }
+
+    #[tokio::test]
+    async fn ingest_keeps_a_dm_when_dms_are_on() {
+        let daemon = Daemon {
+            config: Config {
+                allow_dm: true,
+                ..config()
+            },
+            irc: Arc::new(FakeIrc::default()),
+            inbox: Inbox::default(),
+            quit: Notify::new(),
+        };
+        daemon.ingest(from_maria_dm("hey, got a sec?"));
+
+        let batch = daemon.inbox.wait(&wait_args(Some(0), 20)).await.unwrap();
+        assert_eq!(ids(&batch), [1]);
     }
 
     #[tokio::test]
