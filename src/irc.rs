@@ -30,6 +30,11 @@ pub enum Update {
     },
     /// Registration completed, first at connect and again after each reconnect.
     Registered,
+    /// Someone invited the bot to `channel`; louro never joins on its own.
+    Invited {
+        from: Sender,
+        channel: String,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -282,11 +287,37 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             .map(Update::Chat)
             .collect(),
         Event::Registered(_) => vec![Update::Registered],
+        Event::Invited(invited) if invited.is_self => invited
+            .by
+            .nick()
+            .map(|nick| Update::Invited {
+                from: known_sender(state, nick),
+                channel: invited.channel.to_string(),
+            })
+            .into_iter()
+            .collect(),
         Event::Disconnected(disconnected) => vec![Update::Disconnected {
             cause: disconnected.cause.to_string(),
             retry_in: disconnected.retry_in.map(whole_seconds),
         }],
         _ => Vec::new(),
+    }
+}
+
+/// A user as papo's state knows them, for events that carry no account tag of their own.
+fn known_sender(state: &State, nick: &str) -> Sender {
+    let user = state.user(nick);
+    Sender {
+        nick: nick.to_owned(),
+        account: user.and_then(|user| logged_in(user.account())),
+        bot: user.is_some_and(User::is_bot),
+    }
+}
+
+fn logged_in(account: &Account) -> Option<String> {
+    match account {
+        Account::LoggedIn(account) => Some(account.to_string()),
+        _ => None,
     }
 }
 
@@ -394,10 +425,7 @@ impl Irc for PapoIrc {
                         .highest_prefix()
                         .map(String::from)
                         .unwrap_or_default(),
-                    account: user.and_then(|user| match user.account() {
-                        Account::LoggedIn(account) => Some(account.to_string()),
-                        _ => None,
-                    }),
+                    account: user.and_then(|user| logged_in(user.account())),
                     away: user.is_some_and(|user| user.away().is_some()),
                     bot: user.is_some_and(User::is_bot),
                 }

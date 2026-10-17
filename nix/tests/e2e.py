@@ -333,6 +333,18 @@ with subtest("redact deletes the bot's own message, and refuses luiz's"):
     refused("not_allowed", "redact", "#bots", mine["msgid"])
     stop()
 
+with subtest("an invite reaches wait as an event, and louro doesn't join"):
+    start(grants())
+    send_raw("luiz", "JOIN #lounge")
+    send_raw("luiz", f"INVITE {BOT['user']} #lounge")
+    events = events_until(lambda events: any(event["type"] == "invite" for event in events))
+    [invite] = [event for event in events if event["type"] == "invite"]
+    assert invite["from"]["nick"] == "luiz" and invite["channel"] == "#lounge", invite
+    assert invite["untrusted"], invite
+    assert "#lounge" not in louro("status")["channels"]
+    send_raw("luiz", "PART #lounge")
+    stop()
+
 with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):
     start(grants(dm_read=["account:luiz"], dm_send=["$first"]))
     refused("not_allowed", "send", "luiz", "hi")

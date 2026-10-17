@@ -10,7 +10,7 @@ use serde::Serialize;
 use tokio::sync::Notify;
 use tokio::time::{self, Instant};
 
-use crate::irc::Incoming;
+use crate::irc::{Incoming, Sender};
 use crate::text::sanitize;
 
 const BUFFER_CAP: usize = 10_000;
@@ -35,6 +35,11 @@ enum Body {
         untrusted: bool,
     },
     Connection(Connection),
+    Invite {
+        #[serde(flatten)]
+        invite: Invite,
+        untrusted: bool,
+    },
 }
 
 impl Body {
@@ -47,6 +52,15 @@ impl Body {
             untrusted: true,
         }
     }
+}
+
+/// Someone invited the bot to a channel; louro doesn't join, the agent may answer the inviter.
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename = "invite")]
+pub struct Invite {
+    pub time: String,
+    pub from: Sender,
+    pub channel: String,
 }
 
 /// louro's own report that the IRC connection dropped or came back; not chat, so not untrusted.
@@ -125,6 +139,24 @@ impl Inbox {
 
     pub fn push_connection(&self, connection: Connection) {
         self.push_body(Body::Connection(connection));
+    }
+
+    pub fn push_invite(&self, invite: Invite) {
+        let clean = |name: &str| sanitize(name).0;
+        let from = Sender {
+            nick: clean(&invite.from.nick),
+            account: invite.from.account.as_deref().map(clean),
+            ..invite.from
+        };
+        let invite = Invite {
+            from,
+            channel: clean(&invite.channel),
+            ..invite
+        };
+        self.push_body(Body::Invite {
+            invite,
+            untrusted: true,
+        });
     }
 
     fn push_body(&self, body: Body) {
@@ -257,6 +289,29 @@ mod tests {
                  "state": "disconnected", "retry_in": 4},
                 {"id": 2, "type": "connection", "time": "2026-10-16T21:05:04Z",
                  "state": "reconnected"},
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invite_is_sanitized_and_untrusted() {
+        let inbox = Inbox::default();
+        inbox.push_invite(Invite {
+            time: "2026-10-16T21:05:00Z".into(),
+            from: Sender {
+                nick: "luiz".into(),
+                account: Some("lu\u{7}iz".into()),
+                bot: false,
+            },
+            channel: "#lounge\u{1b}[2J".into(),
+        });
+        let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
+        assert_eq!(
+            batch["events"],
+            serde_json::json!([
+                {"id": 1, "type": "invite", "time": "2026-10-16T21:05:00Z",
+                 "from": {"nick": "luiz", "account": "luiz", "bot": false},
+                 "channel": "#lounge[2J", "untrusted": true},
             ])
         );
     }

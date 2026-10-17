@@ -18,7 +18,7 @@ use tokio::sync::{Notify, mpsc};
 use crate::config::{Config, Grants};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
-use crate::inbox::{Connection, ConnectionState, Inbox, NOTICE};
+use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE};
 use crate::irc::{
     self, History, HistoryQuery, Incoming, Irc, IrcStatus, Kind, Member, Secret, Sender, Typing,
     Update,
@@ -229,6 +229,11 @@ impl<I: Irc> Daemon<I> {
                     self.report_connection(ConnectionState::Reconnected, None);
                 }
             }
+            Update::Invited { from, channel } => self.inbox.push_invite(Invite {
+                time: now(),
+                from,
+                channel,
+            }),
         }
     }
 
@@ -915,6 +920,24 @@ mod tests {
             ]
         );
         assert!(events.iter().all(|event| event.get("untrusted").is_none()));
+    }
+
+    #[tokio::test]
+    async fn wait_reports_an_invite_without_joining() {
+        let daemon = launch(Grants::default());
+        daemon
+            .update(Update::Invited {
+                from: from_luiz("").from,
+                channel: "#lounge".into(),
+            })
+            .await;
+        let (_, reply) = daemon.wait(5).await;
+        let event = &reply["Ok"]["events"][0];
+        assert_eq!(
+            (&event["type"], &event["from"]["nick"], &event["channel"]),
+            (&json!("invite"), &json!("luiz"), &json!("#lounge"))
+        );
+        assert_eq!(event["untrusted"], true);
     }
 
     #[tokio::test]
