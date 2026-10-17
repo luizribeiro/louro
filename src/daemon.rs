@@ -1,14 +1,21 @@
 use std::collections::VecDeque;
-use std::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use std::{fmt, fs, io};
 
 use serde::Serialize;
-use tokio::sync::Notify;
+use serde_json::{Value, json};
+use tokio::io::BufReader;
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::{self, Instant};
 
 use crate::error::{Code, Error, Result};
-use crate::protocol::{Kind, SendArgs, WaitArgs};
+use crate::protocol::{
+    Ack, Kind, Op, Request, Response, SendArgs, VERSION, WaitArgs, read_line, version_mismatch,
+    write_line,
+};
 
 const MAX_TEXT_CHARS: usize = 1000;
 const BUFFER_CAP: usize = 10_000;
@@ -99,12 +106,12 @@ fn skip_color_number(text: &str) -> &str {
 }
 
 #[derive(Debug, Serialize)]
-pub struct Batch {
-    pub cursor: u64,
-    pub timed_out: bool,
-    pub more: bool,
-    pub notice: &'static str,
-    pub events: Vec<Event>,
+struct Batch {
+    cursor: u64,
+    timed_out: bool,
+    more: bool,
+    notice: &'static str,
+    events: Vec<Event>,
 }
 
 #[derive(Default)]
@@ -142,21 +149,18 @@ impl Buffer {
 
 /// The unread events and the one cursor, which moves only on ack.
 #[derive(Default)]
-pub struct Inbox {
+struct Inbox {
     buffer: Mutex<Buffer>,
     arrived: Notify,
 }
 
 impl Inbox {
-    pub fn push(&self, incoming: Incoming) {
+    fn push(&self, incoming: Incoming) {
         self.buffer().push(incoming);
         self.arrived.notify_waiters();
     }
 
-    /// # Errors
-    ///
-    /// Fails with `usage` when `max` is 0.
-    pub async fn wait(&self, args: &WaitArgs) -> Result<Batch> {
+    async fn wait(&self, args: &WaitArgs) -> Result<Batch> {
         if args.max == 0 {
             return Err(Error::new(Code::Usage, "max must be at least 1"));
         }
@@ -184,7 +188,7 @@ impl Inbox {
         }
     }
 
-    pub fn ack(&self, cursor: u64) {
+    fn ack(&self, cursor: u64) {
         self.buffer().ack(cursor);
     }
 
@@ -222,10 +226,7 @@ pub struct Outgoing {
 }
 
 impl Config {
-    /// # Errors
-    ///
-    /// Refuses text with the password, a target outside the policy, and blank or too-long text.
-    pub fn check_send(&self, args: SendArgs) -> Result<Outgoing> {
+    fn check_send(&self, args: SendArgs) -> Result<Outgoing> {
         if self.contains_password(&args.text) {
             return Err(Error::new(
                 Code::BlockedSecret,
@@ -306,11 +307,176 @@ fn clean_lines(text: &str) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
+/// The IRC connection as the daemon sees it; papo.rs implements it over a papo client.
+pub trait Irc: Send + Sync + 'static {
+    fn status(&self) -> impl Future<Output = IrcStatus> + Send;
+    /// Sends one message (several lines become a multiline batch) and returns its msgid, if any.
+    fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send;
+    fn quit(&self) -> impl Future<Output = ()> + Send;
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IrcStatus {
+    pub connected: bool,
+    pub nick: String,
+    pub channels: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct Status<'a> {
+    #[serde(flatten)]
+    irc: IrcStatus,
+    policy: Policy<'a>,
+}
+
+#[derive(Serialize)]
+struct Policy<'a> {
+    channels: &'a [String],
+    dm: bool,
+}
+
+#[derive(Serialize)]
+struct Sent {
+    target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    msgid: Option<String>,
+    lines: usize,
+}
+
+struct Daemon<I> {
+    config: Config,
+    irc: I,
+    inbox: Inbox,
+    quit: Notify,
+}
+
+/// Serves requests on `socket_path` and buffers `incoming` chat until a `quit` request.
+///
+/// # Errors
+///
+/// Fails when the socket can't be bound or removed.
+pub async fn run(
+    config: Config,
+    irc: impl Irc,
+    mut incoming: mpsc::Receiver<Incoming>,
+    socket_path: &Path,
+) -> io::Result<()> {
+    remove_socket(socket_path)?;
+    let listener = UnixListener::bind(socket_path)?;
+    let daemon = Arc::new(Daemon {
+        config,
+        irc,
+        inbox: Inbox::default(),
+        quit: Notify::new(),
+    });
+    loop {
+        tokio::select! {
+            Ok((stream, _)) = listener.accept() => {
+                let daemon = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    let _ = daemon.serve(&mut BufReader::new(stream)).await;
+                });
+            }
+            Some(incoming) = incoming.recv() => daemon.inbox.push(incoming),
+            () = daemon.quit.notified() => break,
+        }
+    }
+    daemon.irc.quit().await;
+    remove_socket(socket_path)
+}
+
+fn remove_socket(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+impl<I: Irc> Daemon<I> {
+    async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
+        let op = match read_line::<Value>(conn).await {
+            Ok(Some(request)) => parse_request(request),
+            Ok(None) => return Ok(()),
+            Err(error) if is_malformed(&error) => {
+                Err(Error::new(Code::Usage, "the request is not a JSON line"))
+            }
+            Err(error) => return Err(error),
+        };
+        match op {
+            Err(error) => reply(conn, Err::<(), _>(error)).await,
+            Ok(Op::Status {}) => reply(conn, Ok(self.status().await)).await,
+            Ok(Op::Send(args)) => reply(conn, self.send(args).await).await,
+            Ok(Op::Wait(args)) => {
+                let batch = self.inbox.wait(&args).await;
+                let cursor = batch.as_ref().ok().map(|batch| batch.cursor);
+                reply(conn, batch).await?;
+                if let Some(cursor) = cursor
+                    && let Some(Ack { ack: true }) = read_line(conn).await?
+                {
+                    self.inbox.ack(cursor);
+                }
+                Ok(())
+            }
+            Ok(Op::Quit {}) => {
+                reply(conn, Ok(json!({}))).await?;
+                self.quit.notify_one();
+                Ok(())
+            }
+        }
+    }
+
+    async fn status(&self) -> Status<'_> {
+        Status {
+            irc: self.irc.status().await,
+            policy: Policy {
+                channels: &self.config.channels,
+                dm: self.config.allow_dm,
+            },
+        }
+    }
+
+    async fn send(&self, args: SendArgs) -> Result<Sent> {
+        let message = self.config.check_send(args)?;
+        let target = message.target.clone();
+        let lines = message.text.lines().count();
+        let msgid = self.irc.send(message).await?;
+        Ok(Sent {
+            target,
+            msgid,
+            lines,
+        })
+    }
+}
+
+fn parse_request(request: Value) -> Result<Op> {
+    if request.get("v") != Some(&Value::from(VERSION)) {
+        return Err(version_mismatch());
+    }
+    serde_json::from_value::<Request>(request)
+        .map(|request| request.op)
+        .map_err(|error| Error::new(Code::Usage, format!("bad request: {error}")))
+}
+
+fn is_malformed(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+    )
+}
+
+async fn reply(conn: &mut BufReader<UnixStream>, result: Result<impl Serialize>) -> io::Result<()> {
+    let result =
+        result.map(|value| serde_json::to_value(value).expect("replies serialize to JSON"));
+    write_line(conn, &Response::from(result)).await
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::future;
+    use std::path::PathBuf;
 
-    use serde_json::json;
+    use tempfile::TempDir;
+    use tokio::task::JoinHandle;
 
     use super::*;
 
@@ -732,5 +898,308 @@ mod tests {
         let debug = format!("{:?}", config());
         assert!(!debug.contains(PASSWORD));
         assert!(debug.contains("#bots"));
+    }
+
+    #[derive(Default)]
+    struct FakeIrc {
+        sent: Mutex<Vec<Outgoing>>,
+        quit: Notify,
+    }
+
+    impl Irc for Arc<FakeIrc> {
+        fn status(&self) -> impl Future<Output = IrcStatus> + Send {
+            future::ready(IrcStatus {
+                connected: true,
+                nick: "louro".into(),
+                channels: vec!["#bots".into(), "#ergo".into()],
+            })
+        }
+
+        fn send(&self, message: Outgoing) -> impl Future<Output = Result<Option<String>>> + Send {
+            self.sent.lock().unwrap().push(message);
+            future::ready(Ok(Some("c2m8w1u0pq7rs".into())))
+        }
+
+        async fn quit(&self) {
+            self.quit.notify_one();
+        }
+    }
+
+    struct Running {
+        _dir: TempDir,
+        socket: PathBuf,
+        chat: mpsc::Sender<Incoming>,
+        irc: Arc<FakeIrc>,
+        daemon: JoinHandle<io::Result<()>>,
+    }
+
+    fn start() -> Running {
+        let dir = tempfile::tempdir().unwrap();
+        start_in(dir)
+    }
+
+    fn start_in(dir: TempDir) -> Running {
+        let socket = dir.path().join("louro.sock");
+        let irc = Arc::new(FakeIrc::default());
+        let (chat, incoming) = mpsc::channel(16);
+        let daemon = tokio::spawn({
+            let irc = Arc::clone(&irc);
+            let socket = socket.clone();
+            async move { run(config(), irc, incoming, &socket).await }
+        });
+        Running {
+            _dir: dir,
+            socket,
+            chat,
+            irc,
+            daemon,
+        }
+    }
+
+    impl Running {
+        async fn connect(&self) -> BufReader<UnixStream> {
+            for _ in 0..1000 {
+                if let Ok(stream) = UnixStream::connect(&self.socket).await {
+                    return BufReader::new(stream);
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("the daemon never listened on {}", self.socket.display());
+        }
+
+        async fn call(&self, request: Value) -> Value {
+            let mut conn = self.connect().await;
+            write_line(&mut conn, &request).await.unwrap();
+            read_line(&mut conn).await.unwrap().unwrap()
+        }
+
+        async fn wait(&self, timeout_secs: u64) -> (BufReader<UnixStream>, Value) {
+            let mut conn = self.connect().await;
+            let request = json!({"v": 1, "op": "wait", "args": {"timeout_secs": timeout_secs}});
+            write_line(&mut conn, &request).await.unwrap();
+            let reply = read_line(&mut conn).await.unwrap().unwrap();
+            (conn, reply)
+        }
+
+        async fn say(&self, incoming: Incoming) {
+            self.chat.send(incoming).await.unwrap();
+        }
+    }
+
+    fn send_request(target: &str, text: &str) -> Value {
+        json!({"v": 1, "op": "send", "args": {"target": target, "text": text}})
+    }
+
+    fn texts(reply: &Value) -> Vec<&str> {
+        reply["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["text"].as_str().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_connection_and_the_policy() {
+        let daemon = start();
+        let reply = daemon
+            .call(json!({"v": 1, "op": "status", "args": {}}))
+            .await;
+        assert_eq!(
+            reply,
+            json!({"v": 1, "ok": true, "result": {
+                "connected": true,
+                "nick": "louro",
+                "channels": ["#bots", "#ergo"],
+                "policy": {"channels": ["#bots", "#ergo"], "dm": false}
+            }})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_gets_sanitized_chat_that_arrives_while_waiting() {
+        let daemon = start();
+        let waiting = tokio::spawn({
+            let mut conn = daemon.connect().await;
+            async move {
+                let request = json!({"v": 1, "op": "wait", "args": {"timeout_secs": 30}});
+                write_line(&mut conn, &request).await.unwrap();
+                read_line::<Value>(&mut conn).await.unwrap().unwrap()
+            }
+        });
+        daemon
+            .say(from_maria(
+                "\x02louro\x02: does ergo support chathistory for DMs?",
+            ))
+            .await;
+
+        let reply = waiting.await.unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["result"]["timed_out"], false);
+        assert_eq!(reply["result"]["notice"], NOTICE);
+        assert_eq!(reply["result"]["events"][0]["untrusted"], true);
+        assert_eq!(
+            texts(&reply),
+            ["louro: does ergo support chathistory for DMs?"]
+        );
+    }
+
+    #[tokio::test]
+    async fn serves_other_requests_while_a_wait_is_parked() {
+        let daemon = start();
+        let mut parked = daemon.connect().await;
+        let request = json!({"v": 1, "op": "wait", "args": {"timeout_secs": 30}});
+        write_line(&mut parked, &request).await.unwrap();
+
+        let status = daemon
+            .call(json!({"v": 1, "op": "status", "args": {}}))
+            .await;
+        assert_eq!(status["ok"], true);
+        let sent = daemon.call(send_request("#bots", "one moment")).await;
+        assert_eq!(sent["ok"], true);
+
+        daemon.say(from_joao("louro: any news?")).await;
+        let reply: Value = read_line(&mut parked).await.unwrap().unwrap();
+        assert_eq!(texts(&reply), ["louro: any news?"]);
+    }
+
+    #[tokio::test]
+    async fn fails_when_the_socket_cannot_be_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_chat, incoming) = mpsc::channel(1);
+        let missing_dir = dir.path().join("gone").join("louro.sock");
+        let result = run(
+            config(),
+            Arc::new(FakeIrc::default()),
+            incoming,
+            &missing_dir,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_that_times_out_is_a_success() {
+        let daemon = start();
+        let (_, reply) = daemon.wait(60).await;
+        assert_eq!(
+            reply,
+            json!({"v": 1, "ok": true, "result": {
+                "cursor": 0, "timed_out": true, "more": false, "notice": NOTICE, "events": []
+            }})
+        );
+    }
+
+    #[tokio::test]
+    async fn events_come_back_until_the_client_acks() {
+        let daemon = start();
+        daemon
+            .say(from_maria("louro: does ergo support chathistory for DMs?"))
+            .await;
+        daemon.say(from_joao("it does, it's a config option")).await;
+
+        let (unacked, first) = daemon.wait(5).await;
+        drop(unacked);
+        let (mut conn, again) = daemon.wait(5).await;
+        assert_eq!(texts(&again), texts(&first));
+        assert_eq!(texts(&again).len(), 2);
+
+        write_line(&mut conn, &Ack { ack: true }).await.unwrap();
+        assert_eq!(read_line::<Value>(&mut conn).await.unwrap(), None);
+        let (_, after_ack) = daemon.wait(0).await;
+        assert_eq!(after_ack["result"]["timed_out"], true);
+        assert_eq!(after_ack["result"]["cursor"], 2);
+    }
+
+    #[tokio::test]
+    async fn send_passes_a_cleaned_message_to_irc() {
+        let daemon = start();
+        let reply = daemon
+            .call(send_request(
+                "#bots",
+                "yes: set history.persistent.direct-messages\r\nin ergo.yaml\n",
+            ))
+            .await;
+        assert_eq!(
+            reply,
+            json!({"v": 1, "ok": true, "result": {
+                "target": "#bots", "msgid": "c2m8w1u0pq7rs", "lines": 2
+            }})
+        );
+        assert_eq!(
+            *daemon.irc.sent.lock().unwrap(),
+            [Outgoing {
+                target: "#bots".into(),
+                kind: Kind::Message,
+                text: "yes: set history.persistent.direct-messages \nin ergo.yaml".into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_send_never_reaches_irc_or_echoes_the_password() {
+        let daemon = start();
+        let leak = daemon
+            .call(send_request("#bots", &format!("sure, it's {PASSWORD}")))
+            .await;
+        assert_eq!(leak["ok"], false);
+        assert_eq!(leak["error"]["code"], "blocked_secret");
+        assert!(!leak.to_string().contains(PASSWORD));
+
+        let elsewhere = daemon.call(send_request("#lounge", "hi all")).await;
+        assert_eq!(elsewhere["error"]["code"], "not_allowed");
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn another_protocol_version_is_a_mismatch() {
+        let daemon = start();
+        for request in [
+            json!({"v": 2, "op": "status", "args": {}}),
+            json!({"v": 2, "op": "history", "args": {"target": "#bots"}}),
+            json!({"op": "status", "args": {}}),
+        ] {
+            let reply = daemon.call(request).await;
+            assert_eq!(reply["v"], 1);
+            assert_eq!(reply["error"]["code"], "version_mismatch");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_request_is_a_usage_error() {
+        let daemon = start();
+        let mut conn = daemon.connect().await;
+        tokio::io::AsyncWriteExt::write_all(&mut conn, b"PRIVMSG #bots :hi\n")
+            .await
+            .unwrap();
+        let reply: Value = read_line(&mut conn).await.unwrap().unwrap();
+        assert_eq!(reply["error"]["code"], "usage");
+
+        let unknown = daemon
+            .call(json!({"v": 1, "op": "join", "args": {"channel": "#ops"}}))
+            .await;
+        assert_eq!(unknown["error"]["code"], "usage");
+    }
+
+    #[tokio::test]
+    async fn quit_replies_then_shuts_down_and_removes_the_socket() {
+        let daemon = start();
+        let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
+        assert_eq!(reply, json!({"v": 1, "ok": true, "result": {}}));
+
+        daemon.daemon.await.unwrap().unwrap();
+        daemon.irc.quit.notified().await;
+        assert!(!daemon.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn replaces_a_stale_socket_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("louro.sock"), "").unwrap();
+        let daemon = start_in(dir);
+        let reply = daemon
+            .call(json!({"v": 1, "op": "status", "args": {}}))
+            .await;
+        assert_eq!(reply["ok"], true);
     }
 }

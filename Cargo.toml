@@ -19,4 +19,5 @@ unsafe_code = "forbid"
 pedantic = "warn"
 
 [dev-dependencies]
+tempfile = "3.27.0"
 tokio = { version = "1.53.3", features = ["test-util"] }
