@@ -14,7 +14,6 @@ pub struct Request {
 }
 
 impl Request {
-    #[must_use]
     pub const fn new(op: Op) -> Self {
         Self { v: VERSION, op }
     }
@@ -57,10 +56,6 @@ pub struct Ack {
 }
 
 /// Reads one JSON line, or `None` once the peer has closed the connection.
-///
-/// # Errors
-///
-/// Fails on I/O errors and on a line that isn't the expected JSON.
 pub async fn read_line<T: DeserializeOwned>(
     reader: &mut (impl AsyncBufRead + Unpin),
 ) -> io::Result<Option<T>> {
@@ -71,9 +66,6 @@ pub async fn read_line<T: DeserializeOwned>(
     Ok(Some(serde_json::from_str(&line)?))
 }
 
-/// # Errors
-///
-/// Fails on I/O errors.
 pub async fn write_line(
     writer: &mut (impl AsyncWrite + Unpin),
     value: &impl Serialize,

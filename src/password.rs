@@ -16,10 +16,6 @@ pub enum Source {
     Tty(String),
 }
 
-/// # Errors
-///
-/// `usage` when the file is unreadable or readable by others, or when there
-/// is no terminal to prompt on.
 pub fn read(source: &Source) -> Result<String> {
     let mut password = match source {
         Source::File(path) => from_file(path)?,

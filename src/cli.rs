@@ -141,7 +141,6 @@ pub struct ConnectArgs {
 }
 
 impl ConnectArgs {
-    #[must_use]
     pub fn port(&self) -> u16 {
         self.port
             .unwrap_or(if self.plaintext { 6667 } else { 6697 })

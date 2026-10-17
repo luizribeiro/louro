@@ -308,10 +308,6 @@ struct Daemon<I> {
 }
 
 /// Binds the daemon's socket at `path`, replacing a stale one.
-///
-/// # Errors
-///
-/// Fails when the socket can't be removed or bound.
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
     remove_socket(path)?;
     UnixListener::bind(path)
@@ -319,10 +315,6 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 
 /// Serves requests on `listener` and buffers `incoming` chat until a `quit`
 /// request, then removes the socket at `socket_path`.
-///
-/// # Errors
-///
-/// Fails when the socket can't be removed.
 pub async fn run(
     config: Config,
     irc: impl Irc,

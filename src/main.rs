@@ -5,12 +5,20 @@ use std::process::ExitCode;
 use clap::Parser;
 use serde_json::Value;
 
-use louro::cli::{self, Cli, Command, PRIMER};
-use louro::client::Connection;
-use louro::connect;
-use louro::error::{Code, Error, Result};
-use louro::output;
-use louro::protocol::{Kind, Op, SendArgs, WaitArgs};
+mod cli;
+mod client;
+mod connect;
+mod daemon;
+mod error;
+mod output;
+mod papo;
+mod password;
+mod protocol;
+
+use cli::{Cli, Command, PRIMER};
+use client::Connection;
+use error::{Code, Error, Result};
+use protocol::{Kind, Op, SendArgs, WaitArgs};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {

@@ -22,7 +22,6 @@ pub enum Code {
 }
 
 impl Code {
-    #[must_use]
     pub const fn exit_code(self) -> u8 {
         match self {
             Self::Internal | Self::VersionMismatch => 1,
@@ -55,7 +54,6 @@ impl Error {
         }
     }
 
-    #[must_use]
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self

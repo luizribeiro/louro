@@ -18,10 +18,6 @@ pub struct PapoIrc {
 }
 
 /// Connects, registers, and forwards chat from the joined channels and DMs.
-///
-/// # Errors
-///
-/// Fails with `auth_failed`, `tls` or `connect_failed` when papo can't register.
 pub async fn connect(
     args: &ConnectArgs,
     password: Option<String>,

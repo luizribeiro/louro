@@ -20,9 +20,6 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// # Errors
-    ///
-    /// `no_session` if the socket is missing or refuses the connection.
     pub async fn connect(socket: Option<&Path>) -> Result<Self> {
         let path = resolve_socket_path(socket)?;
         let stream = UnixStream::connect(&path)
@@ -34,11 +31,6 @@ impl Connection {
     }
 
     /// Sends `op` and returns the daemon's result or error.
-    ///
-    /// # Errors
-    ///
-    /// The daemon's own error, `version_mismatch`, or `internal` if the
-    /// connection breaks after it was established.
     pub async fn request(&mut self, op: Op) -> Result<Value> {
         protocol::write_line(&mut self.socket, &Request::new(op))
             .await
@@ -55,10 +47,6 @@ impl Connection {
 
     /// Tells the daemon the CLI has printed the last `wait` result, so it
     /// can advance the consumer cursor. Call only after printing.
-    ///
-    /// # Errors
-    ///
-    /// `internal` if the connection breaks before the ack is sent.
     pub async fn ack(&mut self) -> Result<()> {
         protocol::write_line(&mut self.socket, &Ack { ack: true })
             .await
@@ -82,10 +70,6 @@ fn broken_connection(err: &std::io::Error) -> Error {
 }
 
 /// `--socket`, else `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`.
-///
-/// # Errors
-///
-/// `internal` if the user id for the fallback path can't be determined.
 pub fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
