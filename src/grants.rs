@@ -96,35 +96,52 @@ impl Grants {
     }
 
     fn check_target(&self, target: &str, dm: &DmHistory) -> Result<()> {
-        // `PRIVMSG maria,#lounge` would also reach a target no grant covers.
-        if target.contains(',') {
-            return Err(not_allowed("send to one target at a time"));
-        }
-        if target.starts_with(['#', '&', '+', '!']) {
-            if self.irc.join.matches(target) && self.irc.send.matches(target) {
-                return Ok(());
+        match target_kind(target)? {
+            TargetKind::Channel => {
+                if self.irc.join.matches(target) && self.irc.send.matches(target) {
+                    return Ok(());
+                }
+                Err(not_allowed(format!("irc.send does not grant {target}")))
             }
-            return Err(not_allowed(format!("irc.send does not grant {target}")));
+            TargetKind::Nick => {
+                let dm_send = &self.irc.dm.send;
+                let allowed = dm_send.matches_sender(target, dm.account.as_deref())
+                    || dm.first && dm_send.matches(FIRST);
+                if allowed {
+                    return Ok(());
+                }
+                Err(not_allowed(format!("irc.dm.send does not grant {target}")))
+            }
         }
-        if target.starts_with(['@', '%', '~']) {
-            return Err(not_allowed(format!(
-                "{target} is a status message to a channel, not a nick"
-            )));
-        }
-        // `$` starts a server mask, and keeps `$first` from naming a nick.
-        if target.starts_with([':', '$']) {
-            return Err(not_allowed(format!(
-                "{target} is not a valid message target"
-            )));
-        }
-        let dm_send = &self.irc.dm.send;
-        let allowed = dm_send.matches_sender(target, dm.account.as_deref())
-            || dm.first && dm_send.matches(FIRST);
-        if !allowed {
-            return Err(not_allowed(format!("irc.dm.send does not grant {target}")));
-        }
-        Ok(())
     }
+}
+
+enum TargetKind {
+    Channel,
+    Nick,
+}
+
+/// Refuses anything that isn't one channel or one nick.
+fn target_kind(target: &str) -> Result<TargetKind> {
+    // `PRIVMSG maria,#lounge` would also reach a target no grant covers.
+    if target.contains(',') {
+        return Err(not_allowed("name one target at a time"));
+    }
+    if target.starts_with(['#', '&', '+', '!']) {
+        return Ok(TargetKind::Channel);
+    }
+    if target.starts_with(['@', '%', '~']) {
+        return Err(not_allowed(format!(
+            "{target} is a status message to a channel, not a nick"
+        )));
+    }
+    // `$` starts a server mask, and keeps `$first` from naming a nick.
+    if target.starts_with([':', '$']) {
+        return Err(not_allowed(format!(
+            "{target} is not a valid message target"
+        )));
+    }
+    Ok(TargetKind::Nick)
 }
 
 fn not_allowed(message: impl Into<String>) -> Error {
