@@ -22,12 +22,6 @@ pub struct Request {
     pub op: Op,
 }
 
-impl Request {
-    pub const fn new(op: Op) -> Self {
-        Self { v: VERSION, op }
-    }
-}
-
 /// A request to the daemon; the commands that only forward one parse straight into it.
 #[derive(Deserialize, Serialize, clap::Subcommand)]
 #[serde(tag = "op", content = "args", rename_all = "snake_case")]
@@ -145,7 +139,7 @@ impl Connection {
 
     /// Sends `op` and returns the daemon's result or error.
     pub async fn request(&mut self, op: Op) -> Result<Value> {
-        write_line(&mut self.socket, &Request::new(op))
+        write_line(&mut self.socket, &Request { v: VERSION, op })
             .await
             .map_err(louro_stopped)?;
         read_line(&mut self.socket)
