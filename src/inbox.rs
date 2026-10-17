@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -160,7 +160,7 @@ impl Inbox {
     }
 
     fn push_body(&self, body: Body) {
-        self.buffer().push(body);
+        self.buffer.lock().unwrap().push(body);
         self.arrived.notify_waiters();
     }
 
@@ -170,7 +170,7 @@ impl Inbox {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
-            let batch = self.buffer().batch(max.get());
+            let batch = self.buffer.lock().unwrap().batch(max.get());
             if !batch.events.is_empty() {
                 return batch;
             }
@@ -188,18 +188,12 @@ impl Inbox {
     }
 
     pub fn ack(&self, cursor: u64) {
-        self.buffer().ack(cursor);
+        self.buffer.lock().unwrap().ack(cursor);
     }
 
     /// Chat that never enters the inbox, like `history`, sanitized and marked as `wait`'s is.
     pub fn sanitized(incoming: Incoming) -> impl Serialize {
         Body::chat(incoming)
-    }
-
-    fn buffer(&self) -> MutexGuard<'_, Buffer> {
-        self.buffer
-            .lock()
-            .expect("no code panics while holding the buffer lock")
     }
 }
 

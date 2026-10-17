@@ -4,7 +4,7 @@ use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use std::{fs, io};
 
@@ -242,24 +242,18 @@ impl<I: Irc> Daemon<I> {
             Ok(()) => message,
             Err(_) => "a problem whose description contained the bot's password".into(),
         };
-        *self.last_error() = Some(Problem {
+        *self.last_error.lock().unwrap() = Some(Problem {
             time: now(),
             message,
         });
     }
 
     fn gave_up(&self) -> io::Error {
-        let reason = self.last_error().as_ref().map_or_else(
+        let reason = self.last_error.lock().unwrap().as_ref().map_or_else(
             || "papo's event stream ended".into(),
             |problem| problem.message.clone(),
         );
         io::Error::other(reason)
-    }
-
-    fn last_error(&self) -> MutexGuard<'_, Option<Problem>> {
-        self.last_error
-            .lock()
-            .expect("no code panics while holding the last error lock")
     }
 
     fn ingest(&self, incoming: Incoming) {
@@ -280,7 +274,7 @@ impl<I: Irc> Daemon<I> {
             .account
             .as_ref()
             .map(|account| account.to_ascii_lowercase());
-        match self.dm_senders().entry(nick) {
+        match self.dm_senders.lock().unwrap().entry(nick) {
             Entry::Occupied(mut sender) => {
                 let sender = sender.get_mut();
                 if sender.account.is_some() && sender.account != account {
@@ -299,16 +293,12 @@ impl<I: Irc> Daemon<I> {
     /// What's known about DMs from `target`, for `$first` and `account:` entries in
     /// `irc.dm.send`.
     fn dm_history(&self, target: &str) -> DmHistory {
-        self.dm_senders()
+        self.dm_senders
+            .lock()
+            .unwrap()
             .get(&target.to_ascii_lowercase())
             .cloned()
             .unwrap_or_default()
-    }
-
-    fn dm_senders(&self) -> MutexGuard<'_, HashMap<String, DmHistory>> {
-        self.dm_senders
-            .lock()
-            .expect("no code panics while holding the DM senders lock")
     }
 
     async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
@@ -374,7 +364,7 @@ impl<I: Irc> Daemon<I> {
             "nick": nick,
             "channels": channels,
             "grants": self.grants,
-            "last_error": *self.last_error(),
+            "last_error": *self.last_error.lock().unwrap(),
         })
     }
 
@@ -441,7 +431,7 @@ impl<I: Irc> Daemon<I> {
         text::check_msgid(msgid)?;
         text::check_one_line(reason)?;
         text::check_secret(self.password.as_ref(), reason)?;
-        if !self.sent_log().contains(target, msgid) {
+        if !self.sent.lock().unwrap().contains(target, msgid) {
             return Err(Error::new(
                 Code::NotAllowed,
                 format!("{msgid} in {target} is not a message louro sent"),
@@ -450,12 +440,6 @@ impl<I: Irc> Daemon<I> {
         }
         self.irc.redact(target, msgid, reason).await?;
         Ok(json!({"target": target, "msgid": msgid}))
-    }
-
-    fn sent_log(&self) -> MutexGuard<'_, SentLog> {
-        self.sent
-            .lock()
-            .expect("no code panics while holding the sent log lock")
     }
 
     async fn typing(&self, target: &str, state: Typing) -> Result<Value> {
@@ -481,7 +465,7 @@ impl<I: Irc> Daemon<I> {
         let is_reply = message.reply_to.is_some();
         let sent = self.irc.send(message).await?;
         if let Some(msgid) = &sent.msgid {
-            self.sent_log().record(&target, msgid.clone());
+            self.sent.lock().unwrap().record(&target, msgid.clone());
         }
         let mut result = json!({"target": target, "msgid": sent.msgid, "lines": lines});
         if is_reply {
