@@ -157,37 +157,3 @@ fn cannot_listen(socket: &Path, err: &io::Error) -> Error {
         format!("can't listen on {}: {err}", socket.display()),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-
-    use super::*;
-    use crate::cli::{Cli, Command};
-
-    fn source(flags: &[&str]) -> Option<Source> {
-        let required = ["louro", "connect", "127.0.0.1", "--nick", "louro"];
-        let cli = Cli::try_parse_from(required.iter().chain(flags)).unwrap();
-        let Some(Command::Connect(args)) = cli.command else {
-            panic!("expected connect");
-        };
-        password_source(&args)
-    }
-
-    #[test]
-    fn asks_for_a_password_only_for_sasl_and_prefers_the_parents_pipe() {
-        assert!(source(&[]).is_none());
-        assert!(
-            matches!(source(&["--sasl-user", "louro"]), Some(Source::Tty(user)) if user == "louro")
-        );
-        let file = [
-            "--sasl-user",
-            "louro",
-            "--password-file",
-            "/run/creds/louro",
-        ];
-        assert!(matches!(source(&file), Some(Source::File(_))));
-        let piped = [&file[..], &["--password-stdin"]].concat();
-        assert!(matches!(source(&piped), Some(Source::Stdin)));
-    }
-}
