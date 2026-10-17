@@ -8,22 +8,12 @@ use papo::{
 };
 use tokio::sync::mpsc;
 
+use crate::cli::ConnectArgs;
 use crate::daemon::{Incoming, Irc, IrcStatus, Outgoing, Sender};
 use crate::error::{Code, Error, Result};
 use crate::protocol::Kind;
 
 const INCOMING_CAPACITY: usize = 256;
-
-/// Where and how the bot connects. `password`, when set, is used for SASL.
-pub struct ConnectOptions {
-    pub server: String,
-    pub port: u16,
-    pub tls: bool,
-    pub nick: String,
-    pub sasl_user: Option<String>,
-    pub password: Option<String>,
-    pub channels: Vec<String>,
-}
 
 pub struct PapoIrc {
     client: Client,
@@ -34,18 +24,21 @@ pub struct PapoIrc {
 /// # Errors
 ///
 /// Fails with `auth_failed`, `tls` or `connect_failed` when papo can't register.
-pub async fn connect(options: ConnectOptions) -> Result<(PapoIrc, mpsc::Receiver<Incoming>)> {
-    let endpoint = if options.tls {
-        Endpoint::tls(options.server, options.port)
+pub async fn connect(
+    args: &ConnectArgs,
+    password: Option<String>,
+) -> Result<(PapoIrc, mpsc::Receiver<Incoming>)> {
+    let endpoint = if args.plaintext {
+        Endpoint::plaintext(&args.server, args.port())
     } else {
-        Endpoint::plaintext(options.server, options.port)
+        Endpoint::tls(&args.server, args.port())
     };
     let mut builder = Client::builder(endpoint)
-        .nick(&options.nick)
+        .nick(&args.nick)
         .bot()
-        .autojoin(options.channels);
-    if let Some(password) = options.password {
-        let user = options.sasl_user.unwrap_or(options.nick);
+        .autojoin(args.joins.clone());
+    if let Some(password) = password {
+        let user = args.sasl_user.as_ref().unwrap_or(&args.nick);
         builder = builder.sasl(Sasl::any(user, password));
     }
     let (client, events) = builder

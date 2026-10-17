@@ -18,7 +18,7 @@ use crate::client::{self, Connection};
 use crate::daemon::{self, Config, Incoming};
 use crate::error::{Code, Error, Result};
 use crate::output;
-use crate::papo::{self, ConnectOptions, PapoIrc};
+use crate::papo::{self, PapoIrc};
 use crate::password::{self, Source};
 use crate::protocol::Op;
 
@@ -130,16 +130,7 @@ async fn start(args: ConnectArgs, socket: Option<&Path>) -> Result<Ready> {
     let socket = client::resolve_socket_path(socket)?;
     let password = read_password(&args)?;
     create_runtime_dir(&socket)?;
-    let (irc, incoming) = papo::connect(ConnectOptions {
-        server: args.server.clone(),
-        port: args.port(),
-        tls: !args.plaintext,
-        nick: args.nick.clone(),
-        sasl_user: args.sasl_user.clone(),
-        password: password.clone(),
-        channels: args.joins.clone(),
-    })
-    .await?;
+    let (irc, incoming) = papo::connect(&args, password.clone()).await?;
     let listener = daemon::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     Ok(Ready {
         connected: Connected {
