@@ -159,6 +159,25 @@ def heard(nick, target, text):
     retry(check, timeout=TIMEOUT)
 
 
+def louro_blocked(blocked):
+    """Adds or removes a firewall rule that resets louro's packets to Ergo."""
+    rule = shlex.join([
+        "OUTPUT", "-m", "owner", "--uid-owner", BOT["user"], "-p", "tcp",
+        "--dport", str(settings["ircPort"]), "-j", "REJECT", "--reject-with", "tcp-reset",
+    ])
+    machine.succeed(f"iptables {'-I' if blocked else '-D'} {rule}")
+
+
+def cut_off_louro():
+    """Drops louro's connection and keeps it from reconnecting, while Ergo keeps its history."""
+    louro_blocked(True)
+    sockets = machine.succeed(
+        f"ss -tnpH state established '( dport = :{settings['ircPort']} )'"
+    ).splitlines()
+    [local] = [line.split()[2] for line in sockets if '"louro"' in line]
+    machine.succeed(f"ss -K -tn state established '( src {local} )'")
+
+
 def start_humans():
     for nick in settings["humans"]:
         machine.succeed(f"systemctl restart irc-human-{nick}")
@@ -191,6 +210,7 @@ with subtest("chat in #bots reaches wait, marked untrusted, and send reaches #bo
     [event] = events_until(from_nick("luiz", "louro: what's a borrow checker?"))
     assert event["target"] == "#bots" and not event["private"], event
     assert event["untrusted"] and event["mentions_me"], event
+    assert event["origin"] == "live", event
     assert event["from"]["account"] == "luiz", event
     sent = louro("send", "#bots", "it checks that references don't dangle")
     assert sent["target"] == "#bots" and sent["lines"] == 1, sent
@@ -255,6 +275,22 @@ with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
     assert exit_code == str(EXIT_CODES["not_connected"]), exit_code
     error = json.loads(machine.succeed("cat /tmp/wait.json"))["error"]
     assert error["code"] == "not_connected" and "louro stopped" in error["message"], error
+
+with subtest("chat sent while louro was cut off arrives from history after it reconnects"):
+    start(grants())
+    send_raw("luiz", "PRIVMSG #bots :louro: still there?")
+    events_until(from_nick("luiz", "louro: still there?"))
+    cut_off_louro()
+    status_until(lambda status: not status["connected"])
+    send_raw("luiz", "PRIVMSG #bots :you missed this")
+    machine.wait_until_succeeds(
+        f"grep -q 'PRIVMSG #bots :you missed this' {human_file('mallory', 'log')}",
+        timeout=TIMEOUT,
+    )
+    louro_blocked(False)
+    [missed] = events_until(from_nick("luiz", "you missed this"))
+    assert missed["origin"] == "history" and missed["untrusted"], missed
+    stop()
 
 with subtest("a wrong SASL password fails connect and leaves nothing running"):
     write_config(grants(), password="wrong-password")

@@ -134,7 +134,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::irc::{Kind, Sender};
+    use crate::irc::{Kind, Origin, Sender};
     use crate::text::MAX_TEXT_CHARS;
 
     fn from_maria(text: &str) -> Incoming {
@@ -152,6 +152,7 @@ mod tests {
             text: text.into(),
             mentions_me: true,
             reply_to: None,
+            origin: Origin::Live,
         }
     }
 

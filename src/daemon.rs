@@ -327,7 +327,7 @@ mod tests {
 
     use super::*;
     use crate::inbox::NOTICE;
-    use crate::irc::{Outgoing, Sender};
+    use crate::irc::{Origin, Outgoing, Sender};
 
     fn from_maria(text: &str) -> Incoming {
         Incoming {
@@ -344,6 +344,7 @@ mod tests {
             text: text.into(),
             mentions_me: true,
             reply_to: None,
+            origin: Origin::Live,
         }
     }
 
@@ -624,6 +625,29 @@ mod tests {
 
         let (_, reply) = daemon.wait(5).await;
         assert_eq!(texts(&reply), ["louro: any news?", "status report, please"]);
+    }
+
+    #[tokio::test]
+    async fn history_gets_the_same_grants_and_sanitizing_as_live_chat() {
+        let daemon = launch(grants());
+        let history = |incoming| Incoming {
+            origin: Origin::History,
+            ..incoming
+        };
+        daemon
+            .say(history(Incoming {
+                target: "#ops".into(),
+                ..from_maria("louro: you there?")
+            }))
+            .await;
+        daemon.say(history(dm(from_joao("hey, got a sec?")))).await;
+        daemon.say(history(from_maria("louro\0: missed me?"))).await;
+
+        let (_, reply) = daemon.wait(5).await;
+        assert_eq!(texts(&reply), ["louro: missed me?"]);
+        let event = &reply["Ok"]["events"][0];
+        assert_eq!(event["origin"], "history");
+        assert_eq!(event["untrusted"], true);
     }
 
     #[tokio::test]

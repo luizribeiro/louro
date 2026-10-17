@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use papo::{
-    Client, ConnectErrorKind, Endpoint, Event, Events, Message, MessageKind, RegistrationError,
-    Sasl, Source, State,
+    Client, ConnectErrorKind, Endpoint, Event, Events, HistoryItem, Message, MessageKind,
+    RegistrationError, Sasl, Source, State,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -40,6 +40,15 @@ pub struct Incoming {
     pub text: String,
     pub mentions_me: bool,
     pub reply_to: Option<String>,
+    pub origin: Origin,
+}
+
+/// Whether chat arrived as it was sent, or from the history papo fetches after a reconnect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    Live,
+    History,
 }
 
 #[derive(Clone, Serialize)]
@@ -93,7 +102,8 @@ pub async fn connect(
         .alt_nicks(server.alt_nicks.clone())
         .bot()
         .ctcp_version(Some(CTCP_VERSION))
-        .autojoin(server.autojoin.clone());
+        .autojoin(server.autojoin.clone())
+        .history_on_reconnect(true);
     if let Some(username) = &server.username {
         builder = builder.username(username);
     }
@@ -179,23 +189,32 @@ fn connect_code(error: &papo::Error) -> Code {
 
 async fn forward(client: Client, mut events: Events, updates: mpsc::Sender<Update>) {
     while let Some(event) = events.next().await {
-        let Some(update) = to_update(event, &client.state()) else {
-            continue;
-        };
-        if updates.send(update).await.is_err() {
-            return;
+        for update in to_updates(event, &client.state()) {
+            if updates.send(update).await.is_err() {
+                return;
+            }
         }
     }
 }
 
-fn to_update(event: Event, state: &State) -> Option<Update> {
+fn to_updates(event: Event, state: &State) -> Vec<Update> {
     match event {
-        Event::Message(message) => to_incoming(&message, state).map(Update::Chat),
-        Event::Disconnected(disconnected) => Some(Update::Disconnected {
+        Event::Message(message) => to_incoming(&message, state)
+            .map(Update::Chat)
+            .into_iter()
+            .collect(),
+        Event::History(page) => page
+            .items
+            .iter()
+            .filter_map(HistoryItem::message)
+            .filter_map(|message| to_incoming(message, state))
+            .map(Update::Chat)
+            .collect(),
+        Event::Disconnected(disconnected) => vec![Update::Disconnected {
             cause: disconnected.cause.to_string(),
             retry_in: disconnected.retry_in.map(whole_seconds),
-        }),
-        _ => None,
+        }],
+        _ => Vec::new(),
     }
 }
 
@@ -204,11 +223,14 @@ fn whole_seconds(delay: Duration) -> u64 {
 }
 
 fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
-    if !message.is_live() {
-        return None;
-    }
     let kind = chat_kind(message.kind())?;
     let nick = message.sender.as_ref().and_then(Source::nick)?;
+    let from_me = state.is_me(nick)
+        || message
+            .account()
+            .zip(state.account())
+            .is_some_and(|(sender, me)| state.casemapping().eq(sender, me));
+    let origin = chat_origin(message.origin(), from_me)?;
     let private = state.is_me(message.target());
     if !private && state.channel(message.target()).is_none() {
         return None;
@@ -231,7 +253,18 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
                 .to_lowercase()
                 .contains(&state.nick().to_lowercase()),
         reply_to: message.reply_to().map(str::to_owned),
+        origin,
     })
+}
+
+/// papo marks our own echoes and other sessions only on live messages, so history from this
+/// account is recognized by `from_me`. Replayed batches (e.g. bouncer playback) are dropped.
+fn chat_origin(origin: papo::Origin, from_me: bool) -> Option<Origin> {
+    match origin {
+        papo::Origin::Live => Some(Origin::Live),
+        papo::Origin::History if !from_me => Some(Origin::History),
+        _ => None,
+    }
 }
 
 fn chat_kind(kind: MessageKind) -> Option<Kind> {
@@ -292,6 +325,20 @@ mod tests {
     use papo::{DisconnectCause, Disconnected, InvalidInput};
 
     use super::*;
+
+    #[test]
+    fn forwards_live_chat_and_others_history_only() {
+        for (origin, from_me, forwarded) in [
+            (papo::Origin::Live, false, Some(Origin::Live)),
+            (papo::Origin::History, false, Some(Origin::History)),
+            (papo::Origin::History, true, None),
+            (papo::Origin::Replay, false, None),
+            (papo::Origin::Echo, true, None),
+            (papo::Origin::OtherSession, true, None),
+        ] {
+            assert_eq!(chat_origin(origin, from_me), forwarded, "{origin:?}");
+        }
+    }
 
     #[test]
     fn a_retry_delay_rounds_up_to_whole_seconds() {

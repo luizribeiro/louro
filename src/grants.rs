@@ -94,7 +94,7 @@ fn not_allowed(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::irc::Sender;
+    use crate::irc::{Origin, Sender};
 
     fn grants(toml: &str) -> Grants {
         toml::from_str(toml).unwrap()
@@ -130,6 +130,7 @@ mod tests {
             text: "louro: ping".into(),
             mentions_me: true,
             reply_to: None,
+            origin: Origin::Live,
         }
     }
 
