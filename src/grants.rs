@@ -9,7 +9,7 @@ const FIRST: &str = "$first";
 
 /// What the daemon knows about DMs received from a target nick, for `irc.dm.send`'s `$first`
 /// and `account:` entries. Both come from the same nick→account bookkeeping (see `daemon.rs`).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DmHistory {
     /// The nick has sent the bot a DM and, if that DM carried an account, every DM from it since
     /// has carried the same one: `$first` may still name it.

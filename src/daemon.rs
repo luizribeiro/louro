@@ -27,15 +27,6 @@ use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
 use crate::text;
 
-/// What's known about DMs received from one nick: its account at the first DM, if any, and
-/// whether a later DM from it carried a different one (the nick may have changed hands). Once
-/// set, `changed_account` stays set for the rest of the daemon's run.
-#[derive(Default)]
-struct DmSender {
-    first_account: Option<String>,
-    changed_account: bool,
-}
-
 /// The most a `history` call returns, and Ergo's default page size.
 const MAX_HISTORY: usize = 100;
 const SENT_LOG_CAP: usize = 1_000;
@@ -72,8 +63,8 @@ struct Daemon<I> {
     password: Option<Secret>,
     irc: I,
     inbox: Inbox,
-    /// Lowercased nicks whose DM reached the agent, for `irc.dm.send`'s `$first` and `account:`.
-    dm_senders: Mutex<HashMap<String, DmSender>>,
+    /// By lowercased nick, what DMs that reached the agent say, for `$first` and `account:`.
+    dm_senders: Mutex<HashMap<String, DmHistory>>,
     sent: Mutex<SentLog>,
     last_error: Mutex<Option<Problem>>,
     /// Set from a disconnect until the next registration, so the agent hears of each outage once.
@@ -281,6 +272,8 @@ impl<I: Irc> Daemon<I> {
         self.inbox.push(incoming);
     }
 
+    /// Once a nick's DMs carried an account, a DM with another one (or none) means the nick may
+    /// have changed hands, so it loses `$first` and its account for the rest of the daemon's run.
     fn record_dm_sender(&self, from: &Sender) {
         let nick = from.nick.to_ascii_lowercase();
         let account = from
@@ -290,14 +283,14 @@ impl<I: Irc> Daemon<I> {
         match self.dm_senders().entry(nick) {
             Entry::Occupied(mut sender) => {
                 let sender = sender.get_mut();
-                if sender.first_account.is_some() && sender.first_account != account {
-                    sender.changed_account = true;
+                if sender.account.is_some() && sender.account != account {
+                    *sender = DmHistory::default();
                 }
             }
             Entry::Vacant(slot) => {
-                slot.insert(DmSender {
-                    first_account: account,
-                    changed_account: false,
+                slot.insert(DmHistory {
+                    first: true,
+                    account,
                 });
             }
         }
@@ -306,18 +299,13 @@ impl<I: Irc> Daemon<I> {
     /// What's known about DMs from `target`, for `$first` and `account:` entries in
     /// `irc.dm.send`.
     fn dm_history(&self, target: &str) -> DmHistory {
-        match self.dm_senders().get(&target.to_ascii_lowercase()) {
-            None => DmHistory::default(),
-            Some(sender) => DmHistory {
-                first: sender.first_account.is_none() || !sender.changed_account,
-                account: (!sender.changed_account)
-                    .then(|| sender.first_account.clone())
-                    .flatten(),
-            },
-        }
+        self.dm_senders()
+            .get(&target.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
     }
 
-    fn dm_senders(&self) -> MutexGuard<'_, HashMap<String, DmSender>> {
+    fn dm_senders(&self) -> MutexGuard<'_, HashMap<String, DmHistory>> {
         self.dm_senders
             .lock()
             .expect("no code panics while holding the DM senders lock")
