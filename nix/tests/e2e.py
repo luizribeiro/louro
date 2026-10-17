@@ -11,7 +11,7 @@ SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON_RUNNING = f"pgrep -u {BOT['user']} -x louro"
 TIMEOUT = dt.timedelta(minutes=2)
-EXIT_CODES = {"not_connected": 4, "not_allowed": 5}
+EXIT_CODES = {"not_connected": 4, "not_allowed": 5, "auth_failed": 9}
 
 
 def as_bot(command):
@@ -27,9 +27,10 @@ def louro(*args, exit_code=0):
 
 
 def refused(code, *args):
-    """Runs louro, expecting it to fail with code and its exit code."""
+    """Runs louro, expecting it to fail with code and its exit code; returns the error."""
     error = louro(*args, exit_code=EXIT_CODES[code])["error"]
     assert error["code"] == code, error
+    return error
 
 
 def register(account, password):
@@ -64,18 +65,23 @@ def write_as_bot(path, text):
     machine.succeed(f"echo {shlex.quote(text)} | {write}")
 
 
-def connect(grants):
-    """Starts the daemon with a fresh louro.toml and password file."""
+def write_config(grants, password=BOT["password"]):
+    """Writes a fresh louro.toml and its password file."""
     server = {
         "address": SERVER,
         "nick": BOT["user"],
         "password_file": PASSWORD_FILE,
         "autojoin": ["#bots"],
     }
-    write_as_bot(PASSWORD_FILE, BOT["password"])
+    write_as_bot(PASSWORD_FILE, password)
     write_as_bot(CONFIG, "\n".join([
         "[server]", *toml_lines(server), "[grants]", *toml_lines(grants),
     ]))
+
+
+def connect(grants):
+    """Starts the daemon with a fresh louro.toml and password file."""
+    write_config(grants)
     return louro("connect", "--config", CONFIG)
 
 
@@ -232,6 +238,12 @@ with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows 
     louro("send", "#bots", "glad to be back")
     heard("luiz", "#bots", "glad to be back")
     stop()
+
+with subtest("a wrong SASL password fails connect and leaves nothing running"):
+    write_config(grants(), password="wrong-password")
+    error = refused("auth_failed", "connect", "--config", CONFIG)
+    assert "wrong-password" not in json.dumps(error), error
+    assert_stopped()
 
 with subtest("with irc.quit granted, louro quit stops the daemon and removes the socket"):
     start(grants(quit=True))
