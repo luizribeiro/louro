@@ -41,9 +41,8 @@ def bot_sent(command, times):
     until(count, lambda seen: seen == times)
 
 
-start_ergo({BOT["user"]: BOT["password"]} | settings["humans"])
-machine.succeed("systemctl start irc-human-luiz")
-machine.wait_until_succeeds(f"grep -q ' 366 luiz #bots ' {human_file('luiz', 'log')}")
+start_ergo()
+start_humans()
 machine.succeed(
     f"install -D -m 400 /dev/null {settings['passwordFile']}",
     f"echo {shlex.quote(BOT['password'])} > {settings['passwordFile']}",

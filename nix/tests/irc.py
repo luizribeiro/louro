@@ -16,12 +16,13 @@ def ergo_api(endpoint, account, password):
     assert json.loads(response)["success"], response
 
 
-def start_ergo(accounts):
-    """Waits for Ergo and registers each account (nick: password)."""
+def start_ergo():
+    """Waits for Ergo and registers the bot's and the humans' accounts."""
     machine.wait_for_unit("ergochat.service")
     machine.wait_for_open_port(settings["ircPort"])
     machine.wait_for_open_port(settings["apiPort"])
-    for account, password in accounts.items():
+    bot = settings["bot"]
+    for account, password in ({bot["user"]: bot["password"]} | settings["humans"]).items():
         ergo_api("saregister", account, password)
 
 
@@ -40,6 +41,16 @@ def until(attempt, predicate):
 def human_file(nick, name):
     """irc-human's FIFO ("in") or log, as irc.nix's service sets them."""
     return f"/run/irc-human-{nick}/{name}"
+
+
+def start_humans():
+    """(Re)starts each human and waits until it is in #bots."""
+    for nick in settings["humans"]:
+        machine.succeed(f"systemctl restart irc-human-{nick}")
+    for nick in settings["humans"]:
+        machine.wait_until_succeeds(
+            f"grep -q ' 366 {nick} #bots ' {human_file(nick, 'log')}", timeout=TIMEOUT
+        )
 
 
 def send_raw(nick, line):

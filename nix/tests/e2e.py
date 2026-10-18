@@ -204,16 +204,7 @@ def say_while_cut_off(channel, text):
     return events_until(from_nick("luiz", text))
 
 
-def start_humans():
-    for nick in settings["humans"]:
-        machine.succeed(f"systemctl restart irc-human-{nick}")
-    for nick in settings["humans"]:
-        machine.wait_until_succeeds(
-            f"grep -q ' 366 {nick} #bots ' {human_file(nick, 'log')}", timeout=TIMEOUT
-        )
-
-
-start_ergo({BOT["user"]: BOT["password"]} | settings["humans"])
+start_ergo()
 start_humans()
 
 with subtest("louro connects, joins #bots, and status shows its grants"):
