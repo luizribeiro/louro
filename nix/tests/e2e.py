@@ -260,6 +260,7 @@ with subtest("louro connects, joins #bots, and status shows its grants"):
     assert connected["nick"] == BOT["user"] and connected["channels"] == ["#bots"], connected
     status = louro("status")
     assert status["nick"] == BOT["user"], status
+    assert status["now"].endswith("Z"), status
     assert status["grants"] == grants(), status
 
 with subtest("chat in #bots reaches wait, marked untrusted, and send reaches #bots"):

@@ -35,6 +35,8 @@ error: exit 0, `timed_out: true`, and no events. Just call `wait` again. The \
 daemon remembers where you left off, so events are never missed and never \
 replayed.
 
+Every result includes `now`, the current time.
+
 More, as granted: `names '#channel'` lists who is there; `history \
 '#channel'` returns earlier chat as events like wait's, without moving \
 wait's place; `send --reply-to MSGID` threads a reply; `react TARGET MSGID \
