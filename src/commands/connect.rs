@@ -102,7 +102,7 @@ fn background(config: &Config) -> Result<Value> {
         .spawn()
         .map_err(|err| cannot_start(&err))?;
     if let (Some(mut stdin), Some(password)) = (daemon.stdin.take(), password) {
-        let _ = stdin.write_all(password.expose().as_bytes());
+        let _ = stdin.write_all(password.expose_bytes());
     }
     let mut line = String::new();
     if let Some(stdout) = daemon.stdout.take() {

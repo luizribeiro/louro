@@ -73,7 +73,7 @@ mod tests {
     fn reads_an_owner_only_file_without_its_newline() {
         let file = password_file(0o600);
         let password = read(&Source::File(file.path().into())).unwrap();
-        assert_eq!(password.expose(), "correct horse battery staple");
+        assert_eq!(password.expose(), Some("correct horse battery staple"));
     }
 
     #[test]

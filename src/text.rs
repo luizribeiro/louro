@@ -82,9 +82,11 @@ pub fn check_one_line(text: &str) -> Result<()> {
 }
 
 /// Refuses `text` if it contains the password, even split across lines, recased, or spaced out.
+///
+/// A byte password can't be matched as text, so it never leaks through this check.
 pub fn check_secret(password: Option<&Secret>, text: &str) -> Result<()> {
-    let leaks = password.is_some_and(|password| {
-        let password = squash(password.expose());
+    let leaks = password.and_then(Secret::expose).is_some_and(|password| {
+        let password = squash(password);
         !password.is_empty() && squash(text).contains(&password)
     });
     if leaks {
@@ -121,6 +123,12 @@ mod tests {
             assert_eq!(error.code, Code::BlockedSecret, "{text:?}");
             assert!(!serde_json::to_string(&error).unwrap().contains(PASSWORD));
         }
+    }
+
+    #[test]
+    fn a_byte_password_never_leaks_as_text() {
+        let password = Secret::from_bytes([0, 159, 146, 150]);
+        assert!(check_secret(Some(&password), "anything at all").is_ok());
     }
 
     #[test]

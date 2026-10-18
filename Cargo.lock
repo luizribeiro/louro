@@ -548,7 +548,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 [[package]]
 name = "papo"
 version = "0.0.0"
-source = "git+https://github.com/luizribeiro/papo?rev=7d93346618c1e28e2ba9db2301551fa008daf397#7d93346618c1e28e2ba9db2301551fa008daf397"
+source = "git+https://github.com/luizribeiro/papo?rev=2509d8ebc9e550c4bffbd0e76350a136ecc5606f#2509d8ebc9e550c4bffbd0e76350a136ecc5606f"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -570,7 +570,7 @@ dependencies = [
 [[package]]
 name = "papo-core"
 version = "0.0.0"
-source = "git+https://github.com/luizribeiro/papo?rev=7d93346618c1e28e2ba9db2301551fa008daf397#7d93346618c1e28e2ba9db2301551fa008daf397"
+source = "git+https://github.com/luizribeiro/papo?rev=2509d8ebc9e550c4bffbd0e76350a136ecc5606f#2509d8ebc9e550c4bffbd0e76350a136ecc5606f"
 dependencies = [
  "base64",
  "hmac",
@@ -583,7 +583,7 @@ dependencies = [
 [[package]]
 name = "papo-proto"
 version = "0.0.0"
-source = "git+https://github.com/luizribeiro/papo?rev=7d93346618c1e28e2ba9db2301551fa008daf397#7d93346618c1e28e2ba9db2301551fa008daf397"
+source = "git+https://github.com/luizribeiro/papo?rev=2509d8ebc9e550c4bffbd0e76350a136ecc5606f#2509d8ebc9e550c4bffbd0e76350a136ecc5606f"
 
 [[package]]
 name = "pbkdf2"
