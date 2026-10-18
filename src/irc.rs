@@ -15,6 +15,7 @@ pub use papo::Secret;
 
 use crate::config::Server;
 use crate::error::{Code, Error, Result};
+use crate::socket::Op;
 use crate::text;
 
 const UPDATES_CAPACITY: usize = 256;
@@ -179,7 +180,7 @@ pub struct Outgoing {
 
 /// Which page of a conversation's history to fetch; `before` and `after` are msgids, RFC 3339
 /// times, or durations ago like `30m`, and with neither it is the latest `limit` messages.
-#[derive(Deserialize, Serialize, clap::Args)]
+#[derive(Clone, Deserialize, Serialize, clap::Args)]
 pub struct HistoryQuery {
     /// How many messages to return, at most 100
     #[arg(long = "latest", default_value = "20", value_name = "N")]
@@ -226,45 +227,24 @@ pub trait Irc: Send + Sync + 'static {
     fn joined(&self, channel: &str) -> bool;
     /// The topic of a channel the bot is in, if it has one.
     fn topic(&self, channel: &str) -> Option<String>;
-    fn set_topic(&self, channel: &str, topic: &str) -> impl Future<Output = Result<()>> + Send;
-    fn join(&self, channel: &str) -> impl Future<Output = Result<()>> + Send;
-    /// Leaves `channel`; an empty reason is omitted.
-    fn part(&self, channel: &str, reason: &str) -> impl Future<Output = Result<()>> + Send;
     /// The members of `channel`, sorted by nick, or `None` if the bot isn't in it.
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
     fn account(&self, nick: &str) -> NickAccount;
     /// Sends one message (several lines become a multiline batch).
     fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send;
-    fn react(
-        &self,
-        target: &str,
-        msgid: &str,
-        reaction: &str,
-        remove: bool,
-    ) -> impl Future<Output = Result<()>> + Send;
-    fn typing(&self, target: &str, state: Typing) -> impl Future<Output = Result<()>> + Send;
+    /// Carries out an op that changes something and returns nothing: join, part, setting a
+    /// topic, react, typing, redact, watch, nick, away or setname. Empty reasons are omitted, and
+    /// a watched nick's presence arrives as [`Update::Presence`].
+    fn act(&self, op: &Op) -> impl Future<Output = Result<()>> + Send;
     /// Fetches chat in `target`, a channel or the nick of a DM conversation, from the server.
     fn history(
         &self,
         target: &str,
         query: HistoryQuery,
     ) -> impl Future<Output = Result<History>> + Send;
-    /// Asks the server to delete the message `msgid` in `target`; an empty reason is omitted.
-    fn redact(
-        &self,
-        target: &str,
-        msgid: &str,
-        reason: &str,
-    ) -> impl Future<Output = Result<()>> + Send;
     fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send;
     /// Earlier users of `nick`, most recent first; empty if the server remembers none.
     fn whowas(&self, nick: &str) -> impl Future<Output = Result<Vec<Whowas>>> + Send;
-    /// Starts or stops watching `nick` with `MONITOR`; its presence then arrives as [`Update::Presence`].
-    fn watch(&self, nick: &str, remove: bool) -> impl Future<Output = Result<()>> + Send;
-    fn set_nick(&self, nick: &str) -> impl Future<Output = Result<()>> + Send;
-    /// Marks the bot away with `text`, or back with `None`.
-    fn set_away(&self, text: Option<&str>) -> impl Future<Output = Result<()>> + Send;
-    fn set_realname(&self, realname: &str) -> impl Future<Output = Result<()>> + Send;
     /// Every channel the server lists.
     fn list(&self) -> impl Future<Output = Result<Vec<Listed>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
@@ -567,18 +547,6 @@ impl Irc for PapoIrc {
             .map(str::to_owned)
     }
 
-    async fn set_topic(&self, channel: &str, topic: &str) -> Result<()> {
-        Ok(self.client.set_topic(channel, topic).await?)
-    }
-
-    async fn join(&self, channel: &str) -> Result<()> {
-        Ok(self.client.join(channel).await?)
-    }
-
-    async fn part(&self, channel: &str, reason: &str) -> Result<()> {
-        Ok(self.client.part(channel, reason).await?)
-    }
-
     fn names(&self, channel: &str) -> Option<Vec<Member>> {
         let state = self.client.state();
         let mut members: Vec<Member> = state
@@ -628,22 +596,55 @@ impl Irc for PapoIrc {
         })
     }
 
-    async fn react(&self, target: &str, msgid: &str, reaction: &str, remove: bool) -> Result<()> {
-        let request = if remove {
-            self.client.unreact(target, msgid, reaction)
-        } else {
-            self.client.react(target, msgid, reaction)
-        };
-        Ok(request.await?)
-    }
-
-    async fn typing(&self, target: &str, state: Typing) -> Result<()> {
-        let state = match state {
-            Typing::Active => papo::Typing::Active,
-            Typing::Paused => papo::Typing::Paused,
-            Typing::Done => papo::Typing::Done,
-        };
-        Ok(self.client.typing(target, state).await?)
+    async fn act(&self, op: &Op) -> Result<()> {
+        let client = &self.client;
+        match op {
+            Op::Join { channel } => client.join(channel).await?,
+            Op::Part { channel, reason } => client.part(channel, reason).await?,
+            Op::Topic {
+                channel,
+                set: Some(topic),
+            } => client.set_topic(channel, topic).await?,
+            Op::React {
+                target,
+                msgid,
+                reaction,
+                remove: false,
+            } => client.react(target, msgid, reaction).await?,
+            Op::React {
+                target,
+                msgid,
+                reaction,
+                remove: true,
+            } => client.unreact(target, msgid, reaction).await?,
+            Op::Typing { target, state } => {
+                let state = match state {
+                    Typing::Active => papo::Typing::Active,
+                    Typing::Paused => papo::Typing::Paused,
+                    Typing::Done => papo::Typing::Done,
+                };
+                client.typing(target, state).await?;
+            }
+            Op::Redact {
+                target,
+                msgid,
+                reason,
+            } => client.redact(target, msgid, reason).await?,
+            Op::Watch {
+                nick,
+                remove: false,
+            } => client.monitor().add([nick]).await?,
+            Op::Watch { nick, remove: true } => client.monitor().remove([nick]).await?,
+            Op::Nick { nick } => client.set_nick(nick).await?,
+            Op::Away {
+                text: Some(text),
+                back: false,
+            } => client.set_away(text).await?,
+            Op::Away { .. } => client.clear_away().await?,
+            Op::Setname { realname } => client.set_realname(realname).await?,
+            _ => unreachable!("the daemon answers this op itself"),
+        }
+        Ok(())
     }
 
     async fn history(&self, target: &str, query: HistoryQuery) -> Result<History> {
@@ -666,10 +667,6 @@ impl Irc for PapoIrc {
                 .collect(),
             complete: page.end,
         })
-    }
-
-    async fn redact(&self, target: &str, msgid: &str, reason: &str) -> Result<()> {
-        Ok(self.client.redact(target, msgid, reason).await?)
     }
 
     async fn whois(&self, nick: &str) -> Result<Whois> {
@@ -699,32 +696,6 @@ impl Irc for PapoIrc {
                 realname: reply.param(5).map(str::to_owned),
             })
             .collect())
-    }
-
-    async fn watch(&self, nick: &str, remove: bool) -> Result<()> {
-        let monitor = self.client.monitor();
-        let request = if remove {
-            monitor.remove([nick])
-        } else {
-            monitor.add([nick])
-        };
-        Ok(request.await?)
-    }
-
-    async fn set_nick(&self, nick: &str) -> Result<()> {
-        Ok(self.client.set_nick(nick).await?)
-    }
-
-    async fn set_away(&self, text: Option<&str>) -> Result<()> {
-        let request = match text {
-            Some(text) => self.client.set_away(text),
-            None => self.client.clear_away(),
-        };
-        Ok(request.await?)
-    }
-
-    async fn set_realname(&self, realname: &str) -> Result<()> {
-        Ok(self.client.set_realname(realname).await?)
     }
 
     async fn list(&self) -> Result<Vec<Listed>> {
