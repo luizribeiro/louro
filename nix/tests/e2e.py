@@ -15,6 +15,7 @@ TIMEOUT = dt.timedelta(minutes=2)
 # How long stopping louro may take, whatever the server does with its QUIT.
 PROMPTLY = dt.timedelta(seconds=6)
 EXIT_CODES = {
+    "usage": 2,
     "too_long": 2,
     "no_session": 3,
     "not_connected": 4,
@@ -63,7 +64,7 @@ def toml_lines(table, prefix=""):
 
 def grants(
     join=("#bots",), dm_read=False, dm_send=False, quit=False, react=False, typing=False,
-    redact=False, topic=False, whois=False, list=False, watch=False,
+    redact=False, topic=False, whois=False, list=False, watch=False, identity=False,
 ):
     return {"irc": {
         "join": [*join],
@@ -76,6 +77,7 @@ def grants(
         "whois": whois,
         "list": list,
         "watch": watch,
+        "identity": identity,
         "quit": quit,
     }}
 
@@ -424,6 +426,23 @@ with running(watch=["luiz", "ghost"]):
         refused("not_allowed", "watch", "mallory")
         louro("watch", "ghost", "--remove")
         assert louro("status")["watching"] == ["luiz"]
+
+with running(identity=True):
+    with subtest("away, setname and nick change how others see louro"):
+
+        def whois_reply(numeric, ending):
+            send_raw("luiz", f"WHOIS {BOT['user']}")
+            received("luiz", lambda _tags, line: f" {numeric} luiz {BOT['user']} " in line and line.endswith(ending))
+
+        louro("away", "back in 5")
+        whois_reply(301, ":back in 5")
+        louro("away", "--back")
+        louro("setname", "louro, a parrot")
+        whois_reply(311, ":louro, a parrot")
+        refused("usage", "nick", "lou\x07ro")
+        louro("nick", "louro-x")
+        received("luiz", lambda _tags, line: line.startswith(f":{BOT['user']}!") and line.endswith(" NICK louro-x"))
+        assert louro("status")["nick"] == "louro-x"
 
 with running(dm_read=["account:luiz"], dm_send=["$first"]):
     with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):

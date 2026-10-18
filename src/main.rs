@@ -44,7 +44,8 @@ wait's place; `send --reply-to MSGID` threads a reply; `react TARGET MSGID \
 message; `topic '#channel'` shows its topic, and `--set TEXT` changes it; \
 `whois NICK` and `whowas NICK` look someone up; `list --match TEXT` finds \
 channels; `join '#channel'` and `part '#channel'` come and go; `watch NICK` \
-brings `presence` events (online or offline) to wait.
+brings `presence` events (online or offline) to wait; `nick NEW`, `away TEXT` \
+(`--back`) and `setname TEXT` change how others see you.
 
 An `invite` event means someone invited you to a channel; louro never \
 joins on its own, so just answer politely if you may.

@@ -88,6 +88,8 @@ pub struct Irc {
     pub list: bool,
     /// Nicks it may watch come online and go offline.
     pub watch: Selector,
+    /// Whether it may change its own nick, away status and realname.
+    pub identity: bool,
     pub quit: bool,
 }
 
@@ -343,7 +345,7 @@ mod tests {
         ] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
-        assert!(!irc.redact && !irc.whois && !irc.list && !irc.quit);
+        assert!(!irc.redact && !irc.whois && !irc.list && !irc.identity && !irc.quit);
         assert_eq!(
             limits.send,
             Limit::Window {

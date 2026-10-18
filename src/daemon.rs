@@ -33,6 +33,9 @@ use crate::text;
 const MAX_HISTORY: usize = 100;
 const SENT_LOG_CAP: usize = 1_000;
 const MAX_TOPIC_CHARS: usize = 300;
+const MAX_NICK_CHARS: usize = 32;
+const MAX_AWAY_CHARS: usize = 200;
+const MAX_REALNAME_CHARS: usize = 100;
 /// The most nicks `watch` follows at once, well under a server's MONITOR limit.
 const MAX_WATCHING: usize = 50;
 /// The most channels a `list` returns, busiest first.
@@ -390,6 +393,11 @@ impl<I: Irc> Daemon<I> {
             Ok(Op::Whois { nick }) => reply(conn, self.whois(&nick).await).await,
             Ok(Op::Whowas { nick }) => reply(conn, self.whowas(&nick).await).await,
             Ok(Op::Watch { nick, remove }) => reply(conn, self.watch(&nick, remove).await).await,
+            Ok(Op::Nick { nick }) => reply(conn, self.set_nick(&nick).await).await,
+            Ok(Op::Away { text, back }) => {
+                reply(conn, self.away(text.as_deref(), back).await).await
+            }
+            Ok(Op::Setname { realname }) => reply(conn, self.setname(&realname).await).await,
             Ok(Op::List { pattern }) => reply(conn, self.list(pattern.as_deref()).await).await,
             Ok(Op::Quit {}) => {
                 let allowed = self.grants.check_quit();
@@ -506,6 +514,39 @@ impl<I: Irc> Daemon<I> {
             watching.insert(nick_key);
         }
         Ok(json!({"nick": nick, "watching": !remove}))
+    }
+
+    async fn set_nick(&self, nick: &str) -> Result<Value> {
+        self.check_identity("a nick", nick, MAX_NICK_CHARS)?;
+        self.irc.set_nick(nick).await?;
+        Ok(json!({"nick": nick}))
+    }
+
+    async fn away(&self, text: Option<&str>, back: bool) -> Result<Value> {
+        let text = if back {
+            None
+        } else {
+            Some(text.ok_or_else(|| Error::new(Code::Usage, "give an away message, or --back"))?)
+        };
+        match text {
+            Some(text) => self.check_identity("an away message", text, MAX_AWAY_CHARS)?,
+            None => self.grants.check_identity()?,
+        }
+        self.irc.set_away(text).await?;
+        Ok(json!({"away": text}))
+    }
+
+    async fn setname(&self, realname: &str) -> Result<Value> {
+        self.check_identity("a realname", realname, MAX_REALNAME_CHARS)?;
+        self.irc.set_realname(realname).await?;
+        Ok(json!({"realname": realname}))
+    }
+
+    /// Others see the bot's nick, away message and realname, so each is checked like a send.
+    fn check_identity(&self, what: &str, value: &str, max_chars: usize) -> Result<()> {
+        text::check_secret(self.password.as_ref(), value)?;
+        self.grants.check_identity()?;
+        text::check_field(what, value, max_chars)
     }
 
     async fn list(&self, pattern: Option<&str>) -> Result<Value> {
@@ -725,6 +766,7 @@ mod tests {
             irc.whois = true
             irc.list = true
             irc.watch = ["luiz", "user*"]
+            irc.identity = true
             "##,
         )
         .unwrap()
@@ -741,6 +783,8 @@ mod tests {
         memberships: Mutex<Vec<String>>,
         /// Each watch, then each unwatch, as "+nick" or "-nick".
         watches: Mutex<Vec<String>>,
+        /// Each identity change, as "nick NEW", "away TEXT", "back" or "realname NEW".
+        identity: Mutex<Vec<String>>,
         history_limits: Mutex<Vec<usize>>,
         redacted: Mutex<Vec<String>>,
         /// Sends get no msgid, as from a server without echo-message.
@@ -905,6 +949,25 @@ mod tests {
             future::ready(Ok(()))
         }
 
+        fn set_nick(&self, nick: &str) -> impl Future<Output = Result<()>> + Send {
+            self.identity.lock().unwrap().push(format!("nick {nick}"));
+            future::ready(Ok(()))
+        }
+
+        fn set_away(&self, text: Option<&str>) -> impl Future<Output = Result<()>> + Send {
+            let change = text.map_or_else(|| "back".into(), |text| format!("away {text}"));
+            self.identity.lock().unwrap().push(change);
+            future::ready(Ok(()))
+        }
+
+        fn set_realname(&self, realname: &str) -> impl Future<Output = Result<()>> + Send {
+            self.identity
+                .lock()
+                .unwrap()
+                .push(format!("realname {realname}"));
+            future::ready(Ok(()))
+        }
+
         fn list(&self) -> impl Future<Output = Result<Vec<Listed>>> + Send {
             let mut channels: Vec<Listed> = (0..250)
                 .map(|users| Listed {
@@ -1062,6 +1125,7 @@ mod tests {
                     "whois": true,
                     "list": true,
                     "watch": ["luiz", "user*"],
+                    "identity": true,
                     "quit": false
                 }},
                 "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s"},
@@ -1859,6 +1923,70 @@ mod tests {
                 (&json!("presence"), &json!("luiz"), &json!("offline")),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn identity_changes_reach_irc_when_granted_and_valid() {
+        let daemon = launch(grants());
+        for (op, args, result) in [
+            ("nick", json!({"nick": "louro_"}), json!({"nick": "louro_"})),
+            (
+                "away",
+                json!({"text": "thinking", "back": false}),
+                json!({"away": "thinking"}),
+            ),
+            (
+                "away",
+                json!({"text": null, "back": true}),
+                json!({"away": null}),
+            ),
+            (
+                "setname",
+                json!({"realname": "louro, a parrot"}),
+                json!({"realname": "louro, a parrot"}),
+            ),
+        ] {
+            let reply = daemon.call(request(op, args)).await;
+            assert_eq!(reply, json!({"Ok": result}), "{op}");
+        }
+        assert_eq!(
+            *daemon.irc.identity.lock().unwrap(),
+            [
+                "nick louro_",
+                "away thinking",
+                "back",
+                "realname louro, a parrot"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_changes_are_refused_without_the_grant_or_with_bad_text() {
+        let daemon = launch(grants());
+        for (op, args, code) in [
+            ("nick", json!({"nick": "lou\u{7}ro"}), "usage"),
+            (
+                "nick",
+                json!({"nick": "x".repeat(MAX_NICK_CHARS + 1)}),
+                "usage",
+            ),
+            (
+                "away",
+                json!({"text": PASSWORD, "back": false}),
+                "blocked_secret",
+            ),
+            ("away", json!({"text": null, "back": false}), "usage"),
+            ("setname", json!({"realname": "two\nlines"}), "usage"),
+        ] {
+            let reply = daemon.call(request(op, args)).await;
+            assert_eq!(reply["Err"]["code"], code, "{op}");
+        }
+        let ungranted = launch(Grants::default());
+        let reply = ungranted
+            .call(request("nick", json!({"nick": "louro_"})))
+            .await;
+        assert_eq!(reply["Err"]["code"], "not_allowed");
+        assert!(daemon.irc.identity.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

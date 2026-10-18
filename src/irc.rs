@@ -260,6 +260,10 @@ pub trait Irc: Send + Sync + 'static {
     fn whowas(&self, nick: &str) -> impl Future<Output = Result<Vec<Whowas>>> + Send;
     /// Starts or stops watching `nick` with `MONITOR`; its presence then arrives as [`Update::Presence`].
     fn watch(&self, nick: &str, remove: bool) -> impl Future<Output = Result<()>> + Send;
+    fn set_nick(&self, nick: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Marks the bot away with `text`, or back with `None`.
+    fn set_away(&self, text: Option<&str>) -> impl Future<Output = Result<()>> + Send;
+    fn set_realname(&self, realname: &str) -> impl Future<Output = Result<()>> + Send;
     /// Every channel the server lists.
     fn list(&self) -> impl Future<Output = Result<Vec<Listed>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
@@ -687,6 +691,22 @@ impl Irc for PapoIrc {
             monitor.add([nick])
         };
         Ok(request.await?)
+    }
+
+    async fn set_nick(&self, nick: &str) -> Result<()> {
+        Ok(self.client.set_nick(nick).await?)
+    }
+
+    async fn set_away(&self, text: Option<&str>) -> Result<()> {
+        let request = match text {
+            Some(text) => self.client.set_away(text),
+            None => self.client.clear_away(),
+        };
+        Ok(request.await?)
+    }
+
+    async fn set_realname(&self, realname: &str) -> Result<()> {
+        Ok(self.client.set_realname(realname).await?)
     }
 
     async fn list(&self) -> Result<Vec<Listed>> {

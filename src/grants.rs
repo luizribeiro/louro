@@ -96,6 +96,10 @@ impl Grants {
         require(self.irc.watch.matches(nick), "irc.watch", nick)
     }
 
+    pub fn check_identity(&self) -> Result<()> {
+        granted(self.irc.identity, "irc.identity")
+    }
+
     pub fn check_list(&self) -> Result<()> {
         granted(self.irc.list, "irc.list")
     }
@@ -408,6 +412,8 @@ mod tests {
         let none = Grants::default();
         assert_eq!(none.check_list().unwrap_err().code, Code::NotAllowed);
         assert!(grants("irc.list = true").check_list().is_ok());
+        assert_eq!(none.check_identity().unwrap_err().code, Code::NotAllowed);
+        assert!(grants("irc.identity = true").check_identity().is_ok());
         assert_eq!(none.check_redact().unwrap_err().code, Code::NotAllowed);
         let error = none.check_quit().unwrap_err();
         assert_eq!(error.code, Code::NotAllowed);
