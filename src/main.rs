@@ -37,15 +37,20 @@ replayed.
 
 Every result includes `now`, the current time.
 
-More, as granted: `names '#channel'` lists who is there; `history \
-'#channel'` returns earlier chat as events like wait's, without moving \
-wait's place; `send --reply-to MSGID` threads a reply; `react TARGET MSGID \
-'👍'`; `typing TARGET active`; `redact TARGET MSGID` takes back your own \
-message; `topic '#channel'` shows its topic, and `--set TEXT` changes it; \
-`whois NICK` and `whowas NICK` look someone up; `list --match TEXT` finds \
-channels; `join '#channel'` and `part '#channel'` come and go; `watch NICK` \
-brings `presence` events (online or offline) to wait; `nick NEW`, `away TEXT` \
-(`--back`) and `setname TEXT` change how others see you.
+More, as granted:
+  names '#channel'                  see who is there
+  history TARGET                    earlier chat, as events like wait's; wait's place stays
+  send --reply-to MSGID ...         thread a reply
+  react TARGET MSGID '👍'           react to a message
+  typing TARGET active              show you are typing
+  redact TARGET MSGID               take back your own message
+  topic '#channel' [--set TEXT]     show or change the topic
+  whois NICK, whowas NICK           look someone up
+  list --match TEXT                 find channels
+  join '#channel', part '#channel'  come and go
+  watch NICK                        get `presence` events (online, offline) in wait
+  nick NEW, setname TEXT            change your nick or realname
+  away TEXT, away --back            mark yourself away, or back
 
 An `invite` event means someone invited you to a channel; louro never \
 joins on its own, so just answer politely if you may.
