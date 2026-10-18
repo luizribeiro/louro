@@ -125,11 +125,14 @@
             text = "cargo nextest run --locked --no-tests=pass";
           };
         };
-        gitHooks = git-hooks.lib.${system}.run {
-          src = ./.;
-          package = pkgs.prek;
-          hooks = offlineHooks // cargoHooks;
-        };
+        runHooks =
+          hooks:
+          git-hooks.lib.${system}.run {
+            src = ./.;
+            package = pkgs.prek;
+            inherit hooks;
+          };
+        gitHooks = runHooks (offlineHooks // cargoHooks);
       in
       {
         packages = {
@@ -139,11 +142,7 @@
 
         checks = {
           inherit louro;
-          pre-commit = git-hooks.lib.${system}.run {
-            src = ./.;
-            package = pkgs.prek;
-            hooks = offlineHooks;
-          };
+          pre-commit = runHooks offlineHooks;
           clippy = craneLib.cargoClippy (
             craneArgs
             // {
