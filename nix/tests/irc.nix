@@ -1,6 +1,11 @@
 # The VM tests' shared part: a node "machine" running Ergo and people on IRC
-# (irc-human.py), each an irc-human-NICK service logged in to its account.
-{ settings, humans }:
+# (irc-human.py), each an irc-human-NICK service logged in to its account, and
+# a test script that runs irc.py, then script.
+{
+  settings,
+  humans,
+  script,
+}:
 { config, lib, ... }:
 let
   pkgs = config.node.pkgs;
@@ -65,4 +70,10 @@ in
     ) humans;
     environment.systemPackages = [ pkgs.curl ];
   };
+
+  testScript = ''
+    settings = ${builtins.toJSON settings}
+    exec(compile(open("${./irc.py}").read(), "nix/tests/irc.py", "exec"))
+    exec(compile(open("${script}").read(), "nix/tests/${baseNameOf script}", "exec"))
+  '';
 }

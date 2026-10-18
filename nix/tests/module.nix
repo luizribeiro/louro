@@ -23,6 +23,7 @@ pkgs.testers.runNixOSTest {
     (import ./irc.nix {
       inherit settings;
       inherit (settings) humans;
+      script = ./module.py;
     })
   ];
 
@@ -53,10 +54,4 @@ pkgs.testers.runNixOSTest {
       stranger.isNormalUser = true;
     };
   };
-
-  testScript = ''
-    settings = ${builtins.toJSON settings}
-    exec(compile(open("${./irc.py}").read(), "nix/tests/irc.py", "exec"))
-    exec(compile(open("${./module.py}").read(), "nix/tests/module.py", "exec"))
-  '';
 }

@@ -27,6 +27,7 @@ pkgs.testers.runNixOSTest (
     imports = [
       (import ./irc.nix {
         inherit settings;
+        script = ./e2e.py;
         # irc-human-louro logs in to the bot's account, to opt it in to always-on.
         humans = settings.humans // {
           ${settings.bot.user} = settings.bot.password;
@@ -38,11 +39,5 @@ pkgs.testers.runNixOSTest (
       users.users.${settings.bot.user}.isNormalUser = true;
       environment.systemPackages = [ packages.${system}.louro ];
     };
-
-    testScript = ''
-      settings = ${builtins.toJSON settings}
-      exec(compile(open("${./irc.py}").read(), "nix/tests/irc.py", "exec"))
-      exec(compile(open("${./e2e.py}").read(), "nix/tests/e2e.py", "exec"))
-    '';
   }
 )
