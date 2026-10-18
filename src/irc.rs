@@ -199,6 +199,7 @@ pub async fn connect(
         .alt_nicks(server.alt_nicks.clone())
         .bot()
         .ctcp_version(Some(CTCP_VERSION))
+        .ctcp_source(env!("CARGO_PKG_REPOSITORY"))
         .autojoin(server.autojoin.clone())
         .history_on_reconnect(true);
     if let Some(username) = &server.username {
