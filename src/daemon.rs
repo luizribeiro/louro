@@ -423,19 +423,14 @@ impl<I: Irc> Daemon<I> {
             .check_also(&self.grants.irc.react, "irc.react", target, &dm)?;
         text::check_msgid(msgid)?;
         text::check_reaction(reaction)?;
-        self.check_react_budget(target)?;
-        self.irc.react(target, msgid, reaction, remove).await?;
-        Ok(json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove}))
-    }
-
-    /// `Err` once `target` has reached `limits.react` within its window; a refused attempt
-    /// never touches the budget.
-    fn check_react_budget(&self, target: &str) -> Result<()> {
-        let now = Instant::now();
-        if let Some(retry_after) = self.react_windows.reserve(target, self.limits.react, now) {
+        if let Some(retry_after) =
+            self.react_windows
+                .reserve(target, self.limits.react, Instant::now())
+        {
             return Err(rate_limited("react", retry_after));
         }
-        Ok(())
+        self.irc.react(target, msgid, reaction, remove).await?;
+        Ok(json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove}))
     }
 
     /// Never touches the inbox, so `wait`'s cursor stays where it was.
