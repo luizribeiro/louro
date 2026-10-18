@@ -87,12 +87,7 @@ impl RateWindows {
         None
     }
 
-    /// Undoes a [`Self::reserve`] reservation for `key` at `now`. A no-op for [`Limit::Off`],
-    /// which never reserved one.
-    fn release(&self, key: &str, limit: Limit, now: Instant) {
-        if !matches!(limit, Limit::Window { .. }) {
-            return;
-        }
+    fn release(&self, key: &str, now: Instant) {
         if let Some(entries) = self.0.lock().unwrap().get_mut(&key.to_ascii_lowercase())
             && let Some(pos) = entries.iter().position(|&t| t == now)
         {
@@ -531,15 +526,15 @@ impl<I: Irc> Daemon<I> {
             return Err(rate_limited("send", retry_after));
         }
         if let Some(retry_after) = self.send_total.reserve(TOTAL, self.limits.send_total, now) {
-            self.send_windows.release(target, self.limits.send, now);
+            self.send_windows.release(target, now);
             return Err(rate_limited("send", retry_after));
         }
         Ok(now)
     }
 
     fn release_send_budget(&self, target: &str, now: Instant) {
-        self.send_windows.release(target, self.limits.send, now);
-        self.send_total.release(TOTAL, self.limits.send_total, now);
+        self.send_windows.release(target, now);
+        self.send_total.release(TOTAL, now);
     }
 }
 
