@@ -62,8 +62,10 @@ pkgs.testers.runNixOSTest (
           channels.default-modes = "+n";
           # Ergo offers draft/message-redaction only with this on.
           history.retention.allow-individual-delete = true;
-          # Ergo remembers no one for WHOWAS without this; 100 is its own default.yaml's.
+          # Without these, Ergo remembers no one for WHOWAS and offers MONITOR=0; 100 is its
+          # own default.yaml's.
           limits.whowas-entries = 100;
+          limits.monitor-entries = 100;
           # Sized to Ergo's own default.yaml, so Ergo advertises draft/multiline for papo to negotiate.
           limits.multiline = {
             max-bytes = 4096;

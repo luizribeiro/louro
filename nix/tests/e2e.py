@@ -63,7 +63,7 @@ def toml_lines(table, prefix=""):
 
 def grants(
     join=("#bots",), dm_read=False, dm_send=False, quit=False, react=False, typing=False,
-    redact=False, topic=False, whois=False, list=False,
+    redact=False, topic=False, whois=False, list=False, watch=False,
 ):
     return {"irc": {
         "join": [*join],
@@ -75,6 +75,7 @@ def grants(
         "topic": topic,
         "whois": whois,
         "list": list,
+        "watch": watch,
         "quit": quit,
     }}
 
@@ -408,6 +409,21 @@ with running(join=["#bots", "#help-*"]):
         louro_until(lambda status: "#help-rust" not in status["channels"], "status")
         error = refused("not_allowed", "part", "#help-rust")
         assert error["message"] == "louro is not in #help-rust", error
+
+with running(watch=["luiz", "ghost"]):
+    with subtest("watch reports luiz online and ghost offline, and status lists both"):
+        louro("watch", "luiz")
+        louro("watch", "ghost")
+
+        def presence(events):
+            return {(event["nick"], event["state"]) for event in events if event["type"] == "presence"}
+
+        events = events_until(lambda events: {("luiz", "online"), ("ghost", "offline")} <= presence(events))
+        assert all(event["untrusted"] for event in events if event["type"] == "presence"), events
+        assert louro("status")["watching"] == ["ghost", "luiz"]
+        refused("not_allowed", "watch", "mallory")
+        louro("watch", "ghost", "--remove")
+        assert louro("status")["watching"] == ["luiz"]
 
 with running(dm_read=["account:luiz"], dm_send=["$first"]):
     with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):

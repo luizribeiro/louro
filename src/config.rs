@@ -86,6 +86,8 @@ pub struct Irc {
     pub whois: bool,
     /// Whether it may list the server's channels.
     pub list: bool,
+    /// Nicks it may watch come online and go offline.
+    pub watch: Selector,
     pub quit: bool,
 }
 
@@ -337,6 +339,7 @@ mod tests {
             &irc.react,
             &irc.typing,
             &irc.topic,
+            &irc.watch,
         ] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }

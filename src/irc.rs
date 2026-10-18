@@ -37,6 +37,11 @@ pub enum Update {
     },
     /// Registration completed, first at connect and again after each reconnect.
     Registered,
+    /// A watched nick came online, or went offline.
+    Presence {
+        nick: String,
+        online: bool,
+    },
     /// Someone invited the bot to `channel`; louro never joins on its own.
     Invited {
         from: Sender,
@@ -253,6 +258,8 @@ pub trait Irc: Send + Sync + 'static {
     fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send;
     /// Earlier users of `nick`, most recent first; empty if the server remembers none.
     fn whowas(&self, nick: &str) -> impl Future<Output = Result<Vec<Whowas>>> + Send;
+    /// Starts or stops watching `nick` with `MONITOR`; its presence then arrives as [`Update::Presence`].
+    fn watch(&self, nick: &str, remove: bool) -> impl Future<Output = Result<()>> + Send;
     /// Every channel the server lists.
     fn list(&self) -> impl Future<Output = Result<Vec<Listed>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
@@ -398,6 +405,14 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             })
             .into_iter()
             .collect(),
+        Event::MonitorOnline(online) => vec![Update::Presence {
+            nick: online.nick.to_string(),
+            online: true,
+        }],
+        Event::MonitorOffline(offline) => vec![Update::Presence {
+            nick: offline.nick.to_string(),
+            online: false,
+        }],
         Event::Disconnected(disconnected) => vec![Update::Disconnected {
             cause: disconnected.cause.to_string(),
             retry_in: disconnected.retry_in.map(whole_seconds),
@@ -662,6 +677,16 @@ impl Irc for PapoIrc {
                 realname: reply.param(5).map(str::to_owned),
             })
             .collect())
+    }
+
+    async fn watch(&self, nick: &str, remove: bool) -> Result<()> {
+        let monitor = self.client.monitor();
+        let request = if remove {
+            monitor.remove([nick])
+        } else {
+            monitor.add([nick])
+        };
+        Ok(request.await?)
     }
 
     async fn list(&self) -> Result<Vec<Listed>> {

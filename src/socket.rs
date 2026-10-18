@@ -13,7 +13,7 @@ use tokio::net::UnixStream;
 use crate::error::{Code, Error, Result};
 use crate::irc::{HistoryQuery, Outgoing, Typing};
 
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 
 #[derive(Deserialize, Serialize)]
 pub struct Request {
@@ -114,6 +114,14 @@ pub enum Op {
     Whowas {
         /// The nick
         nick: String,
+    },
+    /// Watch a nick: `wait` then reports when it comes online or goes offline
+    Watch {
+        /// The nick
+        nick: String,
+        /// Stop watching it instead
+        #[arg(long)]
+        remove: bool,
     },
     /// Channels on the server, busiest first, with their topics
     List {
@@ -284,14 +292,14 @@ mod tests {
         let cases = [
             (
                 request(Op::Status {}),
-                "{\"v\":5,\"op\":\"status\",\"args\":{}}",
+                "{\"v\":6,\"op\":\"status\",\"args\":{}}",
             ),
             (
                 request(Op::Wait {
                     timeout: 60,
                     max: NonZeroUsize::new(20).unwrap(),
                 }),
-                "{\"v\":5,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
+                "{\"v\":6,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
             ),
             (
                 request(Op::Send(Outgoing {
@@ -300,33 +308,33 @@ mod tests {
                     text: "hi there".into(),
                     reply_to: Some("4y8kq7j2c9mnz".into()),
                 })),
-                "{\"v\":5,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
+                "{\"v\":6,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
             ),
             (
                 request(Op::Names {
                     channel: "#bots".into(),
                 }),
-                "{\"v\":5,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
+                "{\"v\":6,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
             ),
             (
                 request(Op::Topic {
                     channel: "#bots".into(),
                     set: Some("louro's test channel".into()),
                 }),
-                "{\"v\":5,\"op\":\"topic\",\"args\":{\"channel\":\"#bots\",\"set\":\"louro's test channel\"}}",
+                "{\"v\":6,\"op\":\"topic\",\"args\":{\"channel\":\"#bots\",\"set\":\"louro's test channel\"}}",
             ),
             (
                 request(Op::Join {
                     channel: "#help-rust".into(),
                 }),
-                "{\"v\":5,\"op\":\"join\",\"args\":{\"channel\":\"#help-rust\"}}",
+                "{\"v\":6,\"op\":\"join\",\"args\":{\"channel\":\"#help-rust\"}}",
             ),
             (
                 request(Op::Part {
                     channel: "#help-rust".into(),
                     reason: "answered".into(),
                 }),
-                "{\"v\":5,\"op\":\"part\",\"args\":{\"channel\":\"#help-rust\",\"reason\":\"answered\"}}",
+                "{\"v\":6,\"op\":\"part\",\"args\":{\"channel\":\"#help-rust\",\"reason\":\"answered\"}}",
             ),
             (
                 request(Op::React {
@@ -335,14 +343,14 @@ mod tests {
                     reaction: "+1".into(),
                     remove: false,
                 }),
-                "{\"v\":5,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
+                "{\"v\":6,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
             ),
             (
                 request(Op::Typing {
                     target: "#bots".into(),
                     state: Typing::Active,
                 }),
-                "{\"v\":5,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
+                "{\"v\":6,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
             ),
             (
                 request(Op::Redact {
@@ -350,7 +358,7 @@ mod tests {
                     msgid: "4y8kq7j2c9mnz".into(),
                     reason: "typo".into(),
                 }),
-                "{\"v\":5,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
+                "{\"v\":6,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
             ),
             (
                 request(Op::History {
@@ -361,29 +369,36 @@ mod tests {
                         after: None,
                     },
                 }),
-                "{\"v\":5,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null}}",
+                "{\"v\":6,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null}}",
             ),
             (
                 request(Op::Whois {
                     nick: "luiz".into(),
                 }),
-                "{\"v\":5,\"op\":\"whois\",\"args\":{\"nick\":\"luiz\"}}",
+                "{\"v\":6,\"op\":\"whois\",\"args\":{\"nick\":\"luiz\"}}",
             ),
             (
                 request(Op::Whowas {
                     nick: "luiz".into(),
                 }),
-                "{\"v\":5,\"op\":\"whowas\",\"args\":{\"nick\":\"luiz\"}}",
+                "{\"v\":6,\"op\":\"whowas\",\"args\":{\"nick\":\"luiz\"}}",
+            ),
+            (
+                request(Op::Watch {
+                    nick: "luiz".into(),
+                    remove: false,
+                }),
+                "{\"v\":6,\"op\":\"watch\",\"args\":{\"nick\":\"luiz\",\"remove\":false}}",
             ),
             (
                 request(Op::List {
                     pattern: Some("rust".into()),
                 }),
-                "{\"v\":5,\"op\":\"list\",\"args\":{\"pattern\":\"rust\"}}",
+                "{\"v\":6,\"op\":\"list\",\"args\":{\"pattern\":\"rust\"}}",
             ),
             (
                 request(Op::Quit {}),
-                "{\"v\":5,\"op\":\"quit\",\"args\":{}}",
+                "{\"v\":6,\"op\":\"quit\",\"args\":{}}",
             ),
             (
                 serde_json::to_string(&Ack { ack: true }).unwrap(),

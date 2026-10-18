@@ -40,6 +40,11 @@ enum Body {
         invite: Invite,
         untrusted: bool,
     },
+    Presence {
+        #[serde(flatten)]
+        presence: Presence,
+        untrusted: bool,
+    },
 }
 
 impl Body {
@@ -61,6 +66,22 @@ pub struct Invite {
     pub time: String,
     pub from: Sender,
     pub channel: String,
+}
+
+/// A nick the agent watches came online or went offline.
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename = "presence")]
+pub struct Presence {
+    pub time: String,
+    pub nick: String,
+    pub state: PresenceState,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Online,
+    Offline,
 }
 
 /// louro's own report that the IRC connection dropped or came back; not chat, so not untrusted.
@@ -153,6 +174,17 @@ impl Inbox {
         });
     }
 
+    pub fn push_presence(&self, presence: Presence) {
+        let presence = Presence {
+            nick: text::clean(&presence.nick),
+            ..presence
+        };
+        self.push_body(Body::Presence {
+            presence,
+            untrusted: true,
+        });
+    }
+
     fn push_body(&self, body: Body) {
         self.buffer.lock().unwrap().push(body);
         self.arrived.notify_waiters();
@@ -235,6 +267,24 @@ mod tests {
                 {"id": 1, "type": "invite", "time": "2026-10-16T21:05:00Z",
                  "from": {"nick": "luiz", "account": "luiz", "away": false, "bot": false},
                  "channel": "#lounge[2J", "untrusted": true},
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_is_sanitized_and_untrusted() {
+        let inbox = Inbox::default();
+        inbox.push_presence(Presence {
+            time: "2026-10-16T21:05:00.000Z".into(),
+            nick: "lu\u{7}iz".into(),
+            state: PresenceState::Online,
+        });
+        let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
+        assert_eq!(
+            batch["events"],
+            serde_json::json!([
+                {"id": 1, "type": "presence", "time": "2026-10-16T21:05:00.000Z",
+                 "nick": "luiz", "state": "online", "untrusted": true},
             ])
         );
     }

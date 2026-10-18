@@ -91,6 +91,11 @@ impl Grants {
         require(self.irc.topic.matches(channel), "irc.topic", channel)
     }
 
+    pub fn check_watch(&self, nick: &str) -> Result<()> {
+        expect_kind(nick, TargetKind::Nick)?;
+        require(self.irc.watch.matches(nick), "irc.watch", nick)
+    }
+
     pub fn check_list(&self) -> Result<()> {
         granted(self.irc.list, "irc.list")
     }
@@ -372,6 +377,18 @@ mod tests {
         let everywhere = grants("irc.join = true");
         let error = everywhere.check_join("maria").unwrap_err();
         assert_eq!(error.message, "maria is not a channel");
+    }
+
+    #[test]
+    fn watches_only_nicks_that_irc_watch_grants() {
+        let grants = grants(r#"irc.watch = ["luiz", "maria*"]"#);
+        for nick in ["Luiz", "maria_"] {
+            assert!(grants.check_watch(nick).is_ok(), "{nick}");
+        }
+        for target in ["mallory", "#bots", "luiz,mallory"] {
+            let error = grants.check_watch(target).unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{target}");
+        }
     }
 
     #[test]

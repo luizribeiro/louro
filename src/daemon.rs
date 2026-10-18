@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::DirBuilder;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::path::Path;
@@ -20,7 +20,7 @@ use tokio::time::Instant;
 use crate::config::{Config, Grants, Limit, Limits};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
-use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE};
+use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE, Presence, PresenceState};
 use crate::irc::{
     self, History, HistoryQuery, Incoming, Irc, Listed, Member, Outgoing, Secret, Sender, Typing,
     Update, Whowas, now, whole_seconds,
@@ -33,6 +33,8 @@ use crate::text;
 const MAX_HISTORY: usize = 100;
 const SENT_LOG_CAP: usize = 1_000;
 const MAX_TOPIC_CHARS: usize = 300;
+/// The most nicks `watch` follows at once, well under a server's MONITOR limit.
+const MAX_WATCHING: usize = 50;
 /// The most channels a `list` returns, busiest first.
 const MAX_LIST: usize = 200;
 
@@ -110,6 +112,8 @@ struct Daemon<I> {
     /// By lowercased nick, what DMs that reached the agent say, for `$first` and `account:`.
     dm_senders: Mutex<HashMap<String, DmHistory>>,
     sent: Mutex<SentLog>,
+    /// Lowercased nicks the agent asked to `watch`.
+    watching: Mutex<BTreeSet<String>>,
     last_error: Mutex<Option<Problem>>,
     /// Set from a disconnect until the next registration, so the agent hears of each outage once.
     offline: AtomicBool,
@@ -141,6 +145,7 @@ pub async fn run(
         inbox: Inbox::default(),
         dm_senders: Mutex::default(),
         sent: Mutex::default(),
+        watching: Mutex::default(),
         last_error: Mutex::default(),
         offline: AtomicBool::new(false),
         quit: Notify::new(),
@@ -261,6 +266,15 @@ impl<I: Irc> Daemon<I> {
                     self.report_connection(ConnectionState::Reconnected, None);
                 }
             }
+            Update::Presence { nick, online } => self.inbox.push_presence(Presence {
+                time: now(),
+                nick,
+                state: if online {
+                    PresenceState::Online
+                } else {
+                    PresenceState::Offline
+                },
+            }),
             Update::Invited { from, channel } => self.inbox.push_invite(Invite {
                 time: now(),
                 from,
@@ -375,6 +389,7 @@ impl<I: Irc> Daemon<I> {
             }
             Ok(Op::Whois { nick }) => reply(conn, self.whois(&nick).await).await,
             Ok(Op::Whowas { nick }) => reply(conn, self.whowas(&nick).await).await,
+            Ok(Op::Watch { nick, remove }) => reply(conn, self.watch(&nick, remove).await).await,
             Ok(Op::List { pattern }) => reply(conn, self.list(pattern.as_deref()).await).await,
             Ok(Op::Quit {}) => {
                 let allowed = self.grants.check_quit();
@@ -392,6 +407,7 @@ impl<I: Irc> Daemon<I> {
         let mut status = json!(self.irc.status());
         status["grants"] = json!(self.grants);
         status["limits"] = json!(self.limits);
+        status["watching"] = json!(*self.watching.lock().unwrap());
         status["last_error"] = json!(*self.last_error.lock().unwrap());
         status
     }
@@ -466,6 +482,30 @@ impl<I: Irc> Daemon<I> {
             .map(Whowas::sanitized)
             .collect();
         Ok(json!({"nick": nick, "entries": entries, "untrusted": true}))
+    }
+
+    async fn watch(&self, nick: &str, remove: bool) -> Result<Value> {
+        self.grants.check_watch(nick)?;
+        let nick_key = nick.to_ascii_lowercase();
+        let full = {
+            let watching = self.watching.lock().unwrap();
+            !remove && !watching.contains(&nick_key) && watching.len() >= MAX_WATCHING
+        };
+        if full {
+            return Err(Error::new(
+                Code::NotAllowed,
+                format!("louro watches at most {MAX_WATCHING} nicks"),
+            )
+            .with_hint("stop watching one with `louro watch NICK --remove`"));
+        }
+        self.irc.watch(nick, remove).await?;
+        let mut watching = self.watching.lock().unwrap();
+        if remove {
+            watching.remove(&nick_key);
+        } else {
+            watching.insert(nick_key);
+        }
+        Ok(json!({"nick": nick, "watching": !remove}))
     }
 
     async fn list(&self, pattern: Option<&str>) -> Result<Value> {
@@ -684,6 +724,7 @@ mod tests {
             irc.topic = ["#bots"]
             irc.whois = true
             irc.list = true
+            irc.watch = ["luiz", "user*"]
             "##,
         )
         .unwrap()
@@ -698,6 +739,8 @@ mod tests {
         topics: Mutex<Vec<String>>,
         /// Each join, then each part, as "+#channel" or "-#channel".
         memberships: Mutex<Vec<String>>,
+        /// Each watch, then each unwatch, as "+nick" or "-nick".
+        watches: Mutex<Vec<String>>,
         history_limits: Mutex<Vec<usize>>,
         redacted: Mutex<Vec<String>>,
         /// Sends get no msgid, as from a server without echo-message.
@@ -856,6 +899,12 @@ mod tests {
             }]))
         }
 
+        fn watch(&self, nick: &str, remove: bool) -> impl Future<Output = Result<()>> + Send {
+            let sign = if remove { '-' } else { '+' };
+            self.watches.lock().unwrap().push(format!("{sign}{nick}"));
+            future::ready(Ok(()))
+        }
+
         fn list(&self) -> impl Future<Output = Result<Vec<Listed>>> + Send {
             let mut channels: Vec<Listed> = (0..250)
                 .map(|users| Listed {
@@ -1012,9 +1061,11 @@ mod tests {
                     "topic": ["#bots"],
                     "whois": true,
                     "list": true,
+                    "watch": ["luiz", "user*"],
                     "quit": false
                 }},
                 "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s"},
+                "watching": [],
                 "last_error": null
             }})
         );
@@ -1751,6 +1802,63 @@ mod tests {
             .await;
         assert_eq!(reply["Err"]["message"], "louro is not in #help-rust");
         assert!(daemon.irc.memberships.lock().unwrap().is_empty());
+    }
+
+    fn watch_request(nick: &str, remove: bool) -> Value {
+        request("watch", json!({"nick": nick, "remove": remove}))
+    }
+
+    #[tokio::test]
+    async fn watch_follows_granted_nicks_and_status_lists_them() {
+        let daemon = launch(grants());
+        for (nick, remove) in [("Luiz", false), ("user1", false), ("user1", true)] {
+            let reply = daemon.call(watch_request(nick, remove)).await;
+            assert_eq!(reply["Ok"]["watching"], !remove, "{nick}");
+        }
+        let refused = daemon.call(watch_request("mallory", false)).await;
+        assert_eq!(refused["Err"]["code"], "not_allowed");
+        assert_eq!(daemon.status().await["Ok"]["watching"], json!(["luiz"]));
+        assert_eq!(
+            *daemon.irc.watches.lock().unwrap(),
+            ["+Luiz", "+user1", "-user1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_refuses_a_nick_past_its_cap() {
+        let daemon = launch(grants());
+        for n in 0..MAX_WATCHING {
+            let reply = daemon.call(watch_request(&format!("user{n}"), false)).await;
+            assert!(reply["Ok"].is_object(), "{n}: {reply}");
+        }
+        let full = daemon.call(watch_request("luiz", false)).await;
+        assert_eq!(full["Err"]["code"], "not_allowed");
+        let again = daemon.call(watch_request("user0", false)).await;
+        assert!(again["Ok"].is_object(), "{again}");
+    }
+
+    #[tokio::test]
+    async fn wait_reports_a_watched_nick_coming_online() {
+        let daemon = launch(Grants::default());
+        let presence = |online| Update::Presence {
+            nick: "luiz".into(),
+            online,
+        };
+        daemon.update(presence(true)).await;
+        daemon.update(presence(false)).await;
+        let (_, reply) = daemon.wait(5).await;
+        let events = reply["Ok"]["events"].as_array().unwrap();
+        let states: Vec<_> = events
+            .iter()
+            .map(|event| (&event["type"], &event["nick"], &event["state"]))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                (&json!("presence"), &json!("luiz"), &json!("online")),
+                (&json!("presence"), &json!("luiz"), &json!("offline")),
+            ]
+        );
     }
 
     #[tokio::test]
