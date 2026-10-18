@@ -311,6 +311,17 @@ fn connect_code(error: &papo::Error) -> Code {
     }
 }
 
+/// An unknown nick gets a plain, actionable message naming it, rather than a generic server
+/// error the agent can't act on.
+fn whois_error(nick: &str, error: papo::Error) -> Error {
+    match error {
+        papo::Error::Server(refusal) if refusal.kind() == Refusal::NoSuchNick => {
+            Error::new(Code::Usage, format!("no such nick: {nick}"))
+        }
+        error => error.into(),
+    }
+}
+
 async fn forward(client: Client, mut events: Events, updates: mpsc::Sender<Update>) {
     while let Some(event) = events.next().await {
         for update in to_updates(event, &client.state()) {
@@ -635,12 +646,11 @@ impl Irc for PapoIrc {
     }
 
     async fn whois(&self, nick: &str) -> Result<Whois> {
-        let whois = self.client.whois(nick).await.map_err(|error| match error {
-            papo::Error::Server(refusal) if refusal.kind() == Refusal::NoSuchNick => {
-                Error::new(Code::Usage, format!("no such nick: {nick}"))
-            }
-            error => error.into(),
-        })?;
+        let whois = self
+            .client
+            .whois(nick)
+            .await
+            .map_err(|error| whois_error(nick, error))?;
         Ok(Whois {
             nick: whois.nick.to_string(),
             account: whois.account.map(|account| account.to_string()),
@@ -757,7 +767,9 @@ pub mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use papo::{Disconnected, InvalidInput, Unsupported, UnsupportedReason};
+    use papo::{
+        ConnectError, Disconnected, InvalidInput, ServerError, Unsupported, UnsupportedReason,
+    };
 
     use super::*;
 
@@ -921,6 +933,13 @@ mod tests {
     #[test]
     fn papo_errors_map_to_louro_codes() {
         let lost = Disconnected::new(DisconnectCause::ConnectionLost, None);
+        let cannot_send = ServerError::numeric(404, vec!["#rust".into(), "Cannot send".into()]);
+        let invalid_params = ServerError::standard(
+            "CHATHISTORY",
+            "INVALID_PARAMS",
+            vec!["LATEST".into()],
+            "Invalid parameters",
+        );
         for (error, code) in [
             (papo::Error::Disconnected(lost), Code::NotConnected),
             (papo::Error::Timeout, Code::RequestTimeout),
@@ -941,11 +960,72 @@ mod tests {
                 },
                 Code::ServerError,
             ),
+            (papo::Error::Server(cannot_send), Code::ServerError),
+            (papo::Error::Server(invalid_params), Code::ServerError),
         ] {
             assert_eq!(Error::from(error).code, code);
         }
-        let refused = papo::Error::Registration(RegistrationError::AccountRequired);
-        assert_eq!(connect_code(&refused), Code::AuthFailed);
+    }
+
+    #[test]
+    fn papo_connect_failures_map_to_louro_codes() {
+        for (error, code) in [
+            (
+                papo::Error::Registration(RegistrationError::Sasl {
+                    message: "Invalid credentials".into(),
+                }),
+                Code::AuthFailed,
+            ),
+            (
+                papo::Error::Registration(RegistrationError::AccountRequired),
+                Code::AuthFailed,
+            ),
+            (
+                papo::Error::Registration(RegistrationError::Timeout),
+                Code::ConnectFailed,
+            ),
+            (
+                papo::Error::Connect(ConnectError::new(
+                    ConnectErrorKind::CertificateRejected,
+                    "self-signed certificate",
+                )),
+                Code::Tls,
+            ),
+            (
+                papo::Error::Connect(ConnectError::new(
+                    ConnectErrorKind::HandshakeFailed,
+                    "TLS handshake failed",
+                )),
+                Code::Tls,
+            ),
+            (
+                papo::Error::Connect(ConnectError::new(
+                    ConnectErrorKind::HostNotFound,
+                    "no such host",
+                )),
+                Code::ConnectFailed,
+            ),
+        ] {
+            assert_eq!(connect_code(&error), code);
+        }
+    }
+
+    #[test]
+    fn whois_on_an_unknown_nick_is_a_clear_usage_error() {
+        let no_such_nick = papo::Error::Server(ServerError::numeric(
+            401,
+            vec!["nosuchperson".into(), "No such nick/channel".into()],
+        ));
+        let error = whois_error("nosuchperson", no_such_nick);
+        assert_eq!(error.code, Code::Usage);
+        assert_eq!(error.message, "no such nick: nosuchperson");
+
+        let cannot_send =
+            papo::Error::Server(ServerError::numeric(404, vec!["#rust".into(), "x".into()]));
+        assert_eq!(
+            whois_error("nosuchperson", cannot_send).code,
+            Code::ServerError
+        );
     }
 
     #[test]
