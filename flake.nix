@@ -75,7 +75,6 @@
             text,
             runtimeInputs ? [ ],
             files ? "(^|/)(Cargo\\.(toml|lock)|.*\\.rs)$",
-            stages ? [ "pre-commit" ],
           }:
           {
             enable = true;
@@ -85,7 +84,7 @@
                 runtimeInputs = [ toolchain ] ++ runtimeInputs;
               }
             }/bin/${name}";
-            inherit files stages;
+            inherit files;
             pass_filenames = false;
           };
         offlineHooks = {
