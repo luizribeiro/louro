@@ -109,18 +109,18 @@ pub struct Outgoing {
     pub reply_to: Option<String>,
 }
 
-/// Which page of a conversation's history to fetch; `before` and `after` are msgids or
-/// RFC 3339 times, and with neither it is the latest `limit` messages.
+/// Which page of a conversation's history to fetch; `before` and `after` are msgids, RFC 3339
+/// times, or durations ago like `30m`, and with neither it is the latest `limit` messages.
 #[derive(Deserialize, Serialize, clap::Args)]
 pub struct HistoryQuery {
     /// How many messages to return, at most 100
     #[arg(long = "latest", default_value = "20", value_name = "N")]
     pub limit: usize,
-    /// Only messages before this msgid or RFC 3339 time
-    #[arg(long, value_name = "MSGID|TIME")]
+    /// Only messages before this msgid, RFC 3339 time, or time ago like `30m`
+    #[arg(long, value_name = "MSGID|TIME|AGO")]
     pub before: Option<String>,
-    /// Only messages after this msgid or RFC 3339 time
-    #[arg(long, value_name = "MSGID|TIME")]
+    /// Only messages after this msgid, RFC 3339 time, or time ago like `30m`
+    #[arg(long, value_name = "MSGID|TIME|AGO")]
     pub after: Option<String>,
 }
 
@@ -406,11 +406,18 @@ fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option
 }
 
 fn history_reference(raw: &str) -> Result<HistoryReference> {
-    if let Ok(time) = humantime::parse_rfc3339_weak(raw) {
+    if let Some(time) = history_time(raw, SystemTime::now()) {
         return Ok(time.into());
     }
     text::check_msgid(raw)?;
     Ok(raw.into())
+}
+
+/// An RFC 3339 time, or a duration like `30m` meaning that long before `now`.
+fn history_time(raw: &str, now: SystemTime) -> Option<SystemTime> {
+    humantime::parse_rfc3339_weak(raw)
+        .ok()
+        .or_else(|| now.checked_sub(humantime::parse_duration(raw).ok()?))
 }
 
 /// papo marks our own echoes and other sessions only on live messages, so history from this
@@ -630,16 +637,27 @@ mod tests {
     }
 
     #[test]
-    fn a_history_reference_is_a_time_or_a_msgid() {
+    fn a_history_reference_is_a_time_a_time_ago_or_a_msgid() {
         for raw in [
             "2026-10-16T21:04:11Z",
             "2026-10-16T21:04:11.392Z",
+            "30m",
             "4y8kq7j2c9mnz",
         ] {
             assert!(history_reference(raw).is_ok(), "{raw}");
         }
         let error = history_reference("4y8k q7j2").err().unwrap();
         assert_eq!(error.code, Code::Usage);
+    }
+
+    #[test]
+    fn a_history_time_is_absolute_or_that_long_ago() {
+        let now = humantime::parse_rfc3339("2026-10-16T21:34:11Z").unwrap();
+        let earlier = humantime::parse_rfc3339("2026-10-16T21:04:11Z").unwrap();
+        for raw in ["2026-10-16T21:04:11Z", "30m", "1800s", "29m 60s"] {
+            assert_eq!(history_time(raw, now), Some(earlier), "{raw}");
+        }
+        assert_eq!(history_time("4y8kq7j2c9mnz", now), None);
     }
 
     #[test]
