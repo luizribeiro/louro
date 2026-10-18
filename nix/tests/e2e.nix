@@ -60,6 +60,11 @@ pkgs.testers.runNixOSTest (
           fakelag.enabled = false;
           # Ergo offers draft/message-redaction only with this on.
           history.retention.allow-individual-delete = true;
+          # Sized to Ergo's own default.yaml, so Ergo advertises draft/multiline for papo to negotiate.
+          limits.multiline = {
+            max-bytes = 4096;
+            max-lines = 100;
+          };
           api = {
             enabled = true;
             listener = "127.0.0.1:${toString settings.apiPort}";

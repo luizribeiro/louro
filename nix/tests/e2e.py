@@ -336,6 +336,27 @@ with running(react=["#bots"], typing=["#bots"], redact=True):
         [mine] = say("luiz", "#bots", "please don't redact me")
         refused("not_allowed", "redact", "#bots", mine["msgid"])
 
+with running(redact=True):
+    # A fresh daemon, since this subtest's 3 sends to #bots use the whole per-target budget.
+    with subtest("sends get real msgids with multiline enabled, and reply-to/redact still work"):
+        single = louro("send", "#bots", "a single line of text")
+        assert single["msgid"], single
+        heard("luiz", "#bots", "a single line of text")
+
+        lines = ["first line of a multiline send", "second line", "third line"]
+        multi = louro("send", "#bots", "\n".join(lines))
+        assert multi["msgid"] and multi["lines"] == len(lines), multi
+        for line in lines:
+            heard("luiz", "#bots", line)
+
+        reply = louro("send", "#bots", "--reply-to", multi["msgid"], "replying to the multiline send")
+        assert reply["threaded"] and reply["msgid"], reply
+        tags = heard("luiz", "#bots", "replying to the multiline send")
+        assert reply_tag(tags) == multi["msgid"], tags
+
+        louro("redact", "#bots", multi["msgid"], "--reason", "multiline test cleanup")
+        assert "\n".join(lines) not in texts(louro("history", "#bots"))
+
 with running(dm_read=["account:luiz"], dm_send=["$first"]):
     with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):
         refused("not_allowed", "send", "luiz", "hi")
