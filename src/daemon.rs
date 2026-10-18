@@ -408,10 +408,7 @@ impl<I: Irc> Daemon<I> {
         let Some(topic) = set else {
             self.grants.check_join(channel)?;
             self.require_joined(channel)?;
-            let topic = self
-                .irc
-                .topic(channel)
-                .map(|topic| text::sanitize(&topic).0);
+            let topic = self.irc.topic(channel).map(|topic| text::clean(&topic));
             return Ok(json!({"channel": channel, "topic": topic, "untrusted": true}));
         };
         text::check_secret(self.password.as_ref(), &topic)?;

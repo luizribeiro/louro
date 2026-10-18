@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use tokio::time::{self, Instant};
 
 use crate::irc::{Incoming, Sender};
-use crate::text::sanitize;
+use crate::text::{self, sanitize};
 
 const BUFFER_CAP: usize = 10_000;
 pub const NOTICE: &str =
@@ -144,7 +144,7 @@ impl Inbox {
     pub fn push_invite(&self, invite: Invite) {
         let invite = Invite {
             from: invite.from.sanitized(),
-            channel: sanitize(&invite.channel).0,
+            channel: text::clean(&invite.channel),
             ..invite
         };
         self.push_body(Body::Invite {

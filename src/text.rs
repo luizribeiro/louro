@@ -27,6 +27,11 @@ pub fn sanitize(text: &str) -> (String, bool) {
     }
 }
 
+/// Text from the network, like a nick or topic, sanitized; a cut is not worth flagging there.
+pub fn clean(text: &str) -> String {
+    sanitize(text).0
+}
+
 pub fn clean_lines(text: &str) -> Result<String> {
     let lines: Vec<String> = text
         .split('\n')

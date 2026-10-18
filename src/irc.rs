@@ -82,10 +82,9 @@ pub struct Sender {
 impl Sender {
     /// Nicks and accounts come from other users, so they are cleaned like their chat.
     pub fn sanitized(self) -> Self {
-        let clean = |name: &str| text::sanitize(name).0;
         Self {
-            nick: clean(&self.nick),
-            account: self.account.as_deref().map(clean),
+            nick: text::clean(&self.nick),
+            account: self.account.as_deref().map(text::clean),
             ..self
         }
     }
@@ -115,12 +114,15 @@ pub struct Whois {
 impl Whois {
     /// Every string comes from the network, so each is cleaned like chat.
     pub fn sanitized(self) -> Self {
-        let clean = |text: &str| text::sanitize(text).0;
         Self {
-            nick: clean(&self.nick),
-            account: self.account.as_deref().map(clean),
-            away: self.away.as_deref().map(clean),
-            channels: self.channels.iter().map(|channel| clean(channel)).collect(),
+            nick: text::clean(&self.nick),
+            account: self.account.as_deref().map(text::clean),
+            away: self.away.as_deref().map(text::clean),
+            channels: self
+                .channels
+                .iter()
+                .map(|channel| text::clean(channel))
+                .collect(),
             ..self
         }
     }
@@ -135,10 +137,9 @@ pub struct Whowas {
 
 impl Whowas {
     pub fn sanitized(self) -> Self {
-        let clean = |text: &str| text::sanitize(text).0;
         Self {
-            nick: clean(&self.nick),
-            realname: self.realname.as_deref().map(clean),
+            nick: text::clean(&self.nick),
+            realname: self.realname.as_deref().map(text::clean),
         }
     }
 }
