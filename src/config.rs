@@ -113,8 +113,12 @@ pub enum Limit {
 impl Limit {
     const FORMAT: &'static str =
         r#"want "N/<duration>" like "3/10s" or "10/1m" (N at least 1, whole seconds), or "off""#;
+}
 
-    fn parse(raw: &str) -> Result<Self, &'static str> {
+impl TryFrom<String> for Limit {
+    type Error = &'static str;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
         if raw == "off" {
             return Ok(Self::Off);
         }
@@ -128,14 +132,6 @@ impl Limit {
             count,
             seconds: window.as_secs(),
         })
-    }
-}
-
-impl TryFrom<String> for Limit {
-    type Error = &'static str;
-
-    fn try_from(raw: String) -> Result<Self, Self::Error> {
-        Self::parse(&raw)
     }
 }
 
@@ -467,7 +463,7 @@ mod tests {
                 },
             ),
         ] {
-            assert_eq!(Limit::parse(raw), Ok(parsed), "{raw}");
+            assert_eq!(Limit::try_from(raw.to_owned()), Ok(parsed), "{raw}");
         }
         for bad in [
             "3/10x",
@@ -481,7 +477,7 @@ mod tests {
             "1/99999999999999999h",
             "3/1500ms",
         ] {
-            assert_eq!(Limit::parse(bad), Err(Limit::FORMAT), "{bad}");
+            assert_eq!(Limit::try_from(bad.to_owned()), Err(Limit::FORMAT), "{bad}");
         }
     }
 
