@@ -13,7 +13,7 @@ use tokio::net::UnixStream;
 use crate::error::{Code, Error, Result};
 use crate::irc::{HistoryQuery, Outgoing, Typing};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 #[derive(Deserialize, Serialize)]
 pub struct Request {
@@ -46,6 +46,14 @@ pub enum Op {
     Names {
         /// A channel the bot is in
         channel: String,
+    },
+    /// A channel's topic, or set it
+    Topic {
+        /// A channel the bot is in
+        channel: String,
+        /// Set the topic to this text instead
+        #[arg(long, value_name = "TEXT")]
+        set: Option<String>,
     },
     /// React to a message with an emoji
     React {
@@ -241,19 +249,20 @@ mod tests {
     /// Every `Op`, the ack, and a success and an error response, each pinned to a literal JSON
     /// string. A deliberate wire change updates both this test and `VERSION` in the same commit.
     #[test]
+    #[expect(clippy::too_many_lines, reason = "a table with one row per op")]
     fn wire_format_is_pinned() {
         let request = |op: Op| serde_json::to_string(&Request { v: VERSION, op }).unwrap();
         let cases = [
             (
                 request(Op::Status {}),
-                "{\"v\":1,\"op\":\"status\",\"args\":{}}",
+                "{\"v\":2,\"op\":\"status\",\"args\":{}}",
             ),
             (
                 request(Op::Wait {
                     timeout: 60,
                     max: NonZeroUsize::new(20).unwrap(),
                 }),
-                "{\"v\":1,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
+                "{\"v\":2,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
             ),
             (
                 request(Op::Send(Outgoing {
@@ -262,13 +271,20 @@ mod tests {
                     text: "hi there".into(),
                     reply_to: Some("4y8kq7j2c9mnz".into()),
                 })),
-                "{\"v\":1,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
+                "{\"v\":2,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
             ),
             (
                 request(Op::Names {
                     channel: "#bots".into(),
                 }),
-                "{\"v\":1,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
+                "{\"v\":2,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
+            ),
+            (
+                request(Op::Topic {
+                    channel: "#bots".into(),
+                    set: Some("louro's test channel".into()),
+                }),
+                "{\"v\":2,\"op\":\"topic\",\"args\":{\"channel\":\"#bots\",\"set\":\"louro's test channel\"}}",
             ),
             (
                 request(Op::React {
@@ -277,14 +293,14 @@ mod tests {
                     reaction: "+1".into(),
                     remove: false,
                 }),
-                "{\"v\":1,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
+                "{\"v\":2,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
             ),
             (
                 request(Op::Typing {
                     target: "#bots".into(),
                     state: Typing::Active,
                 }),
-                "{\"v\":1,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
+                "{\"v\":2,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
             ),
             (
                 request(Op::Redact {
@@ -292,7 +308,7 @@ mod tests {
                     msgid: "4y8kq7j2c9mnz".into(),
                     reason: "typo".into(),
                 }),
-                "{\"v\":1,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
+                "{\"v\":2,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
             ),
             (
                 request(Op::History {
@@ -303,11 +319,11 @@ mod tests {
                         after: None,
                     },
                 }),
-                "{\"v\":1,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null}}",
+                "{\"v\":2,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null}}",
             ),
             (
                 request(Op::Quit {}),
-                "{\"v\":1,\"op\":\"quit\",\"args\":{}}",
+                "{\"v\":2,\"op\":\"quit\",\"args\":{}}",
             ),
             (
                 serde_json::to_string(&Ack { ack: true }).unwrap(),

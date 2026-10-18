@@ -58,6 +58,8 @@ pkgs.testers.runNixOSTest (
           accounts.multiclient.always-on = "opt-in";
           # The test sends in bursts that fakelag would throttle.
           fakelag.enabled = false;
+          # Without +t, a member who isn't an operator may set the topic.
+          channels.default-modes = "+n";
           # Ergo offers draft/message-redaction only with this on.
           history.retention.allow-individual-delete = true;
           # Sized to Ergo's own default.yaml, so Ergo advertises draft/multiline for papo to negotiate.

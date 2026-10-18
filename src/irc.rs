@@ -155,6 +155,10 @@ pub enum Kind {
 /// The IRC connection as the daemon sees it; `PapoIrc` below implements it over a papo client.
 pub trait Irc: Send + Sync + 'static {
     fn status(&self) -> IrcStatus;
+    fn joined(&self, channel: &str) -> bool;
+    /// The topic of a channel the bot is in, if it has one.
+    fn topic(&self, channel: &str) -> Option<String>;
+    fn set_topic(&self, channel: &str, topic: &str) -> impl Future<Output = Result<()>> + Send;
     /// The members of `channel`, sorted by nick, or `None` if the bot isn't in it.
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
     /// Sends one message (several lines become a multiline batch).
@@ -450,6 +454,22 @@ impl Irc for PapoIrc {
                 .map(|channel| channel.name().to_string())
                 .collect(),
         }
+    }
+
+    fn joined(&self, channel: &str) -> bool {
+        self.client.state().channel(channel).is_some()
+    }
+
+    fn topic(&self, channel: &str) -> Option<String> {
+        self.client
+            .state()
+            .channel(channel)?
+            .topic()
+            .map(str::to_owned)
+    }
+
+    async fn set_topic(&self, channel: &str, topic: &str) -> Result<()> {
+        Ok(self.client.set_topic(channel, topic).await?)
     }
 
     fn names(&self, channel: &str) -> Option<Vec<Member>> {

@@ -84,6 +84,12 @@ impl Grants {
         require(self.irc.join.matches(channel), "irc.join", channel)
     }
 
+    /// Setting a channel's topic needs `irc.topic` on top of `irc.join`.
+    pub fn check_topic(&self, channel: &str) -> Result<()> {
+        self.check_join(channel)?;
+        require(self.irc.topic.matches(channel), "irc.topic", channel)
+    }
+
     pub fn check_redact(&self) -> Result<()> {
         if self.irc.redact {
             return Ok(());
@@ -310,6 +316,21 @@ mod tests {
         ] {
             let error = grants.check_history(target, dm).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
+        }
+    }
+
+    #[test]
+    fn sets_a_topic_only_where_irc_join_and_irc_topic_both_grant() {
+        let grants = grants(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.topic = ["#bots", "#ops"]
+            "##,
+        );
+        assert!(grants.check_topic("#BOTS").is_ok());
+        for channel in ["#lounge", "#ops"] {
+            let error = grants.check_topic(channel).unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{channel}");
         }
     }
 

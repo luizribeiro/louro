@@ -61,7 +61,9 @@ def toml_lines(table, prefix=""):
             yield f"{prefix}{key} = {json.dumps(value)}"
 
 
-def grants(dm_read=False, dm_send=False, quit=False, react=False, typing=False, redact=False):
+def grants(
+    dm_read=False, dm_send=False, quit=False, react=False, typing=False, redact=False, topic=False,
+):
     return {"irc": {
         "join": ["#bots"],
         "send": ["#bots"],
@@ -69,6 +71,7 @@ def grants(dm_read=False, dm_send=False, quit=False, react=False, typing=False, 
         "react": react,
         "typing": typing,
         "redact": redact,
+        "topic": topic,
         "quit": quit,
     }}
 
@@ -325,7 +328,15 @@ with running():
         error = refused("rate_limited", "send", "#bots", "quick 3")
         assert error["retry_after"] > 0, error
 
-with running(react=["#bots"], typing=["#bots"], redact=True):
+with running(react=["#bots"], typing=["#bots"], redact=True, topic=["#bots"]):
+    with subtest("topic sets #bots's topic where irc.topic grants, and reads it back"):
+        louro("topic", "#bots", "--set", "louro's test channel")
+        received("luiz", lambda _tags, line: line.endswith(" TOPIC #bots :louro's test channel"))
+        read = louro("topic", "#bots")
+        assert read["topic"] == "louro's test channel" and read["untrusted"], read
+        refused("not_allowed", "topic", "#lounge", "--set", "hi")
+        refused("not_allowed", "topic", "#lounge")
+
     with subtest("react tags luiz's message with a reaction, only where irc.react grants"):
         [message] = say("luiz", "#bots", "louro: react to this")
         louro("react", "#bots", message["msgid"], "👍")

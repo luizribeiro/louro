@@ -76,6 +76,8 @@ pub struct Irc {
     pub typing: Selector,
     /// Whether it may redact messages it sent itself.
     pub redact: bool,
+    /// Channels whose topic it may set; reading a topic needs only `join`.
+    pub topic: Selector,
     pub quit: bool,
 }
 
@@ -326,6 +328,7 @@ mod tests {
             &irc.dm.send,
             &irc.react,
             &irc.typing,
+            &irc.topic,
         ] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
