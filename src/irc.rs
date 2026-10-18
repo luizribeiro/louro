@@ -4,7 +4,7 @@
 use std::time::{Duration, SystemTime};
 
 use papo::{
-    Account, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem,
+    Account, Away, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem,
     HistoryReference, ListFilter, Message, MessageId, MessageKind, Refusal, RegistrationError,
     Sasl, Source, State, User,
 };
@@ -297,15 +297,12 @@ fn endpoint(address: &str) -> Result<Endpoint> {
 fn connect_code(error: &papo::Error) -> Code {
     match error {
         papo::Error::Registration(
-            RegistrationError::Sasl { .. }
-            | RegistrationError::SaslUnavailable
-            | RegistrationError::PasswordIncorrect
-            | RegistrationError::AccountRequired,
+            RegistrationError::Sasl { .. } | RegistrationError::AccountRequired,
         ) => Code::AuthFailed,
         papo::Error::Connect(failure)
             if matches!(
                 failure.kind(),
-                ConnectErrorKind::Tls | ConnectErrorKind::Certificate | ConnectErrorKind::TlsConfig
+                ConnectErrorKind::CertificateRejected | ConnectErrorKind::HandshakeFailed
             ) =>
         {
             Code::Tls
@@ -375,7 +372,9 @@ fn known_sender(state: &State, nick: &str) -> Sender {
 }
 
 fn is_away(state: &State, nick: &str) -> bool {
-    state.user(nick).is_some_and(|user| user.away().is_some())
+    state
+        .user(nick)
+        .is_some_and(|user| matches!(user.away(), Away::Away { .. }))
 }
 
 fn logged_in(account: &Account) -> Option<String> {
@@ -675,7 +674,7 @@ impl From<papo::Error> for Error {
         let code = match error {
             papo::Error::Disconnected(_) => Code::NotConnected,
             papo::Error::Timeout => Code::RequestTimeout,
-            papo::Error::Server(_) => Code::ServerError,
+            papo::Error::Server(_) | papo::Error::UnexpectedReply { .. } => Code::ServerError,
             papo::Error::InvalidInput(_) => Code::Usage,
             papo::Error::Unsupported(_) => Code::Unsupported,
             _ => Code::Internal,
@@ -885,10 +884,16 @@ mod tests {
                 )),
                 Code::Unsupported,
             ),
+            (
+                papo::Error::UnexpectedReply {
+                    command: "JOIN".into(),
+                },
+                Code::ServerError,
+            ),
         ] {
             assert_eq!(Error::from(error).code, code);
         }
-        let refused = papo::Error::Registration(RegistrationError::SaslUnavailable);
+        let refused = papo::Error::Registration(RegistrationError::AccountRequired);
         assert_eq!(connect_code(&refused), Code::AuthFailed);
     }
 
