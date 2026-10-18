@@ -79,8 +79,9 @@ impl Grants {
         }
     }
 
-    /// Reading what a channel holds, like its members, needs `irc.join`.
+    /// Joining a channel, or reading what it holds, like its members, needs `irc.join`.
     pub fn check_join(&self, channel: &str) -> Result<()> {
+        expect_kind(channel, TargetKind::Channel)?;
         require(self.irc.join.matches(channel), "irc.join", channel)
     }
 
@@ -101,10 +102,7 @@ impl Grants {
     /// `whois` and `whowas` look up one nick.
     pub fn check_whois(&self, nick: &str) -> Result<()> {
         granted(self.irc.whois, "irc.whois")?;
-        match target_kind(nick)? {
-            TargetKind::Nick => Ok(()),
-            TargetKind::Channel => Err(not_allowed(format!("{nick} is a channel, not a nick"))),
-        }
+        expect_kind(nick, TargetKind::Nick)
     }
 
     pub fn check_quit(&self) -> Result<()> {
@@ -130,6 +128,7 @@ fn require(granted: bool, grant: &str, target: &str) -> Result<()> {
     Err(not_allowed(format!("{grant} does not grant {target}")))
 }
 
+#[derive(Clone, Copy, PartialEq)]
 enum TargetKind {
     Channel,
     Nick,
@@ -161,6 +160,17 @@ fn target_kind(target: &str) -> Result<TargetKind> {
         )));
     }
     Ok(TargetKind::Nick)
+}
+
+fn expect_kind(target: &str, kind: TargetKind) -> Result<()> {
+    if target_kind(target)? == kind {
+        return Ok(());
+    }
+    let noun = match kind {
+        TargetKind::Channel => "a channel",
+        TargetKind::Nick => "a nick",
+    };
+    Err(not_allowed(format!("{target} is not {noun}")))
 }
 
 fn not_allowed(message: impl Into<String>) -> Error {
@@ -349,6 +359,19 @@ mod tests {
             let error = grants.check_topic(channel).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{channel}");
         }
+    }
+
+    #[test]
+    fn joins_only_a_channel_that_irc_join_grants() {
+        let bots_and_help = grants(r##"irc.join = ["#bots", "#help-*"]"##);
+        for channel in ["#bots", "#help-rust"] {
+            assert!(bots_and_help.check_join(channel).is_ok(), "{channel}");
+        }
+        let error = bots_and_help.check_join("#lounge").unwrap_err();
+        assert_eq!(error.message, "irc.join does not grant #lounge");
+        let everywhere = grants("irc.join = true");
+        let error = everywhere.check_join("maria").unwrap_err();
+        assert_eq!(error.message, "maria is not a channel");
     }
 
     #[test]

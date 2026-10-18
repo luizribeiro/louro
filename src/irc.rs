@@ -222,6 +222,9 @@ pub trait Irc: Send + Sync + 'static {
     /// The topic of a channel the bot is in, if it has one.
     fn topic(&self, channel: &str) -> Option<String>;
     fn set_topic(&self, channel: &str, topic: &str) -> impl Future<Output = Result<()>> + Send;
+    fn join(&self, channel: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Leaves `channel`; an empty reason is omitted.
+    fn part(&self, channel: &str, reason: &str) -> impl Future<Output = Result<()>> + Send;
     /// The members of `channel`, sorted by nick, or `None` if the bot isn't in it.
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
     /// Sends one message (several lines become a multiline batch).
@@ -538,6 +541,14 @@ impl Irc for PapoIrc {
 
     async fn set_topic(&self, channel: &str, topic: &str) -> Result<()> {
         Ok(self.client.set_topic(channel, topic).await?)
+    }
+
+    async fn join(&self, channel: &str) -> Result<()> {
+        Ok(self.client.join(channel).await?)
+    }
+
+    async fn part(&self, channel: &str, reason: &str) -> Result<()> {
+        Ok(self.client.part(channel, reason).await?)
     }
 
     fn names(&self, channel: &str) -> Option<Vec<Member>> {

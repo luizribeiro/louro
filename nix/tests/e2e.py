@@ -62,11 +62,11 @@ def toml_lines(table, prefix=""):
 
 
 def grants(
-    dm_read=False, dm_send=False, quit=False, react=False, typing=False, redact=False, topic=False,
-    whois=False, list=False,
+    join=("#bots",), dm_read=False, dm_send=False, quit=False, react=False, typing=False,
+    redact=False, topic=False, whois=False, list=False,
 ):
     return {"irc": {
-        "join": ["#bots"],
+        "join": [*join],
         "send": ["#bots"],
         "dm": {"read": dm_read, "send": dm_send},
         "react": react,
@@ -398,6 +398,16 @@ with running(list=True):
         assert channels["#bots"]["users"] >= 3 and listed["untrusted"], listed
         matched = louro("list", "--match", "BOTS")["channels"]
         assert [channel["channel"] for channel in matched] == ["#bots"], matched
+
+with running(join=["#bots", "#help-*"]):
+    with subtest("join and part come and go within irc.join, and parting twice is refused"):
+        louro("join", "#help-rust")
+        louro_until(lambda status: "#help-rust" in status["channels"], "status")
+        refused("not_allowed", "join", "#lounge")
+        louro("part", "#help-rust", "--reason", "all answered")
+        louro_until(lambda status: "#help-rust" not in status["channels"], "status")
+        error = refused("not_allowed", "part", "#help-rust")
+        assert error["message"] == "louro is not in #help-rust", error
 
 with running(dm_read=["account:luiz"], dm_send=["$first"]):
     with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):

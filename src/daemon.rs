@@ -349,6 +349,10 @@ impl<I: Irc> Daemon<I> {
             }
             Ok(Op::Names { channel }) => reply(conn, self.names(&channel)).await,
             Ok(Op::Topic { channel, set }) => reply(conn, self.topic(&channel, set).await).await,
+            Ok(Op::Join { channel }) => reply(conn, self.join(&channel).await).await,
+            Ok(Op::Part { channel, reason }) => {
+                reply(conn, self.part(&channel, &reason).await).await
+            }
             Ok(Op::React {
                 target,
                 msgid,
@@ -421,6 +425,21 @@ impl<I: Irc> Daemon<I> {
         self.require_joined(channel)?;
         self.irc.set_topic(channel, &topic).await?;
         Ok(json!({"channel": channel, "topic": topic}))
+    }
+
+    async fn join(&self, channel: &str) -> Result<Value> {
+        self.grants.check_join(channel)?;
+        self.irc.join(channel).await?;
+        Ok(json!({"channel": channel, "joined": true}))
+    }
+
+    async fn part(&self, channel: &str, reason: &str) -> Result<Value> {
+        self.grants.check_join(channel)?;
+        text::check_one_line(reason)?;
+        text::check_secret(self.password.as_ref(), reason)?;
+        self.require_joined(channel)?;
+        self.irc.part(channel, reason).await?;
+        Ok(json!({"channel": channel, "parted": true}))
     }
 
     fn require_joined(&self, channel: &str) -> Result<()> {
@@ -655,7 +674,7 @@ mod tests {
     fn grants() -> Grants {
         toml::from_str(
             r##"
-            irc.join = ["#bots", "#lounge"]
+            irc.join = ["#bots", "#lounge", "#help-*"]
             irc.send = ["#bots"]
             irc.dm.read = ["luiz", "maria"]
             irc.dm.send = ["$first"]
@@ -677,6 +696,8 @@ mod tests {
         reactions: Mutex<Vec<bool>>,
         typing: Mutex<Vec<Typing>>,
         topics: Mutex<Vec<String>>,
+        /// Each join, then each part, as "+#channel" or "-#channel".
+        memberships: Mutex<Vec<String>>,
         history_limits: Mutex<Vec<usize>>,
         redacted: Mutex<Vec<String>>,
         /// Sends get no msgid, as from a server without echo-message.
@@ -712,6 +733,16 @@ mod tests {
             topic: &str,
         ) -> impl Future<Output = Result<()>> + Send {
             self.topics.lock().unwrap().push(topic.into());
+            future::ready(Ok(()))
+        }
+
+        fn join(&self, channel: &str) -> impl Future<Output = Result<()>> + Send {
+            self.memberships.lock().unwrap().push(format!("+{channel}"));
+            future::ready(Ok(()))
+        }
+
+        fn part(&self, channel: &str, _reason: &str) -> impl Future<Output = Result<()>> + Send {
+            self.memberships.lock().unwrap().push(format!("-{channel}"));
             future::ready(Ok(()))
         }
 
@@ -972,7 +1003,7 @@ mod tests {
                 "nick": "louro",
                 "channels": ["#bots", "#lounge"],
                 "grants": {"irc": {
-                    "join": ["#bots", "#lounge"],
+                    "join": ["#bots", "#lounge", "#help-*"],
                     "send": ["#bots"],
                     "dm": {"read": ["luiz", "maria"], "send": ["$first"]},
                     "react": ["#bots"],
@@ -1673,6 +1704,53 @@ mod tests {
         }
         let refused = launch(Grants::default()).call(list_request(None)).await;
         assert_eq!(refused["Err"]["code"], "not_allowed");
+    }
+
+    #[tokio::test]
+    async fn join_and_part_only_channels_irc_join_grants() {
+        let daemon = launch(grants());
+        let joined = daemon
+            .call(request("join", json!({"channel": "#help-rust"})))
+            .await;
+        assert_eq!(joined["Ok"]["joined"], true);
+        let parted = daemon
+            .call(request(
+                "part",
+                json!({"channel": "#lounge", "reason": "bye"}),
+            ))
+            .await;
+        assert_eq!(parted["Ok"]["parted"], true);
+        for (op, channel) in [("join", "#ops"), ("join", "maria"), ("part", "#ops")] {
+            let args = json!({"channel": channel, "reason": ""});
+            let reply = daemon.call(request(op, args)).await;
+            assert_eq!(reply["Err"]["code"], "not_allowed", "{op} {channel}");
+        }
+        assert_eq!(
+            *daemon.irc.memberships.lock().unwrap(),
+            ["+#help-rust", "-#lounge"]
+        );
+    }
+
+    #[tokio::test]
+    async fn part_refuses_a_channel_the_bot_is_not_in_or_a_bad_reason() {
+        let daemon = launch(grants());
+        for (channel, reason, code) in [
+            ("#help-rust", "", "not_allowed"),
+            ("#lounge", "bye\r\nQUIT", "usage"),
+            ("#lounge", PASSWORD, "blocked_secret"),
+        ] {
+            let args = json!({"channel": channel, "reason": reason});
+            let reply = daemon.call(request("part", args)).await;
+            assert_eq!(reply["Err"]["code"], code, "{channel} {reason:?}");
+        }
+        let reply = daemon
+            .call(request(
+                "part",
+                json!({"channel": "#help-rust", "reason": ""}),
+            ))
+            .await;
+        assert_eq!(reply["Err"]["message"], "louro is not in #help-rust");
+        assert!(daemon.irc.memberships.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
