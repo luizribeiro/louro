@@ -18,7 +18,14 @@ use crate::error::{Code, Error, Result};
 use crate::text;
 
 const UPDATES_CAPACITY: usize = 256;
-const CTCP_VERSION: &str = concat!("louro ", env!("CARGO_PKG_VERSION"), " (papo)");
+
+fn ctcp_version() -> String {
+    format!(
+        "louro {} (papo {})",
+        env!("CARGO_PKG_VERSION"),
+        papo::VERSION
+    )
+}
 
 pub enum Update {
     Chat(Incoming),
@@ -191,11 +198,12 @@ pub async fn connect(
     server: &Server,
     password: Option<Secret>,
 ) -> Result<(PapoIrc, mpsc::Receiver<Update>)> {
+    let version = ctcp_version();
     let mut builder = Client::builder(endpoint(&server.address)?)
         .nick(&server.nick)
         .alt_nicks(server.alt_nicks.clone())
         .bot()
-        .ctcp_version(Some(CTCP_VERSION))
+        .ctcp_version(Some(&version))
         .ctcp_source(env!("CARGO_PKG_REPOSITORY"))
         .autojoin(server.autojoin.clone())
         .history_on_reconnect(true);
@@ -648,6 +656,13 @@ mod tests {
             flatten_for_action("checks the logs\nfinds nothing"),
             "checks the logs finds nothing"
         );
+    }
+
+    #[test]
+    fn ctcp_version_names_both_louro_and_papo() {
+        let version = ctcp_version();
+        assert!(version.starts_with(&format!("louro {} (papo ", env!("CARGO_PKG_VERSION"))));
+        assert!(version.ends_with(&format!("{})", papo::VERSION)));
     }
 
     #[test]
