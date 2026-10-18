@@ -129,7 +129,7 @@ struct Daemon<I> {
 /// request or `stop`, then quits IRC and removes the socket at `socket_path`. Fails once papo
 /// gives up reconnecting, so a supervisor can restart louro.
 #[allow(clippy::too_many_arguments)]
-pub async fn run(
+async fn run(
     grants: Grants,
     limits: Limits,
     password: Option<Secret>,
