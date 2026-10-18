@@ -1,5 +1,6 @@
 //! The bot's SASL password, read once at `connect` and never from argv or env.
 
+use std::env;
 use std::fs::File;
 use std::io::{self, IsTerminal};
 use std::os::unix::fs::PermissionsExt;
@@ -9,7 +10,7 @@ use crate::error::{Code, Error, Result};
 use crate::irc::Secret;
 
 pub enum Source {
-    /// A file only its owner can read, e.g. a systemd credential.
+    /// A file only its owner can read; a systemd credential's group bits are let through.
     File(PathBuf),
     /// A pipe from the `connect` that spawned this daemon.
     Stdin,
@@ -19,7 +20,10 @@ pub enum Source {
 
 pub fn read(source: &Source) -> Result<Secret> {
     let mut password = match source {
-        Source::File(path) => from_file(path)?,
+        Source::File(path) => {
+            let credentials_dir = env::var_os("CREDENTIALS_DIRECTORY");
+            from_file(path, credentials_dir.as_deref().map(Path::new))?
+        }
         Source::Stdin => io::read_to_string(io::stdin()).map_err(unreadable)?,
         Source::Tty(user) => from_tty(user)?,
     };
@@ -27,9 +31,16 @@ pub fn read(source: &Source) -> Result<Secret> {
     Ok(Secret::new(password))
 }
 
-fn from_file(path: &Path) -> Result<String> {
+fn from_file(path: &Path, credentials_dir: Option<&Path>) -> Result<String> {
     let file = File::open(path).map_err(unreadable)?;
-    if file.metadata().map_err(unreadable)?.permissions().mode() & 0o077 != 0 {
+    let mode = file.metadata().map_err(unreadable)?.permissions().mode();
+    // systemd lets only the service read a credential, through an ACL that shows in the group bits.
+    let exposed = if credentials_dir.is_some_and(|dir| path.parent() == Some(dir)) {
+        0o007
+    } else {
+        0o077
+    };
+    if mode & exposed != 0 {
         return Err(Error::new(
             Code::Usage,
             format!("{} is readable by other users", path.display()),
@@ -83,5 +94,26 @@ mod tests {
         assert_eq!(err.code, Code::Usage);
         assert_eq!(err.hint.as_deref(), Some("chmod 600 it"));
         assert!(!err.to_string().contains("horse"));
+    }
+
+    #[test]
+    fn reads_a_systemd_credential_whatever_its_group_bits() {
+        let credential = password_file(0o440);
+        let dir = credential.path().parent();
+        let password = from_file(credential.path(), dir).unwrap();
+        assert_eq!(password, "correct horse battery staple\n");
+
+        let elsewhere = Path::new("/run/credentials/other.service");
+        for credentials_dir in [None, Some(elsewhere)] {
+            let err = from_file(credential.path(), credentials_dir).unwrap_err();
+            assert_eq!(err.hint.as_deref(), Some("chmod 600 it"));
+        }
+    }
+
+    #[test]
+    fn refuses_a_world_readable_systemd_credential() {
+        let credential = password_file(0o444);
+        let err = from_file(credential.path(), credential.path().parent()).unwrap_err();
+        assert_eq!(err.hint.as_deref(), Some("chmod 600 it"));
     }
 }
