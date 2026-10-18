@@ -22,8 +22,8 @@ use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE, Presence, PresenceState};
 use crate::irc::{
-    self, History, HistoryQuery, Incoming, Irc, Listed, Member, Outgoing, Secret, Sender, Typing,
-    Update, Whowas, now, whole_seconds,
+    self, History, HistoryQuery, Incoming, Irc, Listed, Member, NickAccount, Outgoing, Secret,
+    Sender, Typing, Update, Whowas, now, whole_seconds,
 };
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -351,6 +351,25 @@ impl<I: Irc> Daemon<I> {
             .unwrap_or_default()
     }
 
+    /// Passes `check` with what DMs from `target` recorded and, when papo knows the account the
+    /// nick has now, for that account too, so a grant an earlier holder earned isn't handed on.
+    fn check_dm(&self, target: &str, check: impl Fn(&DmHistory) -> Result<()>) -> Result<()> {
+        let dm = self.dm_history(target);
+        check(&dm)?;
+        let account = match self.irc.account(target) {
+            NickAccount::Unknown => return Ok(()),
+            NickAccount::LoggedOut => None,
+            NickAccount::LoggedIn(account) => Some(account),
+        };
+        check(&dm.held_by(account.as_deref())).map_err(|_| {
+            Error::new(
+                Code::NotAllowed,
+                format!("{target} is now logged in as a different account"),
+            )
+            .with_hint("don't retry; someone else may hold the nick")
+        })
+    }
+
     async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
         let op = match read_line::<Value>(conn).await {
             Ok(Some(request)) => parse_request(request),
@@ -585,9 +604,10 @@ impl<I: Irc> Daemon<I> {
         remove: bool,
     ) -> Result<Value> {
         text::check_secret(self.password.as_ref(), reaction)?;
-        let dm = self.dm_history(target);
-        self.grants
-            .check_also(&self.grants.irc.react, "irc.react", target, &dm)?;
+        self.check_dm(target, |dm| {
+            self.grants
+                .check_also(&self.grants.irc.react, "irc.react", target, dm)
+        })?;
         text::check_msgid(msgid)?;
         text::check_field("a reaction", reaction, text::MAX_REACTION_CHARS)?;
         if let Some(retry_after) =
@@ -602,8 +622,7 @@ impl<I: Irc> Daemon<I> {
 
     /// Never touches the inbox, so `wait`'s cursor stays where it was.
     async fn history(&self, target: &str, query: HistoryQuery) -> Result<Value> {
-        self.grants
-            .check_history(target, &self.dm_history(target))?;
+        self.check_dm(target, |dm| self.grants.check_history(target, dm))?;
         let query = HistoryQuery {
             limit: query.limit.clamp(1, MAX_HISTORY),
             ..query
@@ -639,17 +658,19 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn typing(&self, target: &str, state: Typing) -> Result<Value> {
-        let dm = self.dm_history(target);
-        self.grants
-            .check_also(&self.grants.irc.typing, "irc.typing", target, &dm)?;
+        self.check_dm(target, |dm| {
+            self.grants
+                .check_also(&self.grants.irc.typing, "irc.typing", target, dm)
+        })?;
         self.irc.typing(target, state).await?;
         Ok(json!({"target": target, "state": state}))
     }
 
     async fn send(&self, message: Outgoing) -> Result<Value> {
         text::check_secret(self.password.as_ref(), &message.text)?;
-        let dm = self.dm_history(&message.target);
-        self.grants.check_send(&message.target, &dm)?;
+        self.check_dm(&message.target, |dm| {
+            self.grants.check_send(&message.target, dm)
+        })?;
         if let Some(msgid) = &message.reply_to {
             text::check_msgid(msgid)?;
         }
@@ -792,6 +813,8 @@ mod tests {
         /// Each identity change, as "nick NEW", "away TEXT", "back" or "realname NEW".
         identity: Mutex<Vec<String>>,
         history_limits: Mutex<Vec<usize>>,
+        /// By lowercased nick, the account papo's state knows each one by now.
+        accounts: Mutex<HashMap<String, Option<String>>>,
         redacted: Mutex<Vec<String>>,
         /// Sends get no msgid, as from a server without echo-message.
         without_msgid: AtomicBool,
@@ -857,6 +880,19 @@ mod tests {
                     },
                 ]
             })
+        }
+
+        fn account(&self, nick: &str) -> NickAccount {
+            match self
+                .accounts
+                .lock()
+                .unwrap()
+                .get(&nick.to_ascii_lowercase())
+            {
+                None => NickAccount::Unknown,
+                Some(None) => NickAccount::LoggedOut,
+                Some(Some(account)) => NickAccount::LoggedIn(account.clone()),
+            }
         }
 
         fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send {
@@ -1735,6 +1771,54 @@ mod tests {
             for request in [send_request("luiz", "sure"), history_request("luiz", 20)] {
                 let reply = daemon.call(request).await;
                 assert_eq!(reply["Err"]["code"], "not_allowed", "{impostor:?}: {reply}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dm_grants_follow_the_account_papo_knows_the_nick_by_now() {
+        for dm_send in ["$first", "account:luiz"] {
+            let daemon = launch(
+                toml::from_str(&format!(
+                    r#"
+                    irc.dm.read = ["account:luiz"]
+                    irc.dm.send = ["{dm_send}"]
+                    irc.react = ["account:luiz"]
+                    irc.typing = ["account:luiz"]
+                    "#
+                ))
+                .unwrap(),
+            );
+            daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+            daemon.wait_and_ack(5).await;
+            let now_held_by = |account: Option<&str>| {
+                let mut accounts = daemon.irc.accounts.lock().unwrap();
+                accounts.insert("luiz".into(), account.map(String::from));
+            };
+            let to_luiz = || {
+                [
+                    send_request("luiz", "sure"),
+                    history_request("luiz", 20),
+                    react_request("luiz", "👍", false),
+                    request("typing", json!({"target": "luiz", "state": "active"})),
+                ]
+            };
+
+            for account in [Some("mallory"), None] {
+                now_held_by(account);
+                for request in to_luiz() {
+                    let reply = daemon.call(request).await;
+                    assert_eq!(
+                        reply["Err"]["message"], "luiz is now logged in as a different account",
+                        "{dm_send} {account:?}: {reply}"
+                    );
+                    assert_eq!(reply["Err"]["code"], "not_allowed");
+                }
+            }
+            now_held_by(Some("Luiz"));
+            for request in to_luiz() {
+                let reply = daemon.call(request).await;
+                assert!(reply["Ok"].is_object(), "{dm_send}: {reply}");
             }
         }
     }

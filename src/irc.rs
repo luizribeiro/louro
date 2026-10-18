@@ -232,6 +232,7 @@ pub trait Irc: Send + Sync + 'static {
     fn part(&self, channel: &str, reason: &str) -> impl Future<Output = Result<()>> + Send;
     /// The members of `channel`, sorted by nick, or `None` if the bot isn't in it.
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
+    fn account(&self, nick: &str) -> NickAccount;
     /// Sends one message (several lines become a multiline batch).
     fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send;
     fn react(
@@ -267,6 +268,14 @@ pub trait Irc: Send + Sync + 'static {
     /// Every channel the server lists.
     fn list(&self) -> impl Future<Output = Result<Vec<Listed>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
+}
+
+/// The account a nick is logged in to now, as papo's state knows it.
+pub enum NickAccount {
+    /// Papo doesn't know, as for a nick sharing no channel with the bot.
+    Unknown,
+    LoggedOut,
+    LoggedIn(String),
 }
 
 #[derive(Serialize)]
@@ -585,6 +594,15 @@ impl Irc for PapoIrc {
             .collect();
         members.sort_by(|a, b| a.user.nick.cmp(&b.user.nick));
         Some(members)
+    }
+
+    fn account(&self, nick: &str) -> NickAccount {
+        let state = self.client.state();
+        match state.user(nick).map(User::account) {
+            Some(Account::LoggedIn(account)) => NickAccount::LoggedIn(account.to_string()),
+            Some(Account::LoggedOut) => NickAccount::LoggedOut,
+            _ => NickAccount::Unknown,
+        }
     }
 
     async fn send(&self, message: Outgoing) -> Result<Sent> {

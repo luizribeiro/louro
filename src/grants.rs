@@ -18,6 +18,21 @@ pub struct DmHistory {
     pub account: Option<String>,
 }
 
+impl DmHistory {
+    /// What still holds for whoever has the nick now, logged in to `account`: `$first` only if
+    /// the DMs recorded an account and it is theirs, or recorded none, and `account:` entries
+    /// only for their own account.
+    pub fn held_by(&self, account: Option<&str>) -> Self {
+        let same_account = self.account.as_deref().is_none_or(|recorded| {
+            account.is_some_and(|account| account.eq_ignore_ascii_case(recorded))
+        });
+        Self {
+            first: self.first && same_account,
+            account: account.map(str::to_ascii_lowercase),
+        }
+    }
+}
+
 impl Grants {
     /// Channel chat only from `irc.join` channels, DMs only from `irc.dm.read` senders.
     pub fn may_read(&self, incoming: &Incoming) -> bool {
@@ -238,6 +253,29 @@ mod tests {
         assert!(send(&grants, "maria", true).is_ok());
         assert!(send(&grants, "luiz", false).is_ok());
         assert!(send(&grants, "$first", true).is_err());
+    }
+
+    #[test]
+    fn first_holds_only_for_the_account_that_dmed_the_bot() {
+        let luiz = DmHistory {
+            first: true,
+            account: Some("luiz".into()),
+        };
+        let accountless = DmHistory {
+            first: true,
+            account: None,
+        };
+        for (dm, now, first) in [
+            (&luiz, Some("Luiz"), true),
+            (&luiz, Some("mallory"), false),
+            (&luiz, None, false),
+            (&accountless, Some("mallory"), true),
+            (&accountless, None, true),
+        ] {
+            let held = dm.held_by(now);
+            assert_eq!(held.first, first, "{:?} now {now:?}", dm.account);
+            assert_eq!(held.account, now.map(str::to_ascii_lowercase));
+        }
     }
 
     #[test]
