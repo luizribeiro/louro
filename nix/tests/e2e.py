@@ -12,7 +12,13 @@ SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON = f"-u {BOT['user']} -f 'louro connect'"
 TIMEOUT = dt.timedelta(minutes=2)
-EXIT_CODES = {"no_session": 3, "not_connected": 4, "not_allowed": 5, "auth_failed": 9}
+EXIT_CODES = {
+    "no_session": 3,
+    "not_connected": 4,
+    "not_allowed": 5,
+    "rate_limited": 6,
+    "auth_failed": 9,
+}
 
 
 def as_bot(command):
@@ -299,6 +305,13 @@ with subtest("sends outside the grants, and quit without irc.quit, are refused")
     refused("not_allowed", "quit")
     assert louro("status")["connected"], "a refused quit leaves louro running"
     stop()
+
+with running():
+    with subtest("louro.toml's default send limit (3/10s per target) rate-limits the 4th send"):
+        for n in range(3):
+            louro("send", "#bots", f"quick {n}")
+        error = refused("rate_limited", "send", "#bots", "quick 3")
+        assert error["retry_after"] > 0, error
 
 with running(react=["#bots"], typing=["#bots"], redact=True):
     with subtest("react tags luiz's message with a reaction, only where irc.react grants"):
