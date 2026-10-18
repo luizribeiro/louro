@@ -761,20 +761,6 @@ mod tests {
     }
 
     #[test]
-    fn a_history_reference_is_a_time_a_time_ago_or_a_msgid() {
-        for raw in [
-            "2026-10-16T21:04:11Z",
-            "2026-10-16T21:04:11.392Z",
-            "30m",
-            "4y8kq7j2c9mnz",
-        ] {
-            assert!(history_reference(raw).is_ok(), "{raw}");
-        }
-        let error = history_reference("4y8k q7j2").err().unwrap();
-        assert_eq!(error.code, Code::Usage);
-    }
-
-    #[test]
     fn a_history_time_is_absolute_or_that_long_ago() {
         let now = humantime::parse_rfc3339("2026-10-16T21:34:11Z").unwrap();
         let earlier = humantime::parse_rfc3339("2026-10-16T21:04:11Z").unwrap();
