@@ -146,7 +146,7 @@ pub struct History {
 
 pub struct Sent {
     pub msgid: Option<String>,
-    /// Whether the server carries reply tags; without them a reply goes out as a plain message.
+    /// Whether a reply kept its reply tag rather than falling back to a plain message.
     pub threaded: bool,
 }
 
@@ -311,8 +311,7 @@ fn connect_code(error: &papo::Error) -> Code {
     }
 }
 
-/// An unknown nick gets a plain, actionable message naming it, rather than a generic server
-/// error the agent can't act on.
+/// An unknown nick is bad input the agent can fix, not a server error.
 fn whois_error(nick: &str, error: papo::Error) -> Error {
     match error {
         papo::Error::Server(refusal) if refusal.kind() == Refusal::NoSuchNick => {
@@ -371,10 +370,8 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
     }
 }
 
-/// Why the connection ended, in plain words: a rejected (re)registration, like a bad SASL
-/// login, is named directly so an agent reading `last_error` recognizes a login problem without
-/// parsing free text. Registration failures that aren't a rejection (a timeout, an STS loop)
-/// keep their own wording instead.
+/// Why the connection ended; a rejected login says so up front, for an agent reading
+/// `last_error`, while a registration timeout or STS loop keeps papo's wording.
 fn disconnect_cause(cause: &DisconnectCause) -> String {
     match cause {
         DisconnectCause::Registration(
@@ -421,8 +418,6 @@ pub fn whole_seconds(delay: Duration) -> u64 {
     delay.as_secs() + u64::from(delay.subsec_nanos() > 0)
 }
 
-/// Whether a reply actually went out threaded: only a reply, and only when the server kept the
-/// reply tag rather than falling back to a plain send.
 fn is_threaded(replying: bool, fallbacks: &[Fallback]) -> bool {
     replying && !fallbacks.contains(&Fallback::ReplyTagDropped)
 }
