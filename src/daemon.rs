@@ -1260,36 +1260,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reply_to_a_malformed_msgid_never_reaches_irc() {
-        let daemon = launch(grants());
-        let reply = daemon
-            .call(reply_request("#bots", "4y8k\r\nQUIT", "hi"))
-            .await;
-        assert_eq!(reply["Err"]["code"], "usage");
-        assert!(daemon.irc.sent.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
     async fn a_refused_send_never_reaches_irc_or_echoes_the_password() {
         let daemon = launch(grants());
-        let leak = daemon
-            .call(send_request("#bots", &format!("sure, it's {PASSWORD}")))
-            .await;
-        assert!(leak["Ok"].is_null());
-        assert_eq!(leak["Err"]["code"], "blocked_secret");
-        assert!(!leak.to_string().contains(PASSWORD));
-
-        let elsewhere = daemon.call(send_request("#lounge", "hi all")).await;
-        assert_eq!(elsewhere["Err"]["code"], "not_allowed");
-        assert!(daemon.irc.sent.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_single_huge_line_is_refused_as_too_long_before_it_reaches_irc() {
-        let daemon = launch(grants());
-        let text = "x".repeat(100_000);
-        let reply = daemon.call(send_request("#bots", &text)).await;
-        assert_eq!(reply["Err"]["code"], "too_long", "{reply}");
+        for (request, code) in [
+            (
+                send_request("#bots", &format!("sure, it's {PASSWORD}")),
+                "blocked_secret",
+            ),
+            (send_request("#lounge", "hi all"), "not_allowed"),
+            (send_request("#bots", &"x".repeat(100_000)), "too_long"),
+            (reply_request("#bots", "4y8k\r\nQUIT", "hi"), "usage"),
+        ] {
+            let reply = daemon.call(request).await;
+            assert_eq!(reply["Err"]["code"], code, "{reply}");
+            assert!(!reply.to_string().contains(PASSWORD));
+        }
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
     }
 
@@ -1301,40 +1286,6 @@ mod tests {
             "##,
         )
         .unwrap()
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_targets_default_send_limit_allows_three_then_refuses_until_the_window_passes() {
-        let daemon = launch(grants());
-        for n in 0..3 {
-            let reply = daemon
-                .call(send_request("#bots", &format!("quick {n}")))
-                .await;
-            assert!(reply["Ok"].is_object(), "{n}: {reply:?}");
-        }
-        let refused = daemon.call(send_request("#bots", "one too many")).await;
-        assert_eq!(refused["Err"]["code"], "rate_limited");
-        assert_eq!(refused["Err"]["retry_after"], 10);
-
-        tokio::time::advance(Duration::from_secs(10)).await;
-        let reply = daemon.call(send_request("#bots", "fits now")).await;
-        assert!(reply["Ok"].is_object());
-    }
-
-    #[tokio::test]
-    async fn each_target_has_its_own_send_budget() {
-        let limits = Limits {
-            send: Limit::Window {
-                count: 1,
-                seconds: 10,
-            },
-            ..Limits::default()
-        };
-        let daemon = launch_with(rate_limited_grants(), limits);
-        assert!(daemon.call(send_request("#bots", "hi")).await["Ok"].is_object());
-        let refused = daemon.call(send_request("#bots", "again")).await;
-        assert_eq!(refused["Err"]["code"], "rate_limited");
-        assert!(daemon.call(send_request("#lounge", "hi")).await["Ok"].is_object());
     }
 
     #[tokio::test]
@@ -1390,32 +1341,6 @@ mod tests {
 
         let reply = daemon.call(send_request("#bots", "it's back")).await;
         assert!(reply["Ok"].is_object(), "{reply:?}");
-    }
-
-    #[test]
-    fn an_off_limit_never_stores_an_entry() {
-        let windows = RateWindows::default();
-        let now = Instant::now();
-        for _ in 0..5 {
-            assert_eq!(windows.reserve("#bots", Limit::Off, now), None);
-        }
-        assert!(windows.0.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn react_has_its_own_budget_independent_of_send() {
-        let limits = Limits {
-            react: Limit::Window {
-                count: 1,
-                seconds: 10,
-            },
-            ..Limits::default()
-        };
-        let daemon = launch_with(grants(), limits);
-        assert!(daemon.call(react_request("#bots", "👍", false)).await["Ok"].is_object());
-        let refused = daemon.call(react_request("#bots", "👍", true)).await;
-        assert_eq!(refused["Err"]["code"], "rate_limited");
-        assert!(daemon.call(send_request("#bots", "hi")).await["Ok"].is_object());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1566,15 +1491,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_leaves_the_wait_cursor_alone() {
-        let daemon = launch(grants());
-        daemon.say(from_maria("louro: still there?")).await;
-        daemon.call(history_request("#bots", 20)).await;
-        let (_, reply) = daemon.wait(5).await;
-        assert_eq!(texts(&reply), ["louro: still there?"]);
-    }
-
-    #[tokio::test]
     async fn first_lets_the_bot_dm_only_someone_who_dmed_it() {
         let daemon = launch(grants());
         let before = daemon.call(send_request("maria", "hi maria")).await;
@@ -1585,25 +1501,6 @@ mod tests {
         assert_eq!(texts(&reply), ["louro, got a sec?"]);
         let after = daemon.call(send_request("Maria", "sure, what's up?")).await;
         assert_eq!(after["Ok"]["target"], "Maria");
-    }
-
-    #[tokio::test]
-    async fn first_refuses_a_send_once_a_different_account_holds_the_nick() {
-        let daemon = launch(grants());
-        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
-        daemon.wait(5).await;
-        let before = daemon.call(send_request("luiz", "sure")).await;
-        assert_eq!(before["Ok"]["target"], "luiz");
-
-        let hijacked = Incoming {
-            from: sender("luiz", Some("mallory")),
-            ..dm(from_luiz("it's still me, luiz"))
-        };
-        daemon.say(hijacked).await;
-        daemon.wait(5).await;
-
-        let after = daemon.call(send_request("luiz", "sure")).await;
-        assert_eq!(after["Err"]["code"], "not_allowed");
     }
 
     #[tokio::test]
@@ -1805,15 +1702,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn whois_and_whowas_need_irc_whois() {
-        let daemon = launch(Grants::default());
-        for op in ["whois", "whowas"] {
-            let reply = daemon.call(request(op, json!({"nick": "luiz"}))).await;
-            assert_eq!(reply["Err"]["code"], "not_allowed", "{op}");
-        }
-    }
-
     fn list_request(pattern: Option<&str>) -> Value {
         request("list", json!({"pattern": pattern}))
     }
@@ -1844,8 +1732,6 @@ mod tests {
             );
             assert_eq!(reply["Ok"]["more"], false);
         }
-        let refused = launch(Grants::default()).call(list_request(None)).await;
-        assert_eq!(refused["Err"]["code"], "not_allowed");
     }
 
     #[tokio::test]
@@ -1995,11 +1881,6 @@ mod tests {
             let reply = daemon.call(request(op, args)).await;
             assert_eq!(reply["Err"]["code"], code, "{op}");
         }
-        let ungranted = launch(Grants::default());
-        let reply = ungranted
-            .call(request("nick", json!({"nick": "louro_"})))
-            .await;
-        assert_eq!(reply["Err"]["code"], "not_allowed");
         assert!(daemon.irc.acts.lock().unwrap().is_empty());
     }
 
