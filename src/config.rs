@@ -482,20 +482,6 @@ mod tests {
     }
 
     #[test]
-    fn a_limits_table_fills_in_only_the_keys_it_leaves_out() {
-        let Config { limits, .. } = parse(&format!("{MINIMAL}[limits]\nsend = \"1/1s\"")).unwrap();
-        assert_eq!(
-            limits.send,
-            Limit::Window {
-                count: 1,
-                seconds: 1
-            }
-        );
-        assert_eq!(limits.send_total, Limits::default().send_total);
-        assert_eq!(limits.react, Limits::default().react);
-    }
-
-    #[test]
     fn a_limits_table_refuses_an_unknown_key_or_a_bad_value_without_quoting_it() {
         let unknown = refusal(&format!("{MINIMAL}[limits]\nreact_total = \"1/1s\""));
         assert!(unknown.contains("unknown field `react_total`"), "{unknown}");

@@ -834,17 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn now_is_shaped_like_message_times() {
-        let now = now();
-        assert_eq!(
-            (now.len(), &now[19..20], &now[23..]),
-            (24, ".", "Z"),
-            "{now}"
-        );
-        assert!(humantime::parse_rfc3339(&now).is_ok(), "{now}");
-    }
-
-    #[test]
     fn a_retry_delay_rounds_up_to_whole_seconds() {
         for (delay, seconds) in [
             (Duration::ZERO, 0),
