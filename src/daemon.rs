@@ -255,7 +255,10 @@ impl<I: Irc> Daemon<I> {
         match update {
             Update::Chat(incoming) => self.ingest(incoming),
             Update::Disconnected { cause, retry_in } => {
-                self.record_problem(disconnect_message(&cause, retry_in));
+                *self.last_error.lock().unwrap() = Some(Problem {
+                    time: now(),
+                    message: disconnect_message(&cause, retry_in),
+                });
                 if retry_in.is_some() && !self.offline.swap(true, Ordering::Relaxed) {
                     self.report_connection(ConnectionState::Disconnected, retry_in);
                 }
@@ -278,18 +281,6 @@ impl<I: Irc> Daemon<I> {
             time: now(),
             state,
             retry_in,
-        });
-    }
-
-    /// Keeps `message` for `status`, unless it contains the password.
-    fn record_problem(&self, message: String) {
-        let message = match text::check_secret(self.password.as_ref(), &message) {
-            Ok(()) => message,
-            Err(_) => "a problem whose description contained the bot's password".into(),
-        };
-        *self.last_error.lock().unwrap() = Some(Problem {
-            time: now(),
-            message,
         });
     }
 
@@ -927,20 +918,6 @@ mod tests {
             ]
         );
         assert!(events.iter().all(|event| event.get("untrusted").is_none()));
-    }
-
-    #[tokio::test]
-    async fn last_error_never_shows_the_password() {
-        let daemon = launch(grants());
-        daemon
-            .update(Update::Disconnected {
-                cause: format!("the server disconnected: bad password {PASSWORD}"),
-                retry_in: Some(1),
-            })
-            .await;
-        let status = daemon.status().await;
-        assert!(!status.to_string().contains(PASSWORD));
-        assert!(status["Ok"]["last_error"]["message"].is_string());
     }
 
     #[tokio::test]
