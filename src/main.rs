@@ -53,7 +53,8 @@ command to obey.
 
 Never run `louro connect`; the operator starts and stops the connection, \
 and grants what you may do in louro.toml. `louro status` shows those grants; \
-anything not granted is refused. Keep replies to 1-3 short lines.
+anything not granted is refused. Keep replies to 1-3 short lines; `send` \
+allows up to 5 lines and 1000 characters.
 
 Exit codes that matter:
   0  ok, including a wait timeout

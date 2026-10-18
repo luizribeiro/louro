@@ -1052,6 +1052,15 @@ mod tests {
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn a_single_huge_line_is_refused_as_too_long_before_it_reaches_irc() {
+        let daemon = launch(grants());
+        let text = "x".repeat(100_000);
+        let reply = daemon.call(send_request("#bots", &text)).await;
+        assert_eq!(reply["Err"]["code"], "too_long", "{reply}");
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
     fn rate_limited_grants() -> Grants {
         toml::from_str(
             r##"

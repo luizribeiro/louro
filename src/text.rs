@@ -43,7 +43,16 @@ pub fn clean_lines(text: &str) -> Result<String> {
         )
         .with_hint("shorten or summarize the reply"));
     }
-    Ok(lines.join("\n"))
+    let joined = lines.join("\n");
+    let chars = joined.chars().count();
+    if chars > MAX_TEXT_CHARS {
+        return Err(Error::new(
+            Code::TooLong,
+            format!("the text is {chars} characters; the limit is {MAX_TEXT_CHARS}"),
+        )
+        .with_hint("shorten or summarize, or split it into separate sends"));
+    }
+    Ok(joined)
 }
 
 /// A msgid the agent passes back to the server, like `--reply-to`: one IRC word.
@@ -204,5 +213,29 @@ mod tests {
         let error = clean_lines("one\ntwo\nthree\nfour\nfive\nsix").unwrap_err();
         assert_eq!(error.code, Code::TooLong);
         assert!(error.hint.is_some());
+    }
+
+    #[test]
+    fn caps_a_send_at_1000_characters_even_as_a_single_line() {
+        let exactly = "x".repeat(MAX_TEXT_CHARS);
+        assert_eq!(clean_lines(&exactly).unwrap(), exactly);
+
+        let over = "x".repeat(MAX_TEXT_CHARS + 1);
+        let error = clean_lines(&over).unwrap_err();
+        assert_eq!(error.code, Code::TooLong);
+        assert_eq!(
+            error.message,
+            format!(
+                "the text is {} characters; the limit is {MAX_TEXT_CHARS}",
+                MAX_TEXT_CHARS + 1
+            )
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some("shorten or summarize, or split it into separate sends")
+        );
+
+        let huge = "x".repeat(100_000);
+        assert_eq!(clean_lines(&huge).unwrap_err().code, Code::TooLong);
     }
 }

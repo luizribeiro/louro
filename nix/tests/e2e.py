@@ -15,6 +15,7 @@ TIMEOUT = dt.timedelta(minutes=2)
 # How long stopping louro may take, whatever the server does with its QUIT.
 PROMPTLY = dt.timedelta(seconds=6)
 EXIT_CODES = {
+    "too_long": 2,
     "no_session": 3,
     "not_connected": 4,
     "not_allowed": 5,
@@ -301,6 +302,13 @@ with subtest("names lists #bots with accounts, and refuses channels outside irc.
     assert {"luiz", "mallory", BOT["user"]} <= members(names).keys(), names
     assert members(names)["mallory"]["account"] == "mallory", names
     refused("not_allowed", "names", "#lounge")
+
+with subtest("a send over 1000 characters is refused as too_long, and luiz hears nothing"):
+    huge = "x" * 5000
+    error = refused("too_long", "send", "#bots", huge)
+    assert "1000" in error["message"], error
+    log = machine.succeed(f"cat {human_file('luiz', 'log')}")
+    assert huge not in log, "the oversized text reached irc"
 
 with subtest("sends outside the grants, and quit without irc.quit, are refused"):
     refused("not_allowed", "send", "#lounge", "hi")
