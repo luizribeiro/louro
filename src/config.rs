@@ -78,6 +78,8 @@ pub struct Irc {
     pub redact: bool,
     /// Channels whose topic it may set; reading a topic needs only `join`.
     pub topic: Selector,
+    /// Whether it may look people up with `whois` and `whowas`.
+    pub whois: bool,
     pub quit: bool,
 }
 
@@ -332,7 +334,7 @@ mod tests {
         ] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
-        assert!(!irc.redact && !irc.quit);
+        assert!(!irc.redact && !irc.whois && !irc.quit);
         assert_eq!(
             limits.send,
             Limit::Window {

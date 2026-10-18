@@ -99,6 +99,50 @@ pub struct Member {
     pub prefix: String,
 }
 
+/// What the server says about a user who is online now.
+#[derive(Serialize)]
+pub struct Whois {
+    pub nick: String,
+    pub account: Option<String>,
+    /// Their away message, if they are away.
+    pub away: Option<String>,
+    pub channels: Vec<String>,
+    /// Seconds since they last spoke.
+    pub idle: Option<u64>,
+    pub bot: bool,
+}
+
+impl Whois {
+    /// Every string comes from the network, so each is cleaned like chat.
+    pub fn sanitized(self) -> Self {
+        let clean = |text: &str| text::sanitize(text).0;
+        Self {
+            nick: clean(&self.nick),
+            account: self.account.as_deref().map(clean),
+            away: self.away.as_deref().map(clean),
+            channels: self.channels.iter().map(|channel| clean(channel)).collect(),
+            ..self
+        }
+    }
+}
+
+/// Someone who used a nick before, as the server remembers them.
+#[derive(Serialize)]
+pub struct Whowas {
+    pub nick: String,
+    pub realname: Option<String>,
+}
+
+impl Whowas {
+    pub fn sanitized(self) -> Self {
+        let clean = |text: &str| text::sanitize(text).0;
+        Self {
+            nick: clean(&self.nick),
+            realname: self.realname.as_deref().map(clean),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Outgoing {
     pub target: String,
@@ -184,6 +228,9 @@ pub trait Irc: Send + Sync + 'static {
         msgid: &str,
         reason: &str,
     ) -> impl Future<Output = Result<()>> + Send;
+    fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send;
+    /// Earlier users of `nick`, most recent first; empty if the server remembers none.
+    fn whowas(&self, nick: &str) -> impl Future<Output = Result<Vec<Whowas>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
@@ -554,6 +601,35 @@ impl Irc for PapoIrc {
 
     async fn redact(&self, target: &str, msgid: &str, reason: &str) -> Result<()> {
         Ok(self.client.redact(target, msgid, reason).await?)
+    }
+
+    async fn whois(&self, nick: &str) -> Result<Whois> {
+        let whois = self.client.whois(nick).await?;
+        Ok(Whois {
+            nick: whois.nick.to_string(),
+            account: whois.account.map(|account| account.to_string()),
+            away: whois.away,
+            channels: whois
+                .channels
+                .iter()
+                .map(|channel| channel.name.to_string())
+                .collect(),
+            idle: whois.idle.map(|idle| idle.as_secs()),
+            bot: whois.is_bot,
+        })
+    }
+
+    /// papo has no typed WHOWAS yet, so this reads the `RPL_WHOWASUSER` replies itself.
+    async fn whowas(&self, nick: &str) -> Result<Vec<Whowas>> {
+        let replies = self.client.request_command("WHOWAS", [nick]).await?;
+        Ok(replies
+            .iter()
+            .filter(|reply| reply.numeric() == Some(papo::numeric::RPL_WHOWASUSER))
+            .map(|reply| Whowas {
+                nick: reply.param(1).unwrap_or(nick).to_owned(),
+                realname: reply.param(5).map(str::to_owned),
+            })
+            .collect())
     }
 
     async fn quit(&self) {

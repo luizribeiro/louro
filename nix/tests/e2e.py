@@ -63,6 +63,7 @@ def toml_lines(table, prefix=""):
 
 def grants(
     dm_read=False, dm_send=False, quit=False, react=False, typing=False, redact=False, topic=False,
+    whois=False,
 ):
     return {"irc": {
         "join": ["#bots"],
@@ -72,6 +73,7 @@ def grants(
         "typing": typing,
         "redact": redact,
         "topic": topic,
+        "whois": whois,
         "quit": quit,
     }}
 
@@ -376,6 +378,16 @@ with running(redact=True):
 
         louro("redact", "#bots", multi["msgid"], "--reason", "multiline test cleanup")
         assert "\n".join(lines) not in texts(louro("history", "#bots"))
+
+with running(whois=True):
+    with subtest("whois looks luiz up, and whowas remembers louro's earlier sessions"):
+        whois = louro("whois", "luiz")
+        assert whois["account"] == "luiz" and "#bots" in whois["channels"], whois
+        assert whois["untrusted"] and not whois["bot"], whois
+        whowas = louro("whowas", BOT["user"])
+        assert whowas["entries"] and whowas["entries"][0]["nick"] == BOT["user"], whowas
+        assert louro("whowas", "nobody-ever")["entries"] == []
+        refused("not_allowed", "whois", "#bots")
 
 with running(dm_read=["account:luiz"], dm_send=["$first"]):
     with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):

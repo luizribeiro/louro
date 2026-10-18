@@ -91,10 +91,16 @@ impl Grants {
     }
 
     pub fn check_redact(&self) -> Result<()> {
-        if self.irc.redact {
-            return Ok(());
+        granted(self.irc.redact, "irc.redact")
+    }
+
+    /// `whois` and `whowas` look up one nick.
+    pub fn check_whois(&self, nick: &str) -> Result<()> {
+        granted(self.irc.whois, "irc.whois")?;
+        match target_kind(nick)? {
+            TargetKind::Nick => Ok(()),
+            TargetKind::Channel => Err(not_allowed(format!("{nick} is a channel, not a nick"))),
         }
-        Err(not_allowed("irc.redact is not granted"))
     }
 
     pub fn check_quit(&self) -> Result<()> {
@@ -104,6 +110,13 @@ impl Grants {
         Err(Error::new(Code::NotAllowed, "irc.quit is not granted")
             .with_hint("the operator stops louro"))
     }
+}
+
+fn granted(granted: bool, grant: &str) -> Result<()> {
+    if granted {
+        return Ok(());
+    }
+    Err(not_allowed(format!("{grant} is not granted")))
 }
 
 fn require(granted: bool, grant: &str, target: &str) -> Result<()> {
@@ -331,6 +344,18 @@ mod tests {
         for channel in ["#lounge", "#ops"] {
             let error = grants.check_topic(channel).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{channel}");
+        }
+    }
+
+    #[test]
+    fn looks_up_only_a_nick_and_only_when_irc_whois_grants() {
+        let error = Grants::default().check_whois("luiz").unwrap_err();
+        assert_eq!(error.message, "irc.whois is not granted");
+        let grants = grants("irc.whois = true");
+        assert!(grants.check_whois("luiz").is_ok());
+        for target in ["#bots", "luiz,maria", "luiz\r\nQUIT", ""] {
+            let error = grants.check_whois(target).unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{target:?}");
         }
     }
 
