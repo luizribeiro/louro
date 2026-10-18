@@ -54,8 +54,8 @@ pkgs.testers.runNixOSTest (
         enable = true;
         settings = {
           server.listeners.":${toString settings.ircPort}" = { };
-          # A client that disconnects leaves, rather than lingering as always-on.
-          accounts.multiclient.always-on = "disabled";
+          # A client that disconnects leaves, unless its account opts in to always-on.
+          accounts.multiclient.always-on = "opt-in";
           # The test sends in bursts that fakelag would throttle.
           fakelag.enabled = false;
           # Ergo offers draft/message-redaction only with this on.
@@ -67,9 +67,10 @@ pkgs.testers.runNixOSTest (
           };
         };
       };
+      # irc-human-louro logs in to the bot's account, to opt it in to always-on.
       systemd.services = lib.mapAttrs' (
         nick: password: lib.nameValuePair "irc-human-${nick}" (humanService nick password)
-      ) settings.humans;
+      ) (settings.humans // { ${settings.bot.user} = settings.bot.password; });
       users.users.${settings.bot.user}.isNormalUser = true;
       environment.systemPackages = [
         packages.${system}.louro

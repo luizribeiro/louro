@@ -12,6 +12,8 @@ SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON = f"-u {BOT['user']} -f 'louro connect'"
 TIMEOUT = dt.timedelta(minutes=2)
+# How long stopping louro may take, whatever the server does with its QUIT.
+PROMPTLY = dt.timedelta(seconds=6)
 EXIT_CODES = {
     "no_session": 3,
     "not_connected": 4,
@@ -25,9 +27,10 @@ def as_bot(command):
     return shlex.join(["runuser", "-u", BOT["user"], "--", *command])
 
 
-def louro(*args, exit_code=0):
-    """Runs louro as the bot's user; returns its JSON output."""
-    command = as_bot(["env", f"LOURO_SOCKET={SOCKET}", "louro", *args])
+def louro(*args, exit_code=0, within=TIMEOUT):
+    """Runs louro as the bot's user, killed after within; returns its JSON output."""
+    seconds = str(int(within.total_seconds()))
+    command = as_bot(["env", f"LOURO_SOCKET={SOCKET}", "timeout", seconds, "louro", *args])
     status, out = machine.execute(command)
     assert status == exit_code, f"{command}: exit {status}, wanted {exit_code}: {out}"
     return json.loads(out)
@@ -113,16 +116,16 @@ def start(granted):
     return connected
 
 
-def assert_stopped():
+def assert_stopped(within=TIMEOUT):
     """The daemon exits and leaves no socket behind."""
-    machine.wait_until_fails(f"pgrep {DAEMON}", timeout=TIMEOUT)
+    machine.wait_until_fails(f"pgrep {DAEMON}", timeout=within)
     machine.fail(f"test -e {SOCKET}")
 
 
-def stop():
+def stop(within=TIMEOUT):
     """What a service manager does; louro quits and cleans up after itself."""
     machine.succeed(f"pkill -TERM {DAEMON}")
-    assert_stopped()
+    assert_stopped(within)
 
 
 @contextlib.contextmanager
@@ -437,3 +440,24 @@ with subtest("with irc.quit granted, louro quit stops the daemon and removes the
     start(grants(quit=True))
     louro("quit")
     assert_stopped()
+
+
+def opt_in_to_always_on():
+    """Logs in to the bot's account as a person would and turns on Ergo's always-on, so the
+    account stays online with or without louro, as on irc.weblounge.org."""
+    log = human_file(BOT["user"], "log")
+    machine.succeed(f"systemctl restart irc-human-{BOT['user']}")
+    machine.wait_until_succeeds(f"grep -q ' 001 {BOT['user']} ' {log}", timeout=TIMEOUT)
+    send_raw(BOT["user"], "PRIVMSG NickServ :SET always-on true")
+    send_raw(BOT["user"], "PRIVMSG NickServ :GET always-on")
+    machine.wait_until_succeeds(f"grep -q 'your client is always-on' {log}", timeout=TIMEOUT)
+    machine.succeed(f"systemctl stop irc-human-{BOT['user']}")
+
+
+with subtest("under Ergo always-on, louro quit and SIGTERM each stop louro promptly"):
+    opt_in_to_always_on()
+    start(grants(quit=True))
+    louro("quit", within=PROMPTLY)
+    assert_stopped(PROMPTLY)
+    start(grants())
+    stop(PROMPTLY)
