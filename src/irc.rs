@@ -4,9 +4,9 @@
 use std::time::{Duration, SystemTime};
 
 use papo::{
-    Account, Away, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem,
-    HistoryReference, ListFilter, Message, MessageId, MessageKind, Refusal, RegistrationError,
-    Sasl, Source, State, User,
+    Account, Away, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events, Feature,
+    HistoryItem, HistoryReference, ListFilter, Message, MessageId, MessageKind, Refusal,
+    RegistrationError, Sasl, Source, State, User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -353,10 +353,26 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             online: false,
         }],
         Event::Disconnected(disconnected) => vec![Update::Disconnected {
-            cause: disconnected.cause.to_string(),
+            cause: disconnect_cause(&disconnected.cause),
             retry_in: disconnected.retry_in.map(whole_seconds),
         }],
         _ => Vec::new(),
+    }
+}
+
+/// Why the connection ended, in plain words: a rejected (re)registration, like a bad SASL
+/// login, is named directly so an agent reading `last_error` recognizes a login problem without
+/// parsing free text. Registration failures that aren't a rejection (a timeout, an STS loop)
+/// keep their own wording instead.
+fn disconnect_cause(cause: &DisconnectCause) -> String {
+    match cause {
+        DisconnectCause::Registration(
+            error @ (RegistrationError::Sasl { .. }
+            | RegistrationError::AccountRequired
+            | RegistrationError::Banned { .. }
+            | RegistrationError::Rejected { .. }),
+        ) => format!("login rejected: {error}"),
+        other => other.to_string(),
     }
 }
 
@@ -741,7 +757,7 @@ pub mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use papo::{DisconnectCause, Disconnected, InvalidInput, Unsupported, UnsupportedReason};
+    use papo::{Disconnected, InvalidInput, Unsupported, UnsupportedReason};
 
     use super::*;
 
@@ -756,6 +772,41 @@ mod tests {
             (papo::Origin::OtherSession, true, None),
         ] {
             assert_eq!(chat_origin(origin, from_me), forwarded, "{origin:?}");
+        }
+    }
+
+    #[test]
+    fn a_rejected_reconnect_login_is_named_plainly() {
+        for (cause, message) in [
+            (
+                DisconnectCause::Registration(RegistrationError::Sasl {
+                    message: "Invalid account credentials".into(),
+                }),
+                "login rejected: SASL authentication failed: Invalid account credentials",
+            ),
+            (
+                DisconnectCause::Registration(RegistrationError::AccountRequired),
+                "login rejected: the server requires an authenticated account",
+            ),
+            (
+                DisconnectCause::Registration(RegistrationError::Banned {
+                    message: "K-lined: open proxy".into(),
+                }),
+                "login rejected: the server banned this connection: K-lined: open proxy",
+            ),
+            (
+                DisconnectCause::Registration(RegistrationError::Rejected {
+                    message: "Too many connections".into(),
+                }),
+                "login rejected: the server rejected the connection: Too many connections",
+            ),
+            (
+                DisconnectCause::Registration(RegistrationError::Timeout),
+                "IRC registration timed out",
+            ),
+            (DisconnectCause::ConnectionLost, "the connection was lost"),
+        ] {
+            assert_eq!(disconnect_cause(&cause), message, "{cause:?}");
         }
     }
 
