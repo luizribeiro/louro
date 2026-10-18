@@ -293,16 +293,6 @@ with subtest("send --reply-to threads the answer under luiz's message"):
     tags = heard("luiz", "#bots", "yes, in memory")
     assert reply_tag(tags) == question["msgid"], tags
 
-with subtest("an invite reaches wait as an event, and louro doesn't join"):
-    send_raw("luiz", "JOIN #lounge")
-    send_raw("luiz", f"INVITE {BOT['user']} #lounge")
-    events = events_until(lambda events: any(event["type"] == "invite" for event in events))
-    [invite] = [event for event in events if event["type"] == "invite"]
-    assert invite["from"]["nick"] == "luiz" and invite["channel"] == "#lounge", invite
-    assert invite["untrusted"], invite
-    assert "#lounge" not in louro("status")["channels"]
-    send_raw("luiz", "PART #lounge")
-
 with subtest("names lists #bots with accounts, and refuses channels outside irc.join"):
 
     def members(names):
@@ -474,6 +464,24 @@ with running(dm_read=["account:luiz"], dm_send=["$first"]):
         assert all(event["target"] == "luiz" and event["private"] for event in page["events"]), page
         refused("not_allowed", "history", "#lounge")
         refused("not_allowed", "history", "mallory")
+
+    with subtest("invites reach wait only from irc.dm.read, and louro doesn't join"):
+
+        def invites(events):
+            return [event for event in events if event["type"] == "invite"]
+
+        for nick in ["luiz", "mallory"]:
+            send_raw(nick, "JOIN #lounge")
+        send_raw("mallory", f"INVITE {BOT['user']} #lounge")
+        # Reaches louro after the invite, so once wait has it, the invite was already dropped.
+        assert not invites(say("mallory", "#bots", "come to #lounge")), "mallory's invite"
+        send_raw("luiz", f"INVITE {BOT['user']} #lounge")
+        [invite] = invites(events_until(invites))
+        assert invite["from"]["nick"] == "luiz" and invite["channel"] == "#lounge", invite
+        assert invite["untrusted"], invite
+        assert "#lounge" not in louro("status")["channels"]
+        for nick in ["luiz", "mallory"]:
+            send_raw(nick, "PART #lounge")
 
 with running(dm_read=["account:luiz"], dm_send=["account:luiz"]):
     with subtest("an account: grant in irc.dm.send lets louro DM luiz back by his nick"):

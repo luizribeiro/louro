@@ -2,7 +2,7 @@
 
 use crate::config::{Grants, Selector};
 use crate::error::{Code, Error, Result};
-use crate::irc::Incoming;
+use crate::irc::{Incoming, Sender};
 
 /// In `irc.dm.send`: anyone whose DM the daemon has received.
 const FIRST: &str = "$first";
@@ -22,13 +22,18 @@ impl Grants {
     /// Channel chat only from `irc.join` channels, DMs only from `irc.dm.read` senders.
     pub fn may_read(&self, incoming: &Incoming) -> bool {
         if incoming.private {
-            self.irc
-                .dm
-                .read
-                .matches_sender(&incoming.from.nick, incoming.from.account.as_deref())
+            self.may_hear_privately_from(&incoming.from)
         } else {
             self.irc.join.matches(&incoming.target)
         }
+    }
+
+    /// Private contact, a DM or an invite, reaches the agent only from `irc.dm.read` senders.
+    pub fn may_hear_privately_from(&self, from: &Sender) -> bool {
+        self.irc
+            .dm
+            .read
+            .matches_sender(&from.nick, from.account.as_deref())
     }
 
     /// A channel needs `irc.join` and `irc.send`; a nick needs `irc.dm.send`.

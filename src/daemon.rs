@@ -278,11 +278,15 @@ impl<I: Irc> Daemon<I> {
                     PresenceState::Offline
                 },
             }),
-            Update::Invited { from, channel } => self.inbox.push_invite(Invite {
-                time: now(),
-                from,
-                channel,
-            }),
+            Update::Invited { from, channel } => {
+                if self.grants.may_hear_privately_from(&from) {
+                    self.inbox.push_invite(Invite {
+                        time: now(),
+                        from,
+                        channel,
+                    });
+                }
+            }
         }
     }
 
@@ -1230,6 +1234,33 @@ mod tests {
 
         let (_, reply) = daemon.wait(5).await;
         assert_eq!(texts(&reply), ["louro: any news?", "status report, please"]);
+    }
+
+    #[tokio::test]
+    async fn wait_gets_invites_only_from_dm_read_senders() {
+        let daemon = launch(toml::from_str(r#"irc.dm.read = ["account:luiz"]"#).unwrap());
+        for (nick, account) in [
+            ("mallory", Some("mallory")),
+            ("luiz", Some("mallory")),
+            ("luiz", None),
+            ("luiz", Some("luiz")),
+        ] {
+            daemon
+                .update(Update::Invited {
+                    from: sender(nick, account),
+                    channel: "#lounge".into(),
+                })
+                .await;
+        }
+
+        let (_, reply) = daemon.wait(5).await;
+        let invites: Vec<_> = reply["Ok"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| (&event["from"]["nick"], &event["from"]["account"]))
+            .collect();
+        assert_eq!(invites, [(&json!("luiz"), &json!("luiz"))]);
     }
 
     #[tokio::test]
