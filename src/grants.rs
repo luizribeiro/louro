@@ -164,14 +164,10 @@ mod tests {
     }
 
     fn incoming(target: &str, nick: &str, private: bool) -> Incoming {
-        incoming_as(target, nick, None, private)
-    }
-
-    fn incoming_as(target: &str, nick: &str, account: Option<&str>, private: bool) -> Incoming {
         Incoming {
             target: target.into(),
             private,
-            from: sender(nick, account),
+            from: sender(nick, None),
             ..from_maria("louro: ping")
         }
     }
