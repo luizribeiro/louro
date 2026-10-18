@@ -7,7 +7,7 @@ use crate::irc::Secret;
 pub const MAX_TEXT_CHARS: usize = 1000;
 const MAX_LINES: usize = 5;
 const MAX_MSGID_BYTES: usize = 128;
-const MAX_REACTION_CHARS: usize = 32;
+pub const MAX_REACTION_CHARS: usize = 32;
 /// Kept out of sends so the agent can't be steered into CTCP requests like DCC.
 const CTCP_DELIMITER: char = '\x01';
 
@@ -68,17 +68,17 @@ pub fn check_msgid(msgid: &str) -> Result<()> {
         .with_hint("use the msgid of an event from `louro wait` or `louro history`"))
 }
 
-/// A reaction is a short emoji or word, never a hidden message.
-pub fn check_reaction(reaction: &str) -> Result<()> {
-    let valid = !reaction.trim().is_empty()
-        && reaction.chars().count() <= MAX_REACTION_CHARS
-        && !reaction.chars().any(char::is_control);
+/// Short one-line outbound text, like a reaction: never empty, and never a hidden message.
+pub fn check_field(what: &str, text: &str, max_chars: usize) -> Result<()> {
+    let valid = !text.trim().is_empty()
+        && text.chars().count() <= max_chars
+        && !text.chars().any(char::is_control);
     if valid {
         return Ok(());
     }
     Err(Error::new(
         Code::Usage,
-        format!("a reaction is 1 to {MAX_REACTION_CHARS} characters with no control characters"),
+        format!("{what} is 1 to {max_chars} characters with no control characters"),
     ))
 }
 
@@ -159,15 +159,17 @@ mod tests {
     }
 
     #[test]
-    fn a_reaction_is_short_and_has_no_control_characters() {
+    fn a_field_is_short_one_line_text() {
+        let check = |text: &str| check_field("a reaction", text, MAX_REACTION_CHARS);
         for reaction in ["👍", "🇧🇷", "👨‍👩‍👧", "+1", &"🦜".repeat(32)] {
-            assert!(check_reaction(reaction).is_ok(), "{reaction:?}");
+            assert!(check(reaction).is_ok(), "{reaction:?}");
         }
         for reaction in ["", " ", "ok\r\nQUIT", "\u{1b}[31m", &"🦜".repeat(33)] {
+            let error = check(reaction).unwrap_err();
+            assert_eq!(error.code, Code::Usage, "{reaction:?}");
             assert_eq!(
-                check_reaction(reaction).unwrap_err().code,
-                Code::Usage,
-                "{reaction:?}"
+                error.message,
+                "a reaction is 1 to 32 characters with no control characters"
             );
         }
     }

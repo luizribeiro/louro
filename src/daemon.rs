@@ -414,7 +414,7 @@ impl<I: Irc> Daemon<I> {
         self.grants
             .check_also(&self.grants.irc.react, "irc.react", target, &dm)?;
         text::check_msgid(msgid)?;
-        text::check_reaction(reaction)?;
+        text::check_field("a reaction", reaction, text::MAX_REACTION_CHARS)?;
         if let Some(retry_after) =
             self.react_windows
                 .reserve(target, self.limits.react, Instant::now())
