@@ -41,7 +41,9 @@ in
       enable = true;
       settings = {
         server.listeners.":${toString settings.ircPort}" = { };
-        # A client that disconnects leaves, unless its account opts in to always-on.
+        # A client that disconnects leaves, unless its account opts in to always-on. nixpkgs's
+        # ergochat module defaults this to "opt-out" (always-on unless an account opts out), so
+        # this pins the suite to upstream-normal disconnect semantics.
         accounts.multiclient.always-on = "opt-in";
         # The test sends in bursts that fakelag would throttle.
         fakelag.enabled = false;

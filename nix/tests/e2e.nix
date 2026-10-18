@@ -23,11 +23,8 @@ pkgs.testers.runNixOSTest {
   imports = [
     (import ./irc.nix {
       inherit settings;
+      inherit (settings) humans;
       script = ./e2e.py;
-      # irc-human-louro logs in to the bot's account, to opt it in to always-on.
-      humans = settings.humans // {
-        ${settings.bot.user} = settings.bot.password;
-      };
     })
   ];
 

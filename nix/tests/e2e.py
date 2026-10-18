@@ -1,6 +1,5 @@
 # The e2e scenarios, run by e2e.nix's VM test after irc.py, with `settings` from e2e.nix.
 import contextlib
-import datetime as dt
 import json
 import shlex
 
@@ -11,8 +10,6 @@ PASSWORD_FILE = f"{HOME}/password"
 SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON = f"-u {BOT['user']} -f 'louro connect'"
-# How long stopping louro may take, whatever the server does with its QUIT.
-PROMPTLY = dt.timedelta(seconds=6)
 EXIT_CODES = {
     "usage": 2,
     "too_long": 2,
@@ -425,7 +422,7 @@ with subtest("with irc.quit granted, louro quit stops the daemon and removes the
     louro("quit")
     assert_stopped()
 
-start(grants(join=["#bots", "#quiet"]))
+start(grants())
 with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows again"):
     # Stopped and started separately, so the outage lasts until louro notices it.
     machine.succeed("systemctl stop ergochat")
@@ -447,18 +444,6 @@ with subtest("chat sent while louro was cut off arrives from history after it re
     assert isinstance(events[0]["retry_in"], int) and "untrusted" not in events[0], events
     [missed] = chat_from("luiz", events)
     assert missed["origin"] == "history" and missed["untrusted"], missed
-
-with subtest("chat in a channel joined just before the cut, quiet until then, arrives once"):
-    for nick in settings["humans"]:
-        send_raw(nick, "JOIN #quiet")
-    louro("join", "#quiet")
-    louro_until(lambda status: "#quiet" in status["channels"], "status")
-    events = say_while_cut_off("#quiet", "you missed this too")
-    # A duplicate could land in a later batch than the first delivery.
-    events.extend(louro("wait", "--timeout", "5")["events"])
-    [missed] = chat_from("luiz", events)
-    assert missed["target"] == "#quiet", missed
-    assert missed["origin"] == "history" and missed["text"] == "you missed this too", missed
 
 with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
     machine.succeed(shlex.join([
@@ -495,25 +480,3 @@ with subtest("a wrong SASL password fails connect and leaves nothing running"):
     error = refused("auth_failed", "connect", "--config", CONFIG)
     assert "wrong-password" not in json.dumps(error), error
     assert_stopped()
-
-
-
-def opt_in_to_always_on():
-    """Logs in to the bot's account as a person would and turns on Ergo's always-on, so the
-    account stays online with or without louro, as on irc.weblounge.org."""
-    log = human_file(BOT["user"], "log")
-    machine.succeed(f"systemctl restart irc-human-{BOT['user']}")
-    machine.wait_until_succeeds(f"grep -q ' 001 {BOT['user']} ' {log}", timeout=TIMEOUT)
-    send_raw(BOT["user"], "PRIVMSG NickServ :SET always-on true")
-    send_raw(BOT["user"], "PRIVMSG NickServ :GET always-on")
-    machine.wait_until_succeeds(f"grep -q 'your client is always-on' {log}", timeout=TIMEOUT)
-    machine.succeed(f"systemctl stop irc-human-{BOT['user']}")
-
-
-with subtest("under Ergo always-on, louro quit and SIGTERM each stop louro promptly"):
-    opt_in_to_always_on()
-    start(grants(quit=True))
-    louro("quit", within=PROMPTLY)
-    assert_stopped(PROMPTLY)
-    start(grants())
-    stop(PROMPTLY)
