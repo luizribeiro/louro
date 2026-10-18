@@ -73,11 +73,10 @@ struct Problem {
 struct RateWindows(Mutex<HashMap<String, VecDeque<Instant>>>);
 
 impl RateWindows {
-    /// Checks `key` against `limit` and, if it has room, immediately reserves a slot by
-    /// recording `now` — so a concurrent attempt can't also pass the check while this one is
-    /// still in flight. `None` on success (never refused for [`Limit::Off`], which never
-    /// reserves either); otherwise the whole seconds, rounded up, until the oldest entry leaves
-    /// the window. Undo a reservation that doesn't go through with [`Self::release`].
+    /// Reserves a slot for `key` at once if the window has room, so a concurrent attempt can't
+    /// also pass while this one is in flight, and returns `None`; else the whole seconds, rounded
+    /// up, until it has room. [`Limit::Off`] never refuses or reserves. Undo an unused
+    /// reservation with [`Self::release`].
     fn reserve(&self, key: &str, limit: Limit, now: Instant) -> Option<u64> {
         let Limit::Window { count, seconds } = limit else {
             return None;
@@ -108,7 +107,7 @@ impl RateWindows {
 struct Daemon<I> {
     grants: Grants,
     limits: Limits,
-    /// Kept so `send` can refuse to post it.
+    /// Kept so no op can show it to others.
     password: Option<Secret>,
     irc: I,
     inbox: Inbox,
@@ -620,10 +619,9 @@ impl<I: Irc> Daemon<I> {
         Ok(result)
     }
 
-    /// `Err` once `target` has reached `limits.send`, or any target has reached
-    /// `limits.send_total`, within its window; a refused send never touches either budget. A
-    /// reservation this returns must be undone with [`Self::release_send_budget`] if the send it
-    /// was held for never reaches IRC, so a send that fails doesn't spend budget it didn't use.
+    /// Refuses once `target` reached `limits.send` or all targets `limits.send_total`; a refused
+    /// send touches neither, and one that never reaches IRC gives its slots back with
+    /// [`Self::release_send_budget`].
     fn reserve_send_budget(&self, target: &str) -> Result<Instant> {
         let now = Instant::now();
         if let Some(retry_after) = self.send_windows.reserve(target, self.limits.send, now) {
