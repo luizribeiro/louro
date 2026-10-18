@@ -342,32 +342,39 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    fn dm_history(&self, target: &str) -> DmHistory {
-        self.dm_senders
+    /// Checks `op` against the grants with what DMs from its target recorded and, when papo knows
+    /// the account that nick has now, for that account too, so a grant an earlier holder earned
+    /// isn't handed on.
+    fn check_grants(&self, op: &Op) -> Result<()> {
+        let (Op::Send(Outgoing { target, .. })
+        | Op::React { target, .. }
+        | Op::Typing { target, .. }
+        | Op::History { target, .. }) = op
+        else {
+            return self.grants.check(op, &DmHistory::default());
+        };
+        let dm = self
+            .dm_senders
             .lock()
             .unwrap()
             .get(&target.to_ascii_lowercase())
             .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Passes `check` with what DMs from `target` recorded and, when papo knows the account the
-    /// nick has now, for that account too, so a grant an earlier holder earned isn't handed on.
-    fn check_dm(&self, target: &str, check: impl Fn(&DmHistory) -> Result<()>) -> Result<()> {
-        let dm = self.dm_history(target);
-        check(&dm)?;
+            .unwrap_or_default();
+        self.grants.check(op, &dm)?;
         let account = match self.irc.account(target) {
             NickAccount::Unknown => return Ok(()),
             NickAccount::LoggedOut => None,
             NickAccount::LoggedIn(account) => Some(account),
         };
-        check(&dm.held_by(account.as_deref())).map_err(|_| {
-            Error::new(
-                Code::NotAllowed,
-                format!("{target} is now logged in as a different account"),
-            )
-            .with_hint("don't retry; someone else may hold the nick")
-        })
+        self.grants
+            .check(op, &dm.held_by(account.as_deref()))
+            .map_err(|_| {
+                Error::new(
+                    Code::NotAllowed,
+                    format!("{target} is now logged in as a different account"),
+                )
+                .with_hint("don't retry; someone else may hold the nick")
+            })
     }
 
     async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
@@ -401,6 +408,7 @@ impl<I: Irc> Daemon<I> {
         if let Some(text) = shown_text(&op) {
             text::check_secret(self.password.as_ref(), text)?;
         }
+        self.check_grants(&op)?;
         match op {
             Op::Status {} => Ok(self.status()),
             Op::Wait { .. } => unreachable!("serve answers wait itself"),
@@ -429,7 +437,7 @@ impl<I: Irc> Daemon<I> {
             Op::Away { text, back } => self.away(text.as_deref(), back).await,
             Op::Setname { realname } => self.setname(&realname).await,
             Op::List { pattern } => self.list(pattern.as_deref()).await,
-            Op::Quit {} => self.grants.check_quit().map(|()| json!({})),
+            Op::Quit {} => Ok(json!({})),
         }
     }
 
@@ -443,7 +451,6 @@ impl<I: Irc> Daemon<I> {
     }
 
     fn names(&self, channel: &str) -> Result<Value> {
-        self.grants.check_join(channel)?;
         let members: Vec<Member> = self
             .irc
             .names(channel)
@@ -457,15 +464,13 @@ impl<I: Irc> Daemon<I> {
         Ok(json!({"channel": channel, "members": members}))
     }
 
-    /// Reading needs only `irc.join`; the topic is someone else's text, so it is sanitized.
+    /// The topic is someone else's text, so it is sanitized.
     async fn topic(&self, channel: &str, set: Option<String>) -> Result<Value> {
         let Some(topic) = set else {
-            self.grants.check_join(channel)?;
             self.require_joined(channel)?;
             let topic = self.irc.topic(channel).map(|topic| text::clean(&topic));
             return Ok(json!({"channel": channel, "topic": topic, "untrusted": true}));
         };
-        self.grants.check_topic(channel)?;
         text::check_field("a topic", &topic, MAX_TOPIC_CHARS)?;
         self.require_joined(channel)?;
         self.irc.set_topic(channel, &topic).await?;
@@ -473,13 +478,11 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn join(&self, channel: &str) -> Result<Value> {
-        self.grants.check_join(channel)?;
         self.irc.join(channel).await?;
         Ok(json!({"channel": channel, "joined": true}))
     }
 
     async fn part(&self, channel: &str, reason: &str) -> Result<Value> {
-        self.grants.check_join(channel)?;
         text::check_one_line(reason)?;
         self.require_joined(channel)?;
         self.irc.part(channel, reason).await?;
@@ -494,14 +497,12 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn whois(&self, nick: &str) -> Result<Value> {
-        self.grants.check_whois(nick)?;
         let mut result = json!(self.irc.whois(nick).await?.sanitized());
         result["untrusted"] = true.into();
         Ok(result)
     }
 
     async fn whowas(&self, nick: &str) -> Result<Value> {
-        self.grants.check_whois(nick)?;
         let entries: Vec<_> = self
             .irc
             .whowas(nick)
@@ -513,7 +514,6 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn watch(&self, nick: &str, remove: bool) -> Result<Value> {
-        self.grants.check_watch(nick)?;
         let nick_key = nick.to_ascii_lowercase();
         let full = {
             let watching = self.watching.lock().unwrap();
@@ -537,7 +537,7 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn set_nick(&self, nick: &str) -> Result<Value> {
-        self.check_identity("a nick", nick, MAX_NICK_CHARS)?;
+        text::check_field("a nick", nick, MAX_NICK_CHARS)?;
         self.irc.set_nick(nick).await?;
         Ok(json!({"nick": nick}))
     }
@@ -548,27 +548,20 @@ impl<I: Irc> Daemon<I> {
         } else {
             Some(text.ok_or_else(|| Error::new(Code::Usage, "give an away message, or --back"))?)
         };
-        match text {
-            Some(text) => self.check_identity("an away message", text, MAX_AWAY_CHARS)?,
-            None => self.grants.check_identity()?,
+        if let Some(text) = text {
+            text::check_field("an away message", text, MAX_AWAY_CHARS)?;
         }
         self.irc.set_away(text).await?;
         Ok(json!({"away": text}))
     }
 
     async fn setname(&self, realname: &str) -> Result<Value> {
-        self.check_identity("a realname", realname, MAX_REALNAME_CHARS)?;
+        text::check_field("a realname", realname, MAX_REALNAME_CHARS)?;
         self.irc.set_realname(realname).await?;
         Ok(json!({"realname": realname}))
     }
 
-    fn check_identity(&self, what: &str, value: &str, max_chars: usize) -> Result<()> {
-        self.grants.check_identity()?;
-        text::check_field(what, value, max_chars)
-    }
-
     async fn list(&self, pattern: Option<&str>) -> Result<Value> {
-        self.grants.check_list()?;
         let pattern = pattern.map(str::to_lowercase);
         let mut channels: Vec<Listed> = self
             .irc
@@ -596,10 +589,6 @@ impl<I: Irc> Daemon<I> {
         reaction: &str,
         remove: bool,
     ) -> Result<Value> {
-        self.check_dm(target, |dm| {
-            self.grants
-                .check_also(&self.grants.irc.react, "irc.react", target, dm)
-        })?;
         text::check_msgid(msgid)?;
         text::check_field("a reaction", reaction, text::MAX_REACTION_CHARS)?;
         if let Some(retry_after) =
@@ -614,7 +603,6 @@ impl<I: Irc> Daemon<I> {
 
     /// Never touches the inbox, so `wait`'s cursor stays where it was.
     async fn history(&self, target: &str, query: HistoryQuery) -> Result<Value> {
-        self.check_dm(target, |dm| self.grants.check_history(target, dm))?;
         let query = HistoryQuery {
             limit: query.limit.clamp(1, MAX_HISTORY),
             ..query
@@ -634,7 +622,6 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn redact(&self, target: &str, msgid: &str, reason: &str) -> Result<Value> {
-        self.grants.check_redact()?;
         text::check_msgid(msgid)?;
         text::check_one_line(reason)?;
         if !self.sent.lock().unwrap().contains(target, msgid) {
@@ -649,18 +636,11 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn typing(&self, target: &str, state: Typing) -> Result<Value> {
-        self.check_dm(target, |dm| {
-            self.grants
-                .check_also(&self.grants.irc.typing, "irc.typing", target, dm)
-        })?;
         self.irc.typing(target, state).await?;
         Ok(json!({"target": target, "state": state}))
     }
 
     async fn send(&self, message: Outgoing) -> Result<Value> {
-        self.check_dm(&message.target, |dm| {
-            self.grants.check_send(&message.target, dm)
-        })?;
         if let Some(msgid) = &message.reply_to {
             text::check_msgid(msgid)?;
         }

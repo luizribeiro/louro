@@ -2,7 +2,8 @@
 
 use crate::config::{Grants, Selector};
 use crate::error::{Code, Error, Result};
-use crate::irc::{Incoming, Sender};
+use crate::irc::{Incoming, Outgoing, Sender};
+use crate::socket::Op;
 
 /// In `irc.dm.send`: anyone whose DM the daemon has received.
 const FIRST: &str = "$first";
@@ -51,8 +52,51 @@ impl Grants {
             .matches_sender(&from.nick, from.account.as_deref())
     }
 
+    /// Whether the agent may make the request `op`; `dm` is what DMs from its target recorded.
+    pub fn check(&self, op: &Op, dm: &DmHistory) -> Result<()> {
+        let irc = &self.irc;
+        match op {
+            Op::Status {} | Op::Wait { .. } => Ok(()),
+            Op::Send(Outgoing { target, .. }) => self.check_send(target, dm),
+            Op::React { target, .. } => self.check_also(&irc.react, "irc.react", target, dm),
+            Op::Typing { target, .. } => self.check_also(&irc.typing, "irc.typing", target, dm),
+            Op::History { target, .. } => match target_kind(target)? {
+                TargetKind::Channel => self.check_join(target),
+                TargetKind::Nick => require(
+                    irc.dm.read.matches_sender(target, dm.account.as_deref()),
+                    "irc.dm.read",
+                    target,
+                ),
+            },
+            Op::Names { channel }
+            | Op::Join { channel }
+            | Op::Part { channel, .. }
+            | Op::Topic { channel, set: None } => self.check_join(channel),
+            Op::Topic { channel, .. } => {
+                self.check_join(channel)?;
+                require(irc.topic.matches(channel), "irc.topic", channel)
+            }
+            Op::Watch { nick, .. } => {
+                expect_kind(nick, TargetKind::Nick)?;
+                require(irc.watch.matches(nick), "irc.watch", nick)
+            }
+            Op::Whois { nick } | Op::Whowas { nick } => {
+                granted(irc.whois, "irc.whois")?;
+                expect_kind(nick, TargetKind::Nick)
+            }
+            Op::Redact { .. } => granted(irc.redact, "irc.redact"),
+            Op::List { .. } => granted(irc.list, "irc.list"),
+            Op::Nick { .. } | Op::Away { .. } | Op::Setname { .. } => {
+                granted(irc.identity, "irc.identity")
+            }
+            Op::Quit {} if irc.quit => Ok(()),
+            Op::Quit {} => Err(Error::new(Code::NotAllowed, "irc.quit is not granted")
+                .with_hint("the operator stops louro")),
+        }
+    }
+
     /// A channel needs `irc.join` and `irc.send`; a nick needs `irc.dm.send`.
-    pub fn check_send(&self, target: &str, dm: &DmHistory) -> Result<()> {
+    fn check_send(&self, target: &str, dm: &DmHistory) -> Result<()> {
         match target_kind(target)? {
             TargetKind::Channel => require(
                 self.irc.join.matches(target) && self.irc.send.matches(target),
@@ -69,13 +113,7 @@ impl Grants {
     }
 
     /// A grant that narrows sending, like `irc.react`: the target needs both.
-    pub fn check_also(
-        &self,
-        grant: &Selector,
-        name: &str,
-        target: &str,
-        dm: &DmHistory,
-    ) -> Result<()> {
+    fn check_also(&self, grant: &Selector, name: &str, target: &str, dm: &DmHistory) -> Result<()> {
         self.check_send(target, dm)?;
         require(
             grant.matches_sender(target, dm.account.as_deref()),
@@ -84,62 +122,10 @@ impl Grants {
         )
     }
 
-    /// A channel's history needs `irc.join`; a DM conversation's needs `irc.dm.read` for the nick.
-    pub fn check_history(&self, target: &str, dm: &DmHistory) -> Result<()> {
-        match target_kind(target)? {
-            TargetKind::Channel => self.check_join(target),
-            TargetKind::Nick => require(
-                self.irc
-                    .dm
-                    .read
-                    .matches_sender(target, dm.account.as_deref()),
-                "irc.dm.read",
-                target,
-            ),
-        }
-    }
-
     /// Joining a channel, or reading what it holds, like its members, needs `irc.join`.
-    pub fn check_join(&self, channel: &str) -> Result<()> {
+    fn check_join(&self, channel: &str) -> Result<()> {
         expect_kind(channel, TargetKind::Channel)?;
         require(self.irc.join.matches(channel), "irc.join", channel)
-    }
-
-    /// Setting a channel's topic needs `irc.topic` on top of `irc.join`.
-    pub fn check_topic(&self, channel: &str) -> Result<()> {
-        self.check_join(channel)?;
-        require(self.irc.topic.matches(channel), "irc.topic", channel)
-    }
-
-    pub fn check_watch(&self, nick: &str) -> Result<()> {
-        expect_kind(nick, TargetKind::Nick)?;
-        require(self.irc.watch.matches(nick), "irc.watch", nick)
-    }
-
-    pub fn check_identity(&self) -> Result<()> {
-        granted(self.irc.identity, "irc.identity")
-    }
-
-    pub fn check_list(&self) -> Result<()> {
-        granted(self.irc.list, "irc.list")
-    }
-
-    pub fn check_redact(&self) -> Result<()> {
-        granted(self.irc.redact, "irc.redact")
-    }
-
-    /// `whois` and `whowas` look up one nick.
-    pub fn check_whois(&self, nick: &str) -> Result<()> {
-        granted(self.irc.whois, "irc.whois")?;
-        expect_kind(nick, TargetKind::Nick)
-    }
-
-    pub fn check_quit(&self) -> Result<()> {
-        if self.irc.quit {
-            return Ok(());
-        }
-        Err(Error::new(Code::NotAllowed, "irc.quit is not granted")
-            .with_hint("the operator stops louro"))
     }
 }
 
@@ -209,6 +195,7 @@ fn not_allowed(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::irc::HistoryQuery;
     use crate::irc::fixtures::{from_maria, sender};
 
     fn grants(toml: &str) -> Grants {
@@ -232,6 +219,21 @@ mod tests {
             private,
             from: sender(nick, None),
             ..from_maria("louro: ping")
+        }
+    }
+
+    fn check(grants: &Grants, op: &Op) -> Result<()> {
+        grants.check(op, &DmHistory::default())
+    }
+
+    fn history(target: &str) -> Op {
+        Op::History {
+            target: target.into(),
+            query: HistoryQuery {
+                limit: 20,
+                before: None,
+                after: None,
+            },
         }
     }
 
@@ -386,14 +388,14 @@ mod tests {
         };
         let unknown = DmHistory::default();
         for (target, dm) in [("#BOTS", &unknown), ("maria", &unknown), ("lz", &luiz)] {
-            assert!(grants.check_history(target, dm).is_ok(), "{target}");
+            assert!(grants.check(&history(target), dm).is_ok(), "{target}");
         }
         for (target, dm) in [
             ("#lounge", &unknown),
             ("lz", &unknown),
             ("#bots,#ops", &unknown),
         ] {
-            let error = grants.check_history(target, dm).unwrap_err();
+            let error = grants.check(&history(target), dm).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
     }
@@ -406,9 +408,13 @@ mod tests {
             irc.topic = ["#bots", "#ops"]
             "##,
         );
-        assert!(grants.check_topic("#BOTS").is_ok());
+        let topic = |channel: &str| Op::Topic {
+            channel: channel.into(),
+            set: Some("rust help".into()),
+        };
+        assert!(check(&grants, &topic("#BOTS")).is_ok());
         for channel in ["#lounge", "#ops"] {
-            let error = grants.check_topic(channel).unwrap_err();
+            let error = check(&grants, &topic(channel)).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{channel}");
         }
     }
@@ -429,40 +435,55 @@ mod tests {
     #[test]
     fn watches_only_nicks_that_irc_watch_grants() {
         let grants = grants(r#"irc.watch = ["luiz", "maria*"]"#);
+        let watch = |nick: &str| Op::Watch {
+            nick: nick.into(),
+            remove: false,
+        };
         for nick in ["Luiz", "maria_"] {
-            assert!(grants.check_watch(nick).is_ok(), "{nick}");
+            assert!(check(&grants, &watch(nick)).is_ok(), "{nick}");
         }
         for target in ["mallory", "#bots", "luiz,mallory"] {
-            let error = grants.check_watch(target).unwrap_err();
+            let error = check(&grants, &watch(target)).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target}");
         }
     }
 
     #[test]
     fn looks_up_only_a_nick_and_only_when_irc_whois_grants() {
-        let error = Grants::default().check_whois("luiz").unwrap_err();
+        let whois = |nick: &str| Op::Whois { nick: nick.into() };
+        let error = check(&Grants::default(), &whois("luiz")).unwrap_err();
         assert_eq!(error.message, "irc.whois is not granted");
         let grants = grants("irc.whois = true");
-        assert!(grants.check_whois("luiz").is_ok());
+        assert!(check(&grants, &whois("luiz")).is_ok());
         for target in ["#bots", "luiz,maria", "luiz\r\nQUIT", ""] {
-            let error = grants.check_whois(target).unwrap_err();
+            let error = check(&grants, &whois(target)).unwrap_err();
             assert_eq!(error.code, Code::NotAllowed, "{target:?}");
         }
     }
 
     #[test]
     fn redacts_lists_and_quits_only_when_granted() {
-        let none = Grants::default();
-        assert_eq!(none.check_list().unwrap_err().code, Code::NotAllowed);
-        assert!(grants("irc.list = true").check_list().is_ok());
-        assert_eq!(none.check_identity().unwrap_err().code, Code::NotAllowed);
-        assert!(grants("irc.identity = true").check_identity().is_ok());
-        assert_eq!(none.check_redact().unwrap_err().code, Code::NotAllowed);
-        let error = none.check_quit().unwrap_err();
-        assert_eq!(error.code, Code::NotAllowed);
+        let redact = Op::Redact {
+            target: "#bots".into(),
+            msgid: "c2m8w1u0pq7rs".into(),
+            reason: String::new(),
+        };
+        let list = Op::List { pattern: None };
+        let nick = Op::Nick {
+            nick: "louro_".into(),
+        };
+        for (grant, op) in [
+            ("irc.redact", &redact),
+            ("irc.list", &list),
+            ("irc.identity", &nick),
+            ("irc.quit", &Op::Quit {}),
+        ] {
+            let error = check(&Grants::default(), op).unwrap_err();
+            assert_eq!(error.code, Code::NotAllowed, "{grant}");
+            assert!(check(&grants(&format!("{grant} = true")), op).is_ok());
+        }
+        let error = check(&Grants::default(), &Op::Quit {}).unwrap_err();
         assert_eq!(error.hint.as_deref(), Some("the operator stops louro"));
-        let both = grants("irc.redact = true\nirc.quit = true");
-        assert!(both.check_redact().is_ok() && both.check_quit().is_ok());
     }
 
     #[test]
