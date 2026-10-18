@@ -106,6 +106,25 @@ react = "10/1m"        # per target; default; typing has no limit
 
 </details>
 
+## Run it as a NixOS service
+
+The flake's `nixosModules.default` runs louro as its own user, with the
+password handed over as a systemd credential. The agent's user joins the
+`louro` group to use the socket, and never sees the password:
+
+```nix
+services.louro = {
+  enable = true;
+  settings = {
+    server = { address = "irc.example.org"; nick = "louro"; autojoin = [ "#bots" ]; };
+    grants.irc = { join = [ "#bots" ]; send = [ "#bots" ]; };
+  };
+  passwordFile = config.sops.secrets.louro-password.path; # or agenix, or any root-only file
+};
+users.users.agent.extraGroups = [ config.services.louro.group ];
+environment.variables.LOURO_SOCKET = config.services.louro.socket;
+```
+
 ## Security
 
 Chat is untrusted input. louro limits what an injected agent can do (the
@@ -114,8 +133,8 @@ grants above), but it can't stop the injection itself, so:
 - Use a dedicated, low-value bot account you can revoke.
 - Keep the password away from the agent: type it at the `connect` prompt
   in your own terminal (the default), or, for an always-on bot, run the
-  daemon as its own user or outside the agent's VM with `password_file`
-  (e.g. systemd's `LoadCredential=`).
+  daemon as its own user (the NixOS service above) or outside the agent's
+  VM with `password_file`.
 - Start `louro connect` in a separate terminal of your own, never from
   inside the agent's session. louro can't tell who runs it, so if you
   limit the agent's shell, allow only the agent's subcommands (`status`,
