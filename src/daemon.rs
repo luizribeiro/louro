@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
-use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
+use std::fs::DirBuilder;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -183,7 +183,6 @@ pub async fn start(
     } = config;
     let socket = resolve_socket_path(server.socket.as_deref())?;
     create_runtime_dir(&socket)?;
-    let lock = lock_session(&socket)?;
     remove_socket(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let (irc, updates) = irc::connect(&server, password.clone()).await?;
     let listener = UnixListener::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
@@ -196,7 +195,6 @@ pub async fn start(
         "socket": socket,
     })));
     Ok(async move {
-        let _lock = lock;
         run(
             grants, limits, password, irc, updates, listener, &socket, stop,
         )
@@ -218,22 +216,6 @@ fn stop_signal() -> io::Result<impl Future<Output = ()>> {
 
 pub fn already_running() -> Error {
     Error::new(Code::SessionExists, "louro is already running").with_hint("run `louro quit` first")
-}
-
-/// Held for the daemon's life, so two `connect`s racing for one socket can't both start.
-fn lock_session(socket: &Path) -> Result<File> {
-    let path = socket.with_added_extension("lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .map_err(|err| cannot_listen(socket, &err))?;
-    match lock.try_lock() {
-        Ok(()) => Ok(lock),
-        Err(TryLockError::WouldBlock) => Err(already_running()),
-        Err(TryLockError::Error(err)) => Err(cannot_listen(socket, &err)),
-    }
 }
 
 fn create_runtime_dir(socket: &Path) -> Result<()> {
@@ -1544,17 +1526,5 @@ mod tests {
         assert_eq!(fs::read_to_string(&notes).unwrap(), "keep me");
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
         assert!(fs::metadata(&live).unwrap().file_type().is_socket());
-    }
-
-    #[test]
-    fn a_second_daemon_on_the_same_socket_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("louro.sock");
-        let first = lock_session(&socket).unwrap();
-        let error = lock_session(&socket).unwrap_err();
-        assert_eq!(error.code, Code::SessionExists);
-
-        drop(first);
-        assert!(lock_session(&socket).is_ok());
     }
 }
