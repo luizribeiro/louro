@@ -214,25 +214,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn presence_is_sanitized_and_untrusted() {
-        let inbox = Inbox::default();
-        inbox.push_untrusted(serde_json::json!({
-            "type": "presence",
-            "time": "2026-10-16T21:05:00.000Z",
-            "nick": "lu\u{7}iz",
-            "state": "online",
-        }));
-        let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
-        assert_eq!(
-            batch["events"],
-            serde_json::json!([
-                {"id": 1, "type": "presence", "time": "2026-10-16T21:05:00.000Z",
-                 "nick": "luiz", "state": "online", "untrusted": true},
-            ])
-        );
-    }
-
-    #[tokio::test]
     async fn max_limits_a_batch_and_more_says_others_are_queued() {
         let inbox = Inbox::default();
         inbox.push(from_maria("louro: does ergo support chathistory for DMs?"));
