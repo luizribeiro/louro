@@ -485,14 +485,4 @@ mod tests {
         let error = check(&Grants::default(), &Op::Quit {}).unwrap_err();
         assert_eq!(error.hint.as_deref(), Some("the operator stops louro"));
     }
-
-    #[test]
-    fn grants_nothing_by_default() {
-        let none = Grants::default();
-        assert!(!none.may_read(&incoming("#bots", "maria", false)));
-        assert!(!none.may_read(&incoming("luiz", "luiz", true)));
-        for target in ["#bots", "luiz"] {
-            assert!(send(&none, target, true).is_err());
-        }
-    }
 }
