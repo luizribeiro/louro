@@ -59,10 +59,9 @@ in
       default = null;
       example = "/run/secrets/louro-password";
       description = ''
-        The bot's SASL password on the host, e.g. a sops-nix or agenix secret readable by root.
-        systemd hands it to louro as a credential, so neither louro's user nor the agent's can
-        read the source file. Null means no SASL; `server.sasl_username` without it fails, since
-        a service has no terminal to prompt for the password on.
+        The bot's SASL password, e.g. a sops-nix or agenix secret readable by root. systemd hands
+        it to louro as a credential, so neither louro's user nor the agent's can read this file.
+        Null means no SASL; `server.sasl_username` without it fails, as a service can't prompt.
       '';
     };
 
