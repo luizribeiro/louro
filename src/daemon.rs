@@ -64,10 +64,12 @@ struct Problem {
 struct RateWindows(Mutex<HashMap<String, VecDeque<Instant>>>);
 
 impl RateWindows {
-    /// `None` if `key` is under `limit` (never, for [`Limit::Off`]); otherwise the whole
-    /// seconds, rounded up, until the oldest entry leaves the window. Stale entries are
-    /// trimmed either way, but only a `None` here should be followed by [`Self::record`].
-    fn peek(&self, key: &str, limit: Limit, now: Instant) -> Option<u64> {
+    /// Checks `key` against `limit` and, if it has room, immediately reserves a slot by
+    /// recording `now` — so a concurrent attempt can't also pass the check while this one is
+    /// still in flight. `None` on success (never refused for [`Limit::Off`], which never
+    /// reserves either); otherwise the whole seconds, rounded up, until the oldest entry leaves
+    /// the window. Undo a reservation that doesn't go through with [`Self::release`].
+    fn reserve(&self, key: &str, limit: Limit, now: Instant) -> Option<u64> {
         let Limit::Window { count, seconds } = limit else {
             return None;
         };
@@ -77,23 +79,25 @@ impl RateWindows {
         while entries.front().is_some_and(|&t| now - t >= window) {
             entries.pop_front();
         }
-        (entries.len() >= count as usize).then(|| {
+        if entries.len() >= count as usize {
             let elapsed = now - *entries.front().unwrap();
-            whole_seconds(window.saturating_sub(elapsed))
-        })
+            return Some(whole_seconds(window.saturating_sub(elapsed)));
+        }
+        entries.push_back(now);
+        None
     }
 
-    /// A no-op for [`Limit::Off`], which `peek` never stores entries for either.
-    fn record(&self, key: &str, limit: Limit, now: Instant) {
+    /// Undoes a [`Self::reserve`] reservation for `key` at `now`. A no-op for [`Limit::Off`],
+    /// which never reserved one.
+    fn release(&self, key: &str, limit: Limit, now: Instant) {
         if !matches!(limit, Limit::Window { .. }) {
             return;
         }
-        self.0
-            .lock()
-            .unwrap()
-            .entry(key.to_ascii_lowercase())
-            .or_default()
-            .push_back(now);
+        if let Some(entries) = self.0.lock().unwrap().get_mut(&key.to_ascii_lowercase())
+            && let Some(pos) = entries.iter().position(|&t| t == now)
+        {
+            entries.remove(pos);
+        }
     }
 }
 
@@ -460,10 +464,9 @@ impl<I: Irc> Daemon<I> {
     /// never touches the budget.
     fn check_react_budget(&self, target: &str) -> Result<()> {
         let now = Instant::now();
-        if let Some(retry_after) = self.react_windows.peek(target, self.limits.react, now) {
+        if let Some(retry_after) = self.react_windows.reserve(target, self.limits.react, now) {
             return Err(rate_limited("react", retry_after));
         }
-        self.react_windows.record(target, self.limits.react, now);
         Ok(())
     }
 
@@ -524,10 +527,16 @@ impl<I: Irc> Daemon<I> {
             text: text::clean_lines(&message.text)?,
             ..message
         };
-        self.check_send_budget(&message.target)?;
+        let now = self.reserve_send_budget(&message.target)?;
         let (target, lines) = (message.target.clone(), message.text.lines().count());
         let is_reply = message.reply_to.is_some();
-        let sent = self.irc.send(message).await?;
+        let sent = match self.irc.send(message).await {
+            Ok(sent) => sent,
+            Err(error) => {
+                self.release_send_budget(&target, now);
+                return Err(error);
+            }
+        };
         let mut result = json!({"sent": true, "target": target, "lines": lines});
         if let Some(msgid) = sent.msgid {
             self.sent.lock().unwrap().record(&target, msgid.clone());
@@ -540,19 +549,24 @@ impl<I: Irc> Daemon<I> {
     }
 
     /// `Err` once `target` has reached `limits.send`, or any target has reached
-    /// `limits.send_total`, within its window; a refused send never touches either budget.
-    fn check_send_budget(&self, target: &str) -> Result<()> {
+    /// `limits.send_total`, within its window; a refused send never touches either budget. A
+    /// reservation this returns must be undone with [`Self::release_send_budget`] if the send it
+    /// was held for never reaches IRC, so a send that fails doesn't spend budget it didn't use.
+    fn reserve_send_budget(&self, target: &str) -> Result<Instant> {
         let now = Instant::now();
-        let refused = self
-            .send_windows
-            .peek(target, self.limits.send, now)
-            .or_else(|| self.send_total.peek(TOTAL, self.limits.send_total, now));
-        if let Some(retry_after) = refused {
+        if let Some(retry_after) = self.send_windows.reserve(target, self.limits.send, now) {
             return Err(rate_limited("send", retry_after));
         }
-        self.send_windows.record(target, self.limits.send, now);
-        self.send_total.record(TOTAL, self.limits.send_total, now);
-        Ok(())
+        if let Some(retry_after) = self.send_total.reserve(TOTAL, self.limits.send_total, now) {
+            self.send_windows.release(target, self.limits.send, now);
+            return Err(rate_limited("send", retry_after));
+        }
+        Ok(now)
+    }
+
+    fn release_send_budget(&self, target: &str, now: Instant) {
+        self.send_windows.release(target, self.limits.send, now);
+        self.send_total.release(TOTAL, self.limits.send_total, now);
     }
 }
 
@@ -601,6 +615,7 @@ mod tests {
     use std::future;
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     use tempfile::TempDir;
     use tokio::sync::oneshot;
@@ -637,6 +652,8 @@ mod tests {
         redacted: Mutex<Vec<String>>,
         /// Sends get no msgid, as from a server without echo-message.
         without_msgid: AtomicBool,
+        /// How many of the next sends fail with `not_connected`, as while IRC is down.
+        fail_sends: AtomicUsize,
         quit: Notify,
     }
 
@@ -670,6 +687,11 @@ mod tests {
         }
 
         fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send {
+            let remaining = self.fail_sends.load(Ordering::Relaxed);
+            if remaining > 0 {
+                self.fail_sends.store(remaining - 1, Ordering::Relaxed);
+                return future::ready(Err(Error::new(Code::NotConnected, "louro stopped")));
+            }
             let threaded = message.reply_to.is_some();
             self.sent.lock().unwrap().push(message);
             let msgid =
@@ -1173,13 +1195,27 @@ mod tests {
         assert!(reply["Ok"].is_object(), "{reply:?}");
     }
 
+    #[tokio::test]
+    async fn a_send_that_never_reaches_irc_does_not_count_against_the_budget() {
+        let daemon = launch(grants());
+        daemon.irc.fail_sends.store(3, Ordering::Relaxed);
+        for n in 0..3 {
+            let reply = daemon
+                .call(send_request("#bots", &format!("retry {n}")))
+                .await;
+            assert_eq!(reply["Err"]["code"], "not_connected", "{n}: {reply:?}");
+        }
+
+        let reply = daemon.call(send_request("#bots", "it's back")).await;
+        assert!(reply["Ok"].is_object(), "{reply:?}");
+    }
+
     #[test]
     fn an_off_limit_never_stores_an_entry() {
         let windows = RateWindows::default();
         let now = Instant::now();
         for _ in 0..5 {
-            assert_eq!(windows.peek("#bots", Limit::Off, now), None);
-            windows.record("#bots", Limit::Off, now);
+            assert_eq!(windows.reserve("#bots", Limit::Off, now), None);
         }
         assert!(windows.0.lock().unwrap().is_empty());
     }
