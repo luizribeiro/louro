@@ -45,8 +45,7 @@ in
       '';
       description = ''
         louro.toml, as `[server]`, `[grants]` and `[limits]`; louro validates it at start.
-        Set the password with {option}`services.louro.passwordFile`, not
-        `server.password_file`, and the socket with {option}`services.louro.socket`.
+        Set the password with {option}`services.louro.passwordFile`, not `server.password_file`.
       '';
     };
 
@@ -80,11 +79,8 @@ in
     socket = lib.mkOption {
       type = lib.types.str;
       default = "/run/louro/louro.sock";
-      description = ''
-        The Unix socket louro listens on. Keep it in /run/louro, the runtime directory only the
-        group may enter; elsewhere the group may be unable to reach it. The agent's commands
-        find it through `LOURO_SOCKET`.
-      '';
+      readOnly = true;
+      description = "The Unix socket louro listens on; the agent finds it through `LOURO_SOCKET`.";
     };
   };
 
