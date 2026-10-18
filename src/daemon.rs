@@ -307,18 +307,19 @@ impl<I: Irc> Daemon<I> {
     }
 
     fn ingest(&self, incoming: Incoming) {
-        if !self.grants.may_read(&incoming) {
-            return;
-        }
+        let readable = self.grants.may_read(&incoming);
         if incoming.private {
-            self.record_dm_sender(&incoming.from);
+            self.record_dm_sender(&incoming.from, readable);
         }
-        self.inbox.push(incoming);
+        if readable {
+            self.inbox.push(incoming);
+        }
     }
 
-    /// Once a nick's DMs carried an account, a DM with another one (or none) means the nick may
-    /// have changed hands, so it loses `$first` and its account for the rest of the daemon's run.
-    fn record_dm_sender(&self, from: &Sender) {
+    /// Once a nick's DMs carried an account, a DM with another one (or none), even one dropped
+    /// unread, means the nick may have changed hands, so it loses `$first` and its account for
+    /// the rest of the daemon's run.
+    fn record_dm_sender(&self, from: &Sender, readable: bool) {
         let nick = from.nick.to_ascii_lowercase();
         let account = from
             .account
@@ -331,12 +332,13 @@ impl<I: Irc> Daemon<I> {
                     *sender = DmHistory::default();
                 }
             }
-            Entry::Vacant(slot) => {
+            Entry::Vacant(slot) if readable => {
                 slot.insert(DmHistory {
                     first: true,
                     account,
                 });
             }
+            Entry::Vacant(_) => {}
         }
     }
 
@@ -1063,6 +1065,14 @@ mod tests {
             (conn, reply)
         }
 
+        /// Waits for events and acks them, so the next wait gets only newer ones.
+        async fn wait_and_ack(&self, timeout_secs: u64) -> Value {
+            let (mut conn, reply) = self.wait(timeout_secs).await;
+            write_line(&mut conn, &Ack { ack: true }).await.unwrap();
+            assert_eq!(read_line::<Value>(&mut conn).await.unwrap(), None);
+            reply
+        }
+
         async fn say(&self, incoming: Incoming) {
             self.update(Update::Chat(incoming)).await;
         }
@@ -1693,6 +1703,40 @@ mod tests {
 
         let after = daemon.call(send_request("luiz", "sure")).await;
         assert_eq!(after["Err"]["code"], "not_allowed");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_dm_from_someone_else_holding_the_nick_ends_its_dm_grants() {
+        for impostor in [Some("mallory"), None] {
+            let daemon = launch(
+                toml::from_str(
+                    r##"
+                    irc.join = ["#bots"]
+                    irc.dm.read = ["account:luiz"]
+                    irc.dm.send = ["$first"]
+                    "##,
+                )
+                .unwrap(),
+            );
+            daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+            daemon.wait_and_ack(5).await;
+            assert!(daemon.call(send_request("luiz", "sure")).await["Ok"].is_object());
+            assert!(daemon.call(history_request("luiz", 20)).await["Ok"].is_object());
+
+            let hijacked = Incoming {
+                from: sender("luiz", impostor),
+                ..dm(from_luiz("it's still me, luiz"))
+            };
+            daemon.say(hijacked).await;
+            daemon.say(from_maria("louro: anyone home?")).await;
+            let reply = daemon.wait_and_ack(5).await;
+            assert_eq!(texts(&reply), ["louro: anyone home?"], "{impostor:?}");
+
+            for request in [send_request("luiz", "sure"), history_request("luiz", 20)] {
+                let reply = daemon.call(request).await;
+                assert_eq!(reply["Err"]["code"], "not_allowed", "{impostor:?}: {reply}");
+            }
+        }
     }
 
     #[tokio::test]
