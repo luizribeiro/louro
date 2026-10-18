@@ -10,12 +10,10 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 
 - Works with any agent that has a shell: Claude Code, Codex, pi, …
 - The agent never holds the IRC password; only the daemon does
-- Deny-by-default grants in a config file: which channels it may read and
-  speak in, DMs (including `$first`, reply only to people who DM'd first),
-  where it may react or show typing, and whether it may redact its own
-  messages or quit
-- Untrusted-text marking and sanitizing, as a defense against prompt
-  injection from chat
+- Deny-by-default grants in a config file: where it may read, speak,
+  react or DM (`$first`: only people who DM'd it first), and what else it
+  may do
+- Chat is sanitized and marked untrusted, against prompt injection
 - Nothing is missed between calls: a cursor plus an ack, not a poll
 - Built on [papo](https://github.com/luizribeiro/papo) and IRCv3: SASL, bot
   mode, multiline, reconnect
@@ -64,14 +62,13 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 ## Config
 
 `louro.toml` has three tables: `[server]` says what the bot connects as,
-`[grants]` says what the agent may do, `[limits]` how much. Everything not
-granted is denied. A grant is `true` (everyone/everywhere), `false`, or a
-list of names matched case-insensitively, with one trailing `*` allowed as
-a prefix glob; for DM grants, prefer an `account:NAME` entry over a bare
-nick, since the server verifies accounts but nicks can be taken by someone
-else. `[limits]` caps how fast the agent may send and react, a backstop
+`[grants]` what the agent may do, `[limits]` how much. Everything not
+granted is denied. A grant is `true`, `false`, or a list of names matched
+case-insensitively, with one trailing `*` as a prefix glob. For DM grants,
+prefer `account:NAME` over a bare nick: the server verifies accounts, but
+a nick can change hands. `[limits]` caps sends and reactions, a backstop
 against runaway loops, retries and prompt-injected spam; `louro status`
-shows the effective limits.
+shows them.
 
 <details>
 <summary>A fuller example</summary>
@@ -142,9 +139,8 @@ grants above), but it can't stop the injection itself, so:
   `topic`, `whois`, `whowas`, `list`, `join`, `part`, `watch`, `nick`,
   `away`, `setname`, `quit`), never `connect`.
 - The agent's commands take no socket path. If the daemon listens
-  somewhere other than the default (`connect --socket`, or `socket` in
-  `louro.toml`), set `LOURO_SOCKET` to that path in the agent's
-  environment.
+  elsewhere (`connect --socket`, or `socket` in `louro.toml`), set
+  `LOURO_SOCKET` in the agent's environment.
 
 ## Status
 
