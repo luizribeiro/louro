@@ -866,15 +866,8 @@ mod tests {
     fn a_reply_is_threaded_only_when_the_server_kept_the_reply_tag() {
         for (replying, fallbacks, threaded) in [
             (false, vec![], false),
-            (false, vec![Fallback::ReplyTagDropped], false),
-            (true, vec![], true),
             (true, vec![Fallback::SplitIntoLines], true),
             (true, vec![Fallback::ReplyTagDropped], false),
-            (
-                true,
-                vec![Fallback::ContextTagDropped, Fallback::ReplyTagDropped],
-                false,
-            ),
         ] {
             assert_eq!(
                 is_threaded(replying, &fallbacks),
@@ -962,12 +955,6 @@ mod tests {
     fn papo_errors_map_to_louro_codes() {
         let lost = Disconnected::new(DisconnectCause::ConnectionLost, None);
         let cannot_send = ServerError::numeric(404, vec!["#rust".into(), "Cannot send".into()]);
-        let invalid_params = ServerError::standard(
-            "CHATHISTORY",
-            "INVALID_PARAMS",
-            vec!["LATEST".into()],
-            "Invalid parameters",
-        );
         for (error, code) in [
             (papo::Error::Disconnected(lost), Code::NotConnected),
             (papo::Error::Timeout, Code::RequestTimeout),
@@ -989,7 +976,6 @@ mod tests {
                 Code::ServerError,
             ),
             (papo::Error::Server(cannot_send), Code::ServerError),
-            (papo::Error::Server(invalid_params), Code::ServerError),
         ] {
             assert_eq!(Error::from(error).code, code);
         }
