@@ -488,7 +488,7 @@ with subtest("with irc.quit granted, louro quit stops the daemon and removes the
     louro("quit")
     assert_stopped()
 
-start(grants())
+start(grants(join=["#bots", "#quiet"]))
 with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows again"):
     # Stopped and started separately, so the outage lasts until louro notices it.
     machine.succeed("systemctl stop ergochat")
@@ -510,6 +510,18 @@ with subtest("chat sent while louro was cut off arrives from history after it re
     assert isinstance(events[0]["retry_in"], int) and "untrusted" not in events[0], events
     [missed] = chat_from("luiz", events)
     assert missed["origin"] == "history" and missed["untrusted"], missed
+
+with subtest("chat in a channel joined just before the cut, quiet until then, arrives once"):
+    for nick in settings["humans"]:
+        send_raw(nick, "JOIN #quiet")
+    louro("join", "#quiet")
+    louro_until(lambda status: "#quiet" in status["channels"], "status")
+    events = say_while_cut_off("#quiet", "you missed this too")
+    # A duplicate could land in a later batch than the first delivery.
+    events.extend(louro("wait", "--timeout", "5")["events"])
+    # papo (2d40e94) re-delivers the previous subtest's #bots catchup on this reconnect too.
+    [missed] = [event for event in chat_from("luiz", events) if event["target"] == "#quiet"]
+    assert missed["origin"] == "history" and missed["text"] == "you missed this too", missed
 
 with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
     machine.succeed(shlex.join([
