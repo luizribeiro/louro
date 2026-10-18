@@ -90,6 +90,10 @@ impl Grants {
         require(self.irc.topic.matches(channel), "irc.topic", channel)
     }
 
+    pub fn check_list(&self) -> Result<()> {
+        granted(self.irc.list, "irc.list")
+    }
+
     pub fn check_redact(&self) -> Result<()> {
         granted(self.irc.redact, "irc.redact")
     }
@@ -360,8 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn redacts_and_quits_only_when_granted() {
+    fn redacts_lists_and_quits_only_when_granted() {
         let none = Grants::default();
+        assert_eq!(none.check_list().unwrap_err().code, Code::NotAllowed);
+        assert!(grants("irc.list = true").check_list().is_ok());
         assert_eq!(none.check_redact().unwrap_err().code, Code::NotAllowed);
         let error = none.check_quit().unwrap_err();
         assert_eq!(error.code, Code::NotAllowed);

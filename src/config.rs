@@ -64,6 +64,10 @@ pub struct Grants {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a yes/no grant in louro.toml"
+)]
 pub struct Irc {
     /// Channels it may sit and read in.
     pub join: Selector,
@@ -80,6 +84,8 @@ pub struct Irc {
     pub topic: Selector,
     /// Whether it may look people up with `whois` and `whowas`.
     pub whois: bool,
+    /// Whether it may list the server's channels.
+    pub list: bool,
     pub quit: bool,
 }
 
@@ -334,7 +340,7 @@ mod tests {
         ] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
-        assert!(!irc.redact && !irc.whois && !irc.quit);
+        assert!(!irc.redact && !irc.whois && !irc.list && !irc.quit);
         assert_eq!(
             limits.send,
             Limit::Window {

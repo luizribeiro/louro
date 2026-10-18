@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use papo::{
     Account, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem,
-    HistoryReference, Message, MessageId, MessageKind, RegistrationError, Sasl, Source, State,
-    User,
+    HistoryReference, ListFilter, Message, MessageId, MessageKind, RegistrationError, Sasl, Source,
+    State, User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -144,6 +144,24 @@ impl Whowas {
     }
 }
 
+/// A channel as the server's `LIST` shows it.
+#[derive(Serialize)]
+pub struct Listed {
+    pub channel: String,
+    pub users: usize,
+    pub topic: String,
+}
+
+impl Listed {
+    pub fn sanitized(self) -> Self {
+        Self {
+            channel: text::clean(&self.channel),
+            topic: text::clean(&self.topic),
+            ..self
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Outgoing {
     pub target: String,
@@ -232,6 +250,8 @@ pub trait Irc: Send + Sync + 'static {
     fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send;
     /// Earlier users of `nick`, most recent first; empty if the server remembers none.
     fn whowas(&self, nick: &str) -> impl Future<Output = Result<Vec<Whowas>>> + Send;
+    /// Every channel the server lists.
+    fn list(&self) -> impl Future<Output = Result<Vec<Listed>>> + Send;
     fn quit(&self) -> impl Future<Output = ()> + Send;
 }
 
@@ -629,6 +649,18 @@ impl Irc for PapoIrc {
             .map(|reply| Whowas {
                 nick: reply.param(1).unwrap_or(nick).to_owned(),
                 realname: reply.param(5).map(str::to_owned),
+            })
+            .collect())
+    }
+
+    async fn list(&self) -> Result<Vec<Listed>> {
+        let entries = self.client.list(ListFilter::default()).await?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| Listed {
+                channel: entry.name.to_string(),
+                users: entry.members_count,
+                topic: entry.topic,
             })
             .collect())
     }

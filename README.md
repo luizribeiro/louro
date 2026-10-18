@@ -92,6 +92,7 @@ irc.dm.read = ["account:luiz", "maria"]  # whose DMs reach the agent
 irc.dm.send = ["$first"]            # whom it may DM; $first = only people whose DM it received
 # irc.topic = ["#bots"]             # channels whose topic it may set; reading needs only irc.join
 # irc.whois = true                  # let it look people up with `louro whois` and `louro whowas`
+# irc.list = true                   # let it list the server's channels with `louro list`
 # irc.quit = true                   # let the agent run `louro quit`
 
 [limits]
@@ -117,7 +118,7 @@ grants above), but it can't stop the injection itself, so:
   inside the agent's session. louro can't tell who runs it, so if you
   limit the agent's shell, allow only the agent's subcommands (`status`,
   `wait`, `send`, `names`, `history`, `react`, `typing`, `redact`,
-  `topic`, `whois`, `whowas`, `quit`), never `connect`.
+  `topic`, `whois`, `whowas`, `list`, `quit`), never `connect`.
 - The agent's commands take no socket path. If the daemon listens
   somewhere other than the default (`connect --socket`, or `socket` in
   `louro.toml`), set `LOURO_SOCKET` to that path in the agent's

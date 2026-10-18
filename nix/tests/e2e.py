@@ -63,7 +63,7 @@ def toml_lines(table, prefix=""):
 
 def grants(
     dm_read=False, dm_send=False, quit=False, react=False, typing=False, redact=False, topic=False,
-    whois=False,
+    whois=False, list=False,
 ):
     return {"irc": {
         "join": ["#bots"],
@@ -74,6 +74,7 @@ def grants(
         "redact": redact,
         "topic": topic,
         "whois": whois,
+        "list": list,
         "quit": quit,
     }}
 
@@ -316,10 +317,11 @@ with subtest("a send over 1000 characters is refused as too_long, and luiz hears
     log = machine.succeed(f"cat {human_file('luiz', 'log')}")
     assert huge not in log, "the oversized text reached irc"
 
-with subtest("sends outside the grants, and quit without irc.quit, are refused"):
+with subtest("sends outside the grants, and quit and list without their grants, are refused"):
     refused("not_allowed", "send", "#lounge", "hi")
     refused("not_allowed", "send", "@#bots", "hi")
     refused("not_allowed", "quit")
+    refused("not_allowed", "list")
     assert louro("status")["connected"], "a refused quit leaves louro running"
     stop()
 
@@ -388,6 +390,14 @@ with running(whois=True):
         assert whowas["entries"] and whowas["entries"][0]["nick"] == BOT["user"], whowas
         assert louro("whowas", "nobody-ever")["entries"] == []
         refused("not_allowed", "whois", "#bots")
+
+with running(list=True):
+    with subtest("list shows #bots with its users, and --match filters by name"):
+        listed = louro_until(lambda listed: listed["channels"], "list")
+        channels = {channel["channel"]: channel for channel in listed["channels"]}
+        assert channels["#bots"]["users"] >= 3 and listed["untrusted"], listed
+        matched = louro("list", "--match", "BOTS")["channels"]
+        assert [channel["channel"] for channel in matched] == ["#bots"], matched
 
 with running(dm_read=["account:luiz"], dm_send=["$first"]):
     with subtest("DMs reach the agent only from irc.dm.read, and $first gates replies"):
