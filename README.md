@@ -113,12 +113,22 @@ password handed over as a systemd credential. The agent's user joins the
 services.louro = {
   enable = true;
   settings = {
-    server = { address = "irc.example.org"; nick = "louro"; autojoin = [ "#bots" ]; };
-    grants.irc = { join = [ "#bots" ]; send = [ "#bots" ]; };
+    server = {
+      address = "irc.example.org";
+      nick = "louro";
+      autojoin = [ "#bots" ];
+    };
+    grants.irc = {
+      join = [ "#bots" ];
+      send = [ "#bots" ];
+      dm.read = [ "account:luiz" ]; # the bot's admin may DM it
+      dm.send = [ "account:luiz" ];
+    };
   };
   passwordFile = config.sops.secrets.louro-password.path; # or agenix, or any root-only file
 };
 users.users.agent.extraGroups = [ config.services.louro.group ];
+# The path isn't secret: only members of the louro group can connect to it.
 environment.variables.LOURO_SOCKET = config.services.louro.socket;
 ```
 
