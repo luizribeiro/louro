@@ -376,63 +376,57 @@ impl<I: Irc> Daemon<I> {
             Ok(None) => return Ok(()),
             Err(_) => Err(Error::new(Code::Usage, "the request is not a JSON line")),
         };
+        if let Ok(Op::Wait { timeout, max }) = op {
+            let batch = self.inbox.wait(timeout, max).await;
+            let cursor = batch.cursor;
+            write_line(conn, &Ok::<_, Error>(batch)).await?;
+            if let Some(Ack { ack: true }) = read_line(conn).await? {
+                self.inbox.ack(cursor);
+            }
+            return Ok(());
+        }
+        let quit = matches!(op, Ok(Op::Quit {}));
+        let result = match op {
+            Ok(op) => self.handle(op).await,
+            Err(error) => Err(error),
+        };
+        write_line(conn, &result).await?;
+        if quit && result.is_ok() {
+            self.quit.notify_one();
+        }
+        Ok(())
+    }
+
+    async fn handle(&self, op: Op) -> Result<Value> {
         match op {
-            Err(error) => reply(conn, Err::<(), _>(error)).await,
-            Ok(Op::Status {}) => reply(conn, Ok(self.status())).await,
-            Ok(Op::Send(message)) => reply(conn, self.send(message).await).await,
-            Ok(Op::Wait { timeout, max }) => {
-                let batch = self.inbox.wait(timeout, max).await;
-                let cursor = batch.cursor;
-                reply(conn, Ok(batch)).await?;
-                if let Some(Ack { ack: true }) = read_line(conn).await? {
-                    self.inbox.ack(cursor);
-                }
-                Ok(())
-            }
-            Ok(Op::Names { channel }) => reply(conn, self.names(&channel)).await,
-            Ok(Op::Topic { channel, set }) => reply(conn, self.topic(&channel, set).await).await,
-            Ok(Op::Join { channel }) => reply(conn, self.join(&channel).await).await,
-            Ok(Op::Part { channel, reason }) => {
-                reply(conn, self.part(&channel, &reason).await).await
-            }
-            Ok(Op::React {
+            Op::Status {} => Ok(self.status()),
+            Op::Wait { .. } => unreachable!("serve answers wait itself"),
+            Op::Send(message) => self.send(message).await,
+            Op::Names { channel } => self.names(&channel),
+            Op::Topic { channel, set } => self.topic(&channel, set).await,
+            Op::Join { channel } => self.join(&channel).await,
+            Op::Part { channel, reason } => self.part(&channel, &reason).await,
+            Op::React {
                 target,
                 msgid,
                 reaction,
                 remove,
-            }) => {
-                let reacted = self.react(&target, &msgid, &reaction, remove).await;
-                reply(conn, reacted).await
-            }
-            Ok(Op::Typing { target, state }) => {
-                reply(conn, self.typing(&target, state).await).await
-            }
-            Ok(Op::Redact {
+            } => self.react(&target, &msgid, &reaction, remove).await,
+            Op::Typing { target, state } => self.typing(&target, state).await,
+            Op::Redact {
                 target,
                 msgid,
                 reason,
-            }) => reply(conn, self.redact(&target, &msgid, &reason).await).await,
-            Ok(Op::History { target, query }) => {
-                reply(conn, self.history(&target, query).await).await
-            }
-            Ok(Op::Whois { nick }) => reply(conn, self.whois(&nick).await).await,
-            Ok(Op::Whowas { nick }) => reply(conn, self.whowas(&nick).await).await,
-            Ok(Op::Watch { nick, remove }) => reply(conn, self.watch(&nick, remove).await).await,
-            Ok(Op::Nick { nick }) => reply(conn, self.set_nick(&nick).await).await,
-            Ok(Op::Away { text, back }) => {
-                reply(conn, self.away(text.as_deref(), back).await).await
-            }
-            Ok(Op::Setname { realname }) => reply(conn, self.setname(&realname).await).await,
-            Ok(Op::List { pattern }) => reply(conn, self.list(pattern.as_deref()).await).await,
-            Ok(Op::Quit {}) => {
-                let allowed = self.grants.check_quit();
-                let quitting = allowed.is_ok();
-                reply(conn, allowed.map(|()| json!({}))).await?;
-                if quitting {
-                    self.quit.notify_one();
-                }
-                Ok(())
-            }
+            } => self.redact(&target, &msgid, &reason).await,
+            Op::History { target, query } => self.history(&target, query).await,
+            Op::Whois { nick } => self.whois(&nick).await,
+            Op::Whowas { nick } => self.whowas(&nick).await,
+            Op::Watch { nick, remove } => self.watch(&nick, remove).await,
+            Op::Nick { nick } => self.set_nick(&nick).await,
+            Op::Away { text, back } => self.away(text.as_deref(), back).await,
+            Op::Setname { realname } => self.setname(&realname).await,
+            Op::List { pattern } => self.list(pattern.as_deref()).await,
+            Op::Quit {} => self.grants.check_quit().map(|()| json!({})),
         }
     }
 
@@ -756,10 +750,6 @@ fn parse_request(request: Value) -> Result<Op> {
     serde_json::from_value::<Request>(request)
         .map(|request| request.op)
         .map_err(|error| Error::new(Code::Usage, format!("bad request: {error}")))
-}
-
-async fn reply(conn: &mut BufReader<UnixStream>, result: Result<impl Serialize>) -> io::Result<()> {
-    write_line(conn, &result).await
 }
 
 #[cfg(test)]
