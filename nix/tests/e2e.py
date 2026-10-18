@@ -383,6 +383,8 @@ with running(whois=True):
         assert whowas["entries"] and whowas["entries"][0]["nick"] == BOT["user"], whowas
         assert louro("whowas", "nobody-ever")["entries"] == []
         refused("not_allowed", "whois", "#bots")
+        error = refused("usage", "whois", "nosuchperson")
+        assert error["message"] == "no such nick: nosuchperson", error
 
 with running(list=True):
     with subtest("list shows #bots with its users, and --match filters by name"):

@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use papo::{
     Account, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem,
-    HistoryReference, ListFilter, Message, MessageId, MessageKind, RegistrationError, Sasl, Source,
-    State, User,
+    HistoryReference, ListFilter, Message, MessageId, MessageKind, Refusal, RegistrationError,
+    Sasl, Source, State, User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -620,7 +620,12 @@ impl Irc for PapoIrc {
     }
 
     async fn whois(&self, nick: &str) -> Result<Whois> {
-        let whois = self.client.whois(nick).await?;
+        let whois = self.client.whois(nick).await.map_err(|error| match error {
+            papo::Error::Server(refusal) if refusal.kind() == Refusal::NoSuchNick => {
+                Error::new(Code::Usage, format!("no such nick: {nick}"))
+            }
+            error => error.into(),
+        })?;
         Ok(Whois {
             nick: whois.nick.to_string(),
             account: whois.account.map(|account| account.to_string()),
