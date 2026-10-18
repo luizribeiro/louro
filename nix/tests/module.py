@@ -55,6 +55,10 @@ with subtest("louro logs in with SASL using the password from passwordFile"):
     send_raw("luiz", f"WHOIS {BOT['user']}")
     received("luiz", lambda _tags, line: f" 330 luiz {BOT['user']} {BOT['user']} " in line)
 
+with subtest("the service is sandboxed"):
+    # systemd-analyze rates exposure from 0.0 to 10.0, and takes the threshold times ten.
+    machine.succeed("systemd-analyze security --threshold=20 louro")
+
 with subtest("only the socket's group may use it"):
     machine.succeed(f"stat -c '%a %G' {SOCKET} | grep -qx '770 louro'")
     code, out = louro_as("stranger", "status")
