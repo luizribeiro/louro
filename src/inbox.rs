@@ -11,7 +11,7 @@ use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::time::{self, Instant};
 
-use crate::irc::{Incoming, Sender};
+use crate::irc::Incoming;
 use crate::text::{self, sanitize};
 
 const BUFFER_CAP: usize = 10_000;
@@ -35,7 +35,9 @@ enum Body {
         truncated: bool,
         untrusted: bool,
     },
-    Connection(Connection),
+    /// louro's own report that the IRC connection dropped or came back; not chat, so not
+    /// untrusted.
+    Connection(Value),
     /// An event other than chat whose strings come from the network, like an invite.
     Untrusted {
         #[serde(flatten)]
@@ -54,48 +56,6 @@ impl Body {
             untrusted: true,
         }
     }
-}
-
-/// Someone invited the bot to a channel; louro doesn't join, the agent may answer the inviter.
-#[derive(Clone, Serialize)]
-#[serde(tag = "type", rename = "invite")]
-pub struct Invite {
-    pub time: String,
-    pub from: Sender,
-    pub channel: String,
-}
-
-/// A nick the agent watches came online or went offline.
-#[derive(Clone, Serialize)]
-#[serde(tag = "type", rename = "presence")]
-pub struct Presence {
-    pub time: String,
-    pub nick: String,
-    pub state: PresenceState,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PresenceState {
-    Online,
-    Offline,
-}
-
-/// louro's own report that the IRC connection dropped or came back; not chat, so not untrusted.
-#[derive(Clone, Serialize)]
-#[serde(tag = "type", rename = "connection")]
-pub struct Connection {
-    pub time: String,
-    pub state: ConnectionState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_in: Option<u64>,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectionState {
-    Disconnected,
-    Reconnected,
 }
 
 #[derive(Serialize)]
@@ -155,7 +115,7 @@ impl Inbox {
         self.push_body(Body::chat(incoming));
     }
 
-    pub fn push_connection(&self, connection: Connection) {
+    pub fn push_connection(&self, connection: Value) {
         self.push_body(Body::Connection(connection));
     }
 
@@ -236,11 +196,12 @@ mod tests {
     #[tokio::test]
     async fn an_invite_is_sanitized_and_untrusted() {
         let inbox = Inbox::default();
-        inbox.push_untrusted(Invite {
-            time: "2026-10-16T21:05:00Z".into(),
-            from: sender("luiz", Some("lu\u{7}iz")),
-            channel: "#lounge\u{1b}[2J".into(),
-        });
+        inbox.push_untrusted(serde_json::json!({
+            "type": "invite",
+            "time": "2026-10-16T21:05:00Z",
+            "from": sender("luiz", Some("lu\u{7}iz")),
+            "channel": "#lounge\u{1b}[2J",
+        }));
         let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
         assert_eq!(
             batch["events"],
@@ -255,11 +216,12 @@ mod tests {
     #[tokio::test]
     async fn presence_is_sanitized_and_untrusted() {
         let inbox = Inbox::default();
-        inbox.push_untrusted(Presence {
-            time: "2026-10-16T21:05:00.000Z".into(),
-            nick: "lu\u{7}iz".into(),
-            state: PresenceState::Online,
-        });
+        inbox.push_untrusted(serde_json::json!({
+            "type": "presence",
+            "time": "2026-10-16T21:05:00.000Z",
+            "nick": "lu\u{7}iz",
+            "state": "online",
+        }));
         let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
         assert_eq!(
             batch["events"],

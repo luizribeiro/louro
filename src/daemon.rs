@@ -20,7 +20,7 @@ use tokio::time::Instant;
 use crate::config::{Config, Grants, Limit, Limits};
 use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
-use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE, Presence, PresenceState};
+use crate::inbox::{Inbox, NOTICE};
 use crate::irc::{
     self, History, HistoryQuery, Incoming, Irc, Listed, NickAccount, Outgoing, Secret, Sender,
     Update, now, whole_seconds,
@@ -261,41 +261,40 @@ impl<I: Irc> Daemon<I> {
                     message: disconnect_message(&cause, retry_in),
                 });
                 if retry_in.is_some() && !self.offline.swap(true, Ordering::Relaxed) {
-                    self.report_connection(ConnectionState::Disconnected, retry_in);
+                    self.inbox.push_connection(json!({
+                        "type": "connection",
+                        "time": now(),
+                        "state": "disconnected",
+                        "retry_in": retry_in,
+                    }));
                 }
             }
             Update::Registered => {
                 if self.offline.swap(false, Ordering::Relaxed) {
-                    self.report_connection(ConnectionState::Reconnected, None);
+                    self.inbox.push_connection(json!({
+                        "type": "connection",
+                        "time": now(),
+                        "state": "reconnected",
+                    }));
                 }
             }
-            Update::Presence { nick, online } => self.inbox.push_untrusted(Presence {
-                time: now(),
-                nick,
-                state: if online {
-                    PresenceState::Online
-                } else {
-                    PresenceState::Offline
-                },
-            }),
+            Update::Presence { nick, online } => self.inbox.push_untrusted(json!({
+                "type": "presence",
+                "time": now(),
+                "nick": nick,
+                "state": if online { "online" } else { "offline" },
+            })),
             Update::Invited { from, channel } => {
                 if self.grants.may_hear_privately_from(&from) {
-                    self.inbox.push_untrusted(Invite {
-                        time: now(),
-                        from,
-                        channel,
-                    });
+                    self.inbox.push_untrusted(json!({
+                        "type": "invite",
+                        "time": now(),
+                        "from": from,
+                        "channel": channel,
+                    }));
                 }
             }
         }
-    }
-
-    fn report_connection(&self, state: ConnectionState, retry_in: Option<u64>) {
-        self.inbox.push_connection(Connection {
-            time: now(),
-            state,
-            retry_in,
-        });
     }
 
     fn gave_up(&self) -> io::Error {
