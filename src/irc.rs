@@ -1,7 +1,7 @@
 //! The IRC side of the daemon: one papo client, with its chat and connection changes forwarded
 //! as [`Update`]s.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use papo::{
     Account, Client, ConnectErrorKind, Endpoint, Event, Events, Feature, HistoryItem,
@@ -353,6 +353,11 @@ fn logged_in(account: &Account) -> Option<String> {
     }
 }
 
+/// The current time, shaped like message times: RFC 3339 UTC with milliseconds.
+pub fn now() -> String {
+    papo::time::format(SystemTime::now()).expect("the clock is within years 0000 to 9999")
+}
+
 /// Rounds `delay` up to whole seconds, for a `retry_after` or `retry_in` an agent can poll on.
 pub(crate) fn whole_seconds(delay: Duration) -> u64 {
     delay.as_secs() + u64::from(delay.subsec_nanos() > 0)
@@ -635,6 +640,17 @@ mod tests {
         }
         let error = history_reference("4y8k q7j2").err().unwrap();
         assert_eq!(error.code, Code::Usage);
+    }
+
+    #[test]
+    fn now_is_shaped_like_message_times() {
+        let now = now();
+        assert_eq!(
+            (now.len(), &now[19..20], &now[23..]),
+            (24, ".", "Z"),
+            "{now}"
+        );
+        assert!(humantime::parse_rfc3339(&now).is_ok(), "{now}");
     }
 
     #[test]

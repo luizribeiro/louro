@@ -5,7 +5,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fs, io};
 
 use serde::Serialize;
@@ -22,7 +22,7 @@ use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE};
 use crate::irc::{
     self, History, HistoryQuery, Incoming, Irc, Member, Outgoing, Secret, Sender, Typing, Update,
-    whole_seconds,
+    now, whole_seconds,
 };
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -535,10 +535,6 @@ fn rate_limited(action: &str, retry_after: u64) -> Error {
     )
     .with_hint(format!("wait {retry_after} seconds, or don't {action}"))
     .with_retry_after(retry_after)
-}
-
-fn now() -> String {
-    humantime::format_rfc3339_seconds(SystemTime::now()).to_string()
 }
 
 fn disconnect_message(cause: &str, retry_in: Option<u64>) -> String {
