@@ -793,16 +793,25 @@ mod tests {
         }
 
         async fn status(&self) -> Value {
-            self.call(json!({"v": 1, "op": "status", "args": {}})).await
+            self.call(request("status", json!({}))).await
         }
     }
 
+    fn request(op: &str, args: Value) -> Value {
+        let mut request = json!({"v": VERSION, "op": op});
+        request["args"] = args;
+        request
+    }
+
     fn wait_request(timeout_secs: u64) -> Value {
-        json!({"v": 1, "op": "wait", "args": {"timeout": timeout_secs, "max": 20}})
+        request("wait", json!({"timeout": timeout_secs, "max": 20}))
     }
 
     fn send_request(target: &str, text: &str) -> Value {
-        json!({"v": 1, "op": "send", "args": {"target": target, "text": text, "kind": "message"}})
+        request(
+            "send",
+            json!({"target": target, "text": text, "kind": "message"}),
+        )
     }
 
     fn reply_request(target: &str, msgid: &str, text: &str) -> Value {
@@ -1204,9 +1213,10 @@ mod tests {
     }
 
     fn react_request(target: &str, reaction: &str, remove: bool) -> Value {
-        json!({"v": 1, "op": "react", "args": {
-            "target": target, "msgid": "4y8kq7j2c9mnz", "reaction": reaction, "remove": remove
-        }})
+        request(
+            "react",
+            json!({"target": target, "msgid": "4y8kq7j2c9mnz", "reaction": reaction, "remove": remove}),
+        )
     }
 
     #[tokio::test]
@@ -1234,8 +1244,7 @@ mod tests {
             ("#bots", "done"),
             ("#lounge", "active"),
         ] {
-            let request =
-                json!({"v": 1, "op": "typing", "args": {"target": target, "state": state}});
+            let request = request("typing", json!({"target": target, "state": state}));
             let reply = daemon.call(request).await;
             if target == "#bots" {
                 assert_eq!(reply["Ok"]["state"], state);
@@ -1250,7 +1259,10 @@ mod tests {
     }
 
     fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {
-        json!({"v": 1, "op": "redact", "args": {"target": target, "msgid": msgid, "reason": reason}})
+        request(
+            "redact",
+            json!({"target": target, "msgid": msgid, "reason": reason}),
+        )
     }
 
     #[tokio::test]
@@ -1297,7 +1309,7 @@ mod tests {
     }
 
     fn history_request(target: &str, limit: usize) -> Value {
-        json!({"v": 1, "op": "history", "args": {"target": target, "limit": limit}})
+        request("history", json!({"target": target, "limit": limit}))
     }
 
     #[tokio::test]
@@ -1389,7 +1401,7 @@ mod tests {
     }
 
     fn names_request(channel: &str) -> Value {
-        json!({"v": 1, "op": "names", "args": {"channel": channel}})
+        request("names", json!({"channel": channel}))
     }
 
     #[tokio::test]
@@ -1416,7 +1428,7 @@ mod tests {
     #[tokio::test]
     async fn quit_without_the_grant_is_refused_and_keeps_running() {
         let daemon = launch(grants());
-        let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
+        let reply = daemon.call(request("quit", json!({}))).await;
         assert_eq!(reply["Err"]["code"], "not_allowed");
         assert_eq!(daemon.status().await["Ok"]["connected"], true);
     }
@@ -1426,7 +1438,7 @@ mod tests {
         let mut grants = grants();
         grants.irc.quit = true;
         let daemon = launch(grants);
-        let reply = daemon.call(json!({"v": 1, "op": "quit", "args": {}})).await;
+        let reply = daemon.call(request("quit", json!({}))).await;
         assert_eq!(reply, json!({"Ok": {}}));
 
         daemon.daemon.await.unwrap().unwrap();
