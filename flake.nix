@@ -58,6 +58,16 @@
             doCheck = false;
             meta.mainProgram = "louro";
           }
+          # Hardened runtime, so a same-user process can't task_for_pid louro to read the
+          # password from its memory. sigtool's codesign can't set the flag; rcodesign can.
+          # Library validation would refuse the store's ad-hoc signed libiconv.
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+            nativeBuildInputs = [ pkgs.rcodesign ];
+            postFixup = ''
+              rcodesign sign --code-signature-flags runtime \
+                --entitlements-xml-file ${./nix/entitlements.plist} $out/bin/louro
+            '';
+          }
         );
         cargoHook =
           {
@@ -150,6 +160,13 @@
               cargoNextestPartitionsExtraArgs = "--no-tests=pass";
             }
           );
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+          hardened-runtime = pkgs.runCommand "louro-hardened-runtime" { } ''
+            ${pkgs.lib.getExe pkgs.rcodesign} print-signature-info ${pkgs.lib.getExe louro} \
+              | grep -F 'flags: CodeSignatureFlags(ADHOC | RUNTIME)'
+            touch $out
+          '';
         }
         // pkgs.lib.optionalAttrs (builtins.elem system vmTestSystems) {
           e2e = import ./nix/tests/e2e.nix {
