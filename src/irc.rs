@@ -85,17 +85,6 @@ pub struct Sender {
     pub bot: bool,
 }
 
-impl Sender {
-    /// Nicks and accounts come from other users, so they are cleaned like their chat.
-    pub fn sanitized(self) -> Self {
-        Self {
-            nick: text::clean(&self.nick),
-            account: self.account.as_deref().map(text::clean),
-            ..self
-        }
-    }
-}
-
 /// A channel member as papo's state knows it; `prefix` is the highest rank, like `@`, or empty.
 #[derive(Serialize)]
 pub struct Member {

@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::time::{self, Instant};
 
@@ -35,14 +36,10 @@ enum Body {
         untrusted: bool,
     },
     Connection(Connection),
-    Invite {
+    /// An event other than chat whose strings come from the network, like an invite.
+    Untrusted {
         #[serde(flatten)]
-        invite: Invite,
-        untrusted: bool,
-    },
-    Presence {
-        #[serde(flatten)]
-        presence: Presence,
+        event: Value,
         untrusted: bool,
     },
 }
@@ -162,25 +159,9 @@ impl Inbox {
         self.push_body(Body::Connection(connection));
     }
 
-    pub fn push_invite(&self, invite: Invite) {
-        let invite = Invite {
-            from: invite.from.sanitized(),
-            channel: text::clean(&invite.channel),
-            ..invite
-        };
-        self.push_body(Body::Invite {
-            invite,
-            untrusted: true,
-        });
-    }
-
-    pub fn push_presence(&self, presence: Presence) {
-        let presence = Presence {
-            nick: text::clean(&presence.nick),
-            ..presence
-        };
-        self.push_body(Body::Presence {
-            presence,
+    pub fn push_untrusted(&self, event: impl Serialize) {
+        self.push_body(Body::Untrusted {
+            event: text::clean_json(event),
             untrusted: true,
         });
     }
@@ -255,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn an_invite_is_sanitized_and_untrusted() {
         let inbox = Inbox::default();
-        inbox.push_invite(Invite {
+        inbox.push_untrusted(Invite {
             time: "2026-10-16T21:05:00Z".into(),
             from: sender("luiz", Some("lu\u{7}iz")),
             channel: "#lounge\u{1b}[2J".into(),
@@ -274,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn presence_is_sanitized_and_untrusted() {
         let inbox = Inbox::default();
-        inbox.push_presence(Presence {
+        inbox.push_untrusted(Presence {
             time: "2026-10-16T21:05:00.000Z".into(),
             nick: "lu\u{7}iz".into(),
             state: PresenceState::Online,

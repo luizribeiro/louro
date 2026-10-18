@@ -269,7 +269,7 @@ impl<I: Irc> Daemon<I> {
                     self.report_connection(ConnectionState::Reconnected, None);
                 }
             }
-            Update::Presence { nick, online } => self.inbox.push_presence(Presence {
+            Update::Presence { nick, online } => self.inbox.push_untrusted(Presence {
                 time: now(),
                 nick,
                 state: if online {
@@ -280,7 +280,7 @@ impl<I: Irc> Daemon<I> {
             }),
             Update::Invited { from, channel } => {
                 if self.grants.may_hear_privately_from(&from) {
-                    self.inbox.push_invite(Invite {
+                    self.inbox.push_untrusted(Invite {
                         time: now(),
                         from,
                         channel,
