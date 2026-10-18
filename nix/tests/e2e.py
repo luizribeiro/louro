@@ -1,4 +1,4 @@
-# The e2e scenarios, run by e2e.nix's VM test with `settings` from e2e.nix.
+# The e2e scenarios, run by e2e.nix's VM test after irc.py, with `settings` from e2e.nix.
 import contextlib
 import datetime as dt
 import json
@@ -11,7 +11,6 @@ PASSWORD_FILE = f"{HOME}/password"
 SOCKET = f"{HOME}/run/louro.sock"
 SERVER = f"irc://127.0.0.1:{settings['ircPort']}"
 DAEMON = f"-u {BOT['user']} -f 'louro connect'"
-TIMEOUT = dt.timedelta(minutes=2)
 # How long stopping louro may take, whatever the server does with its QUIT.
 PROMPTLY = dt.timedelta(seconds=6)
 EXIT_CODES = {
@@ -43,15 +42,6 @@ def refused(code, *args):
     error = louro(*args, exit_code=EXIT_CODES[code])["error"]
     assert error["code"] == code, error
     return error
-
-
-def ergo_api(endpoint, account, password):
-    request = json.dumps({"accountName": account, "passphrase": password})
-    response = machine.succeed(shlex.join([
-        "curl", "-sf", "-H", f"Authorization: Bearer {settings['apiToken']}",
-        "-d", request, f"http://127.0.0.1:{settings['apiPort']}/v1/{endpoint}",
-    ]))
-    assert json.loads(response)["success"], response
 
 
 def toml_lines(table, prefix=""):
@@ -90,18 +80,6 @@ def write_config(grants, limits={}, password=BOT["password"]):
     write_as_bot(PASSWORD_FILE, password)
     config = {"server": server, "grants": grants, "limits": limits}
     write_as_bot(CONFIG, "\n".join(toml_lines(config)))
-
-
-def until(attempt, predicate):
-    """Retries attempt() until predicate holds for what it returned; returns that."""
-    results = []
-
-    def check(_last_try):
-        results.append(attempt())
-        return predicate(results[-1])
-
-    retry(check, timeout=TIMEOUT)
-    return results[-1]
 
 
 def louro_until(predicate, *args):
@@ -166,37 +144,10 @@ def connection_states(events):
     return [event["state"] for event in events if event["type"] == "connection"]
 
 
-def human_file(nick, name):
-    """irc-human's FIFO ("in") or log, as e2e.nix's service sets them."""
-    return f"/run/irc-human-{nick}/{name}"
-
-
-def send_raw(nick, line):
-    machine.succeed(f"echo {shlex.quote(line)} > {human_file(nick, 'in')}")
-
-
 def say(nick, target, text):
     """nick says text to target; returns the events up to when it reaches wait."""
     send_raw(nick, f"PRIVMSG {target} :{text}")
     return events_until(from_nick(nick, text))
-
-
-def split_tags(line):
-    """An IRC line's message tags as a dict, and the rest of the line."""
-    if not line.startswith("@"):
-        return {}, line
-    tags, rest = line[1:].split(" ", 1)
-    return dict((tag.split("=", 1) + [""])[:2] for tag in tags.split(";")), rest
-
-
-def received(nick, matches):
-    """Waits until nick receives a line whose tags and rest satisfy matches; returns its tags."""
-
-    def found():
-        log = machine.succeed(f"cat {human_file(nick, 'log')}").splitlines()
-        return [tags for tags, rest in map(split_tags, log) if matches(tags, rest)]
-
-    return until(found, bool)[0]
 
 
 def heard(nick, target, text):
@@ -262,12 +213,7 @@ def start_humans():
         )
 
 
-machine.wait_for_unit("ergochat.service")
-machine.wait_for_open_port(settings["ircPort"])
-machine.wait_for_open_port(settings["apiPort"])
-ergo_api("saregister", BOT["user"], BOT["password"])
-for nick, password in settings["humans"].items():
-    ergo_api("saregister", nick, password)
+start_ergo({BOT["user"]: BOT["password"]} | settings["humans"])
 start_humans()
 
 with subtest("louro connects, joins #bots, and status shows its grants"):

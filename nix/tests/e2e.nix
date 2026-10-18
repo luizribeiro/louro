@@ -41,6 +41,7 @@ pkgs.testers.runNixOSTest (
 
     testScript = ''
       settings = ${builtins.toJSON settings}
+      exec(compile(open("${./irc.py}").read(), "nix/tests/irc.py", "exec"))
       exec(compile(open("${./e2e.py}").read(), "nix/tests/e2e.py", "exec"))
     '';
   }
