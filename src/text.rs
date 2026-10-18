@@ -96,7 +96,6 @@ pub fn check_secret(password: Option<&Secret>, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Catches the password even when split across lines or recased.
 fn squash(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_whitespace() && !c.is_control())

@@ -317,8 +317,6 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    /// What's known about DMs from `target`, for `$first` and `account:` entries in
-    /// `irc.dm.send`.
     fn dm_history(&self, target: &str) -> DmHistory {
         self.dm_senders
             .lock()

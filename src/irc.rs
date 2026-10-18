@@ -153,7 +153,6 @@ pub trait Irc: Send + Sync + 'static {
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
     /// Sends one message (several lines become a multiline batch).
     fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send;
-    /// Adds `reaction` to the message `msgid` in `target`, or removes it.
     fn react(
         &self,
         target: &str,
@@ -189,7 +188,6 @@ pub struct PapoIrc {
     client: Client,
 }
 
-/// Connects, registers, and forwards chat from the joined channels and DMs.
 pub async fn connect(
     server: &Server,
     password: Option<Secret>,
@@ -395,7 +393,6 @@ fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option
     })
 }
 
-/// An RFC 3339 time, else a msgid.
 fn history_reference(raw: &str) -> Result<HistoryReference> {
     if let Ok(time) = humantime::parse_rfc3339_weak(raw) {
         return Ok(time.into());

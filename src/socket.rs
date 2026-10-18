@@ -137,7 +137,6 @@ impl Connection {
         })
     }
 
-    /// Sends `op` and returns the daemon's result or error.
     pub async fn request(&mut self, op: Op) -> Result<Value> {
         write_line(&mut self.socket, &Request { v: VERSION, op })
             .await
@@ -160,7 +159,6 @@ impl Connection {
     }
 }
 
-/// One-shot request/response for commands that don't need to keep the connection open.
 pub async fn request(op: Op) -> Result<Value> {
     Connection::connect(None).await?.request(op).await
 }
