@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help check test e2e fmt lint hooks precommit clean
+.PHONY: help check test e2e module fmt lint hooks precommit clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -12,6 +12,9 @@ test: ## Run the test suite
 
 e2e: ## Run the end-to-end test: louro and Ergo in a NixOS VM (slow)
 	nix build -L --no-link .#checks.$$(nix config show system).e2e
+
+module: ## Run the NixOS module's VM test: services.louro with Ergo (slow)
+	nix build -L --no-link .#checks.$$(nix config show system).module
 
 fmt: ## Format and lint (cargo fmt, clippy)
 	cargo fmt --all
