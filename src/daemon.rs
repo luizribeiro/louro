@@ -210,9 +210,7 @@ fn stop_signal() -> io::Result<impl Future<Output = ()>> {
 }
 
 fn create_runtime_dir(socket: &Path) -> Result<()> {
-    let Some(dir) = socket.parent() else {
-        return Ok(());
-    };
+    let dir = socket.parent().unwrap_or(Path::new("."));
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)

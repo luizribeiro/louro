@@ -62,23 +62,23 @@ mod tests {
 
     use super::*;
 
-    fn password_file(contents: &str, mode: u32) -> tempfile::NamedTempFile {
+    fn password_file(mode: u32) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().unwrap();
-        fs::write(file.path(), contents).unwrap();
+        fs::write(file.path(), "correct horse battery staple\n").unwrap();
         fs::set_permissions(file.path(), Permissions::from_mode(mode)).unwrap();
         file
     }
 
     #[test]
     fn reads_an_owner_only_file_without_its_newline() {
-        let file = password_file("correct horse battery staple\n", 0o600);
+        let file = password_file(0o600);
         let password = read(&Source::File(file.path().into())).unwrap();
         assert_eq!(password.expose(), "correct horse battery staple");
     }
 
     #[test]
     fn refuses_a_file_others_can_read() {
-        let file = password_file("correct horse battery staple\n", 0o644);
+        let file = password_file(0o644);
         let err = read(&Source::File(file.path().into())).unwrap_err();
         assert_eq!(err.code, Code::Usage);
         assert_eq!(err.hint.as_deref(), Some("chmod 600 it"));
