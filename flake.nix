@@ -26,7 +26,7 @@
       ...
     }:
     let
-      e2eSystems = [
+      vmTestSystems = [
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
@@ -151,10 +151,14 @@
             }
           );
         }
-        // pkgs.lib.optionalAttrs (builtins.elem system e2eSystems) {
+        // pkgs.lib.optionalAttrs (builtins.elem system vmTestSystems) {
           e2e = import ./nix/tests/e2e.nix {
             inherit pkgs;
             inherit (self) packages;
+          };
+          module = import ./nix/tests/module.nix {
+            inherit pkgs;
+            module = self.nixosModules.default;
           };
         };
 
@@ -173,6 +177,8 @@
       }
     )
     // {
+      nixosModules.default = import ./nix/module.nix self;
+
       overlays.default = final: _: {
         louro = self.packages.${final.stdenv.hostPlatform.system}.louro;
       };
