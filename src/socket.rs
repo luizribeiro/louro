@@ -227,10 +227,111 @@ fn current_uid(base_dir: &Path) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::irc::{HistoryQuery, Kind, Outgoing, Typing};
 
     #[test]
     fn wait_timeout_takes_seconds_or_none() {
         assert_eq!(parse_timeout("60"), Ok(60));
         assert_eq!(parse_timeout("none"), Ok(u64::MAX));
+    }
+
+    /// Every `Op`, the ack, and a success and an error response, each pinned to a literal JSON
+    /// string. A deliberate wire change updates both this test and `VERSION` in the same commit.
+    #[test]
+    fn wire_format_is_pinned() {
+        let request = |op: Op| serde_json::to_string(&Request { v: VERSION, op }).unwrap();
+        let cases = [
+            (
+                request(Op::Status {}),
+                "{\"v\":1,\"op\":\"status\",\"args\":{}}",
+            ),
+            (
+                request(Op::Wait {
+                    timeout: 60,
+                    max: NonZeroUsize::new(20).unwrap(),
+                }),
+                "{\"v\":1,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
+            ),
+            (
+                request(Op::Send(Outgoing {
+                    target: "#bots".into(),
+                    kind: Kind::Message,
+                    text: "hi there".into(),
+                    reply_to: Some("4y8kq7j2c9mnz".into()),
+                })),
+                "{\"v\":1,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
+            ),
+            (
+                request(Op::Names {
+                    channel: "#bots".into(),
+                }),
+                "{\"v\":1,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
+            ),
+            (
+                request(Op::React {
+                    target: "#bots".into(),
+                    msgid: "4y8kq7j2c9mnz".into(),
+                    reaction: "+1".into(),
+                    remove: false,
+                }),
+                "{\"v\":1,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
+            ),
+            (
+                request(Op::Typing {
+                    target: "#bots".into(),
+                    state: Typing::Active,
+                }),
+                "{\"v\":1,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
+            ),
+            (
+                request(Op::Redact {
+                    target: "#bots".into(),
+                    msgid: "4y8kq7j2c9mnz".into(),
+                    reason: "typo".into(),
+                }),
+                "{\"v\":1,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
+            ),
+            (
+                request(Op::History {
+                    target: "#bots".into(),
+                    query: HistoryQuery {
+                        limit: 20,
+                        before: Some("4y8kq7j2c9mnz".into()),
+                        after: None,
+                    },
+                }),
+                "{\"v\":1,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null}}",
+            ),
+            (
+                request(Op::Quit {}),
+                "{\"v\":1,\"op\":\"quit\",\"args\":{}}",
+            ),
+            (
+                serde_json::to_string(&Ack { ack: true }).unwrap(),
+                "{\"ack\":true}",
+            ),
+            (
+                serde_json::to_string(&Result::<Value>::Ok(
+                    serde_json::json!({"sent": true, "target": "#bots"}),
+                ))
+                .unwrap(),
+                "{\"Ok\":{\"sent\":true,\"target\":\"#bots\"}}",
+            ),
+            (
+                serde_json::to_string(&Result::<Value>::Err(
+                    Error::new(Code::RateLimited, "too many sends in this window")
+                        .with_hint("wait 7 seconds, or don't send")
+                        .with_retry_after(7),
+                ))
+                .unwrap(),
+                "{\"Err\":{\"code\":\"rate_limited\",\"message\":\"too many sends in this window\",\"hint\":\"wait 7 seconds, or don't send\",\"retry_after\":7}}",
+            ),
+        ];
+        for (actual, expected) in cases {
+            assert_eq!(
+                actual, expected,
+                "the socket wire format changed: bump socket::VERSION and update this test"
+            );
+        }
     }
 }
