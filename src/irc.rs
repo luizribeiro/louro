@@ -370,7 +370,7 @@ fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option
             .is_some_and(|(sender, me)| state.casemapping().eq(sender, me));
     Some(Incoming {
         kind,
-        time: humantime::format_rfc3339_millis(message.time()).to_string(),
+        time: papo::time::format(message.time())?,
         msgid: message.id().map(ToString::to_string),
         target: target.to_owned(),
         private,
