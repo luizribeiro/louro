@@ -398,6 +398,9 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn handle(&self, op: Op) -> Result<Value> {
+        if let Some(text) = shown_text(&op) {
+            text::check_secret(self.password.as_ref(), text)?;
+        }
         match op {
             Op::Status {} => Ok(self.status()),
             Op::Wait { .. } => unreachable!("serve answers wait itself"),
@@ -462,7 +465,6 @@ impl<I: Irc> Daemon<I> {
             let topic = self.irc.topic(channel).map(|topic| text::clean(&topic));
             return Ok(json!({"channel": channel, "topic": topic, "untrusted": true}));
         };
-        text::check_secret(self.password.as_ref(), &topic)?;
         self.grants.check_topic(channel)?;
         text::check_field("a topic", &topic, MAX_TOPIC_CHARS)?;
         self.require_joined(channel)?;
@@ -479,7 +481,6 @@ impl<I: Irc> Daemon<I> {
     async fn part(&self, channel: &str, reason: &str) -> Result<Value> {
         self.grants.check_join(channel)?;
         text::check_one_line(reason)?;
-        text::check_secret(self.password.as_ref(), reason)?;
         self.require_joined(channel)?;
         self.irc.part(channel, reason).await?;
         Ok(json!({"channel": channel, "parted": true}))
@@ -561,9 +562,7 @@ impl<I: Irc> Daemon<I> {
         Ok(json!({"realname": realname}))
     }
 
-    /// Others see the bot's nick, away message and realname, so each is checked like a send.
     fn check_identity(&self, what: &str, value: &str, max_chars: usize) -> Result<()> {
-        text::check_secret(self.password.as_ref(), value)?;
         self.grants.check_identity()?;
         text::check_field(what, value, max_chars)
     }
@@ -597,7 +596,6 @@ impl<I: Irc> Daemon<I> {
         reaction: &str,
         remove: bool,
     ) -> Result<Value> {
-        text::check_secret(self.password.as_ref(), reaction)?;
         self.check_dm(target, |dm| {
             self.grants
                 .check_also(&self.grants.irc.react, "irc.react", target, dm)
@@ -639,7 +637,6 @@ impl<I: Irc> Daemon<I> {
         self.grants.check_redact()?;
         text::check_msgid(msgid)?;
         text::check_one_line(reason)?;
-        text::check_secret(self.password.as_ref(), reason)?;
         if !self.sent.lock().unwrap().contains(target, msgid) {
             return Err(Error::new(
                 Code::NotAllowed,
@@ -661,7 +658,6 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn send(&self, message: Outgoing) -> Result<Value> {
-        text::check_secret(self.password.as_ref(), &message.text)?;
         self.check_dm(&message.target, |dm| {
             self.grants.check_send(&message.target, dm)
         })?;
@@ -712,6 +708,25 @@ impl<I: Irc> Daemon<I> {
     fn release_send_budget(&self, target: &str, now: Instant) {
         self.send_windows.release(target, now);
         self.send_total.release(TOTAL, now);
+    }
+}
+
+/// What others on IRC would see of `op`, which must never carry the bot's password.
+fn shown_text(op: &Op) -> Option<&str> {
+    match op {
+        Op::Send(Outgoing { text, .. })
+        | Op::Topic {
+            set: Some(text), ..
+        }
+        | Op::Part { reason: text, .. }
+        | Op::React { reaction: text, .. }
+        | Op::Redact { reason: text, .. }
+        | Op::Nick { nick: text }
+        | Op::Away {
+            text: Some(text), ..
+        }
+        | Op::Setname { realname: text } => Some(text),
+        _ => None,
     }
 }
 
