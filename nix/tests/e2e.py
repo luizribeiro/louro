@@ -465,8 +465,8 @@ with subtest("chat in a channel joined just before the cut, quiet until then, ar
     events = say_while_cut_off("#quiet", "you missed this too")
     # A duplicate could land in a later batch than the first delivery.
     events.extend(louro("wait", "--timeout", "5")["events"])
-    # papo (2d40e94) re-delivers the previous subtest's #bots catchup on this reconnect too.
-    [missed] = [event for event in chat_from("luiz", events) if event["target"] == "#quiet"]
+    [missed] = chat_from("luiz", events)
+    assert missed["target"] == "#quiet", missed
     assert missed["origin"] == "history" and missed["text"] == "you missed this too", missed
 
 with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
