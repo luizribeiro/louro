@@ -529,7 +529,7 @@ impl Irc for PapoIrc {
     }
 }
 
-/// papo's CTCP builder panics on a raw newline, so an action's lines are joined onto one.
+/// An action is one line: multi-line `/me` text is joined onto a single line before reaching papo.
 fn flatten_for_action(text: &str) -> String {
     text.replace('\n', " ")
 }

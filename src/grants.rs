@@ -126,8 +126,9 @@ fn target_kind(target: &str) -> Result<TargetKind> {
             "{target} is a status message to a channel, not a nick"
         )));
     }
-    // `$` starts a server mask, and keeps `$first` from naming a nick. A space would split the
-    // target into more IRC parameters where papo doesn't check it, as in CHATHISTORY.
+    // `$` starts a server mask, and keeps `$first` from naming a nick. Reject whitespace and
+    // control characters here rather than relying on papo: its own checks differ by operation
+    // and none of them reject a stray control character outside `\0`, `\r`, `\n`, and space.
     if target.is_empty()
         || target.starts_with([':', '$'])
         || target.contains(|c: char| c.is_whitespace() || c.is_control())
