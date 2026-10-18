@@ -29,6 +29,9 @@ pub enum Op {
     /// Connection state, nick, channels, and what the bot may do (grants)
     Status {},
     /// Block until matching events arrive
+    ///
+    /// Event ids and the cursor restart when the daemon restarts, so neither is stable across
+    /// runs.
     Wait {
         /// Seconds to block for, or `none` to wait forever; `0` polls
         #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]
