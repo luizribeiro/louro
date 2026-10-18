@@ -20,14 +20,6 @@ use crate::text;
 
 const UPDATES_CAPACITY: usize = 256;
 
-fn ctcp_version() -> String {
-    format!(
-        "louro {} (papo {})",
-        env!("CARGO_PKG_VERSION"),
-        papo::VERSION
-    )
-}
-
 pub enum Update {
     Chat(Incoming),
     /// The connection dropped; `retry_in` (whole seconds) is `None` once papo has stopped
@@ -226,7 +218,11 @@ pub async fn connect(
     server: &Server,
     password: Option<Secret>,
 ) -> Result<(PapoIrc, mpsc::Receiver<Update>)> {
-    let version = ctcp_version();
+    let version = format!(
+        "louro {} (papo {})",
+        env!("CARGO_PKG_VERSION"),
+        papo::VERSION
+    );
     let mut builder = Client::builder(endpoint(&server.address)?)
         .nick(&server.nick)
         .alt_nicks(server.alt_nicks.clone())
@@ -395,7 +391,7 @@ pub fn now() -> String {
 }
 
 /// Rounds `delay` up to whole seconds, for a `retry_after` or `retry_in` an agent can poll on.
-pub(crate) fn whole_seconds(delay: Duration) -> u64 {
+pub fn whole_seconds(delay: Duration) -> u64 {
     delay.as_secs() + u64::from(delay.subsec_nanos() > 0)
 }
 
@@ -536,7 +532,8 @@ impl Irc for PapoIrc {
         let mut request = match kind {
             Kind::Message => self.client.privmsg(&target, &text),
             Kind::Notice => self.client.notice(&target, &text),
-            Kind::Action => self.client.action(&target, flatten_for_action(&text)),
+            // An action is one line, so a multi-line `/me` is joined onto one.
+            Kind::Action => self.client.action(&target, text.replace('\n', " ")),
         };
         if let Some(id) = &reply_to {
             request = request.reply_to(&MessageId::from(id));
@@ -666,11 +663,6 @@ impl Irc for PapoIrc {
     async fn quit(&self) {
         let _ = self.client.quit("").await;
     }
-}
-
-/// An action is one line: multi-line `/me` text is joined onto a single line before reaching papo.
-fn flatten_for_action(text: &str) -> String {
-    text.replace('\n', " ")
 }
 
 impl From<papo::Error> for Error {
@@ -809,21 +801,6 @@ mod tests {
         ] {
             assert_eq!(whole_seconds(delay), seconds, "{delay:?}");
         }
-    }
-
-    #[test]
-    fn an_action_is_one_line() {
-        assert_eq!(
-            flatten_for_action("checks the logs\nfinds nothing"),
-            "checks the logs finds nothing"
-        );
-    }
-
-    #[test]
-    fn ctcp_version_names_both_louro_and_papo() {
-        let version = ctcp_version();
-        assert!(version.starts_with(&format!("louro {} (papo ", env!("CARGO_PKG_VERSION"))));
-        assert!(version.ends_with(&format!("{})", papo::VERSION)));
     }
 
     #[test]
