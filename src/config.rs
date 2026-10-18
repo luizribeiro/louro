@@ -98,29 +98,22 @@ pub enum Limit {
 
 impl Limit {
     const FORMAT: &'static str =
-        r#"want "N/<duration>" like "3/10s" (duration: s, m or h; N at least 1), or "off""#;
+        r#"want "N/<duration>" like "3/10s" or "10/1m" (N at least 1, whole seconds), or "off""#;
 
     fn parse(raw: &str) -> Result<Self, &'static str> {
         if raw == "off" {
             return Ok(Self::Off);
         }
-        let (count, duration) = raw.split_once('/').ok_or(Self::FORMAT)?;
+        let (count, window) = raw.split_once('/').ok_or(Self::FORMAT)?;
         let count: u32 = count.parse().map_err(|_| Self::FORMAT)?;
-        if count == 0 {
+        let window = humantime::parse_duration(window).map_err(|_| Self::FORMAT)?;
+        if count == 0 || window.subsec_nanos() != 0 {
             return Err(Self::FORMAT);
         }
-        let mut units = duration.chars();
-        let seconds_per_unit = match units.next_back() {
-            Some('s') => 1,
-            Some('m') => 60,
-            Some('h') => 3600,
-            _ => return Err(Self::FORMAT),
-        };
-        let magnitude: u64 = units.as_str().parse().map_err(|_| Self::FORMAT)?;
-        let seconds = magnitude
-            .checked_mul(seconds_per_unit)
-            .ok_or(Self::FORMAT)?;
-        Ok(Self::Window { count, seconds })
+        Ok(Self::Window {
+            count,
+            seconds: window.as_secs(),
+        })
     }
 }
 
@@ -450,6 +443,13 @@ mod tests {
                     seconds: 7200,
                 },
             ),
+            (
+                "4/1h 30m",
+                Limit::Window {
+                    count: 4,
+                    seconds: 5400,
+                },
+            ),
         ] {
             assert_eq!(Limit::parse(raw), Ok(parsed), "{raw}");
         }
@@ -463,6 +463,7 @@ mod tests {
             "0/10s",
             "off/10s",
             "1/99999999999999999h",
+            "3/1500ms",
         ] {
             assert_eq!(Limit::parse(bad), Err(Limit::FORMAT), "{bad}");
         }
