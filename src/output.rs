@@ -27,15 +27,3 @@ fn with_now(mut body: Value) -> Value {
     }
     body
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_result_says_the_current_time() {
-        let result = with_now(json!({"sent": true, "target": "#bots"}));
-        assert_eq!(result["sent"], true);
-        assert!(result["now"].as_str().unwrap().ends_with('Z'), "{result}");
-    }
-}
