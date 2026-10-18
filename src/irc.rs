@@ -4,7 +4,7 @@
 use std::time::{Duration, SystemTime};
 
 use papo::{
-    Account, Away, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events, Feature,
+    Account, Away, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events, Fallback,
     HistoryItem, HistoryReference, ListFilter, Message, MessageId, MessageKind, Refusal,
     RegistrationError, Sasl, Source, State, User,
 };
@@ -421,6 +421,12 @@ pub fn whole_seconds(delay: Duration) -> u64 {
     delay.as_secs() + u64::from(delay.subsec_nanos() > 0)
 }
 
+/// Whether a reply actually went out threaded: only a reply, and only when the server kept the
+/// reply tag rather than falling back to a plain send.
+fn is_threaded(replying: bool, fallbacks: &[Fallback]) -> bool {
+    replying && !fallbacks.contains(&Fallback::ReplyTagDropped)
+}
+
 fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
     let private = state.is_me(message.target());
     if !private && state.channel(message.target()).is_none() {
@@ -564,11 +570,10 @@ impl Irc for PapoIrc {
         if let Some(id) = &reply_to {
             request = request.reply_to(&MessageId::from(id));
         }
-        let threaded = reply_to.is_some() && self.client.state().supports(Feature::Replies);
         let sent = request.await?;
         Ok(Sent {
             msgid: sent.id.map(|id| id.to_string()),
-            threaded,
+            threaded: is_threaded(reply_to.is_some(), &sent.fallbacks),
         })
     }
 
@@ -768,7 +773,8 @@ pub mod fixtures {
 #[cfg(test)]
 mod tests {
     use papo::{
-        ConnectError, Disconnected, InvalidInput, ServerError, Unsupported, UnsupportedReason,
+        ConnectError, Disconnected, Feature, InvalidInput, ServerError, Unsupported,
+        UnsupportedReason,
     };
 
     use super::*;
@@ -853,6 +859,28 @@ mod tests {
             (Duration::from_secs(300), 300),
         ] {
             assert_eq!(whole_seconds(delay), seconds, "{delay:?}");
+        }
+    }
+
+    #[test]
+    fn a_reply_is_threaded_only_when_the_server_kept_the_reply_tag() {
+        for (replying, fallbacks, threaded) in [
+            (false, vec![], false),
+            (false, vec![Fallback::ReplyTagDropped], false),
+            (true, vec![], true),
+            (true, vec![Fallback::SplitIntoLines], true),
+            (true, vec![Fallback::ReplyTagDropped], false),
+            (
+                true,
+                vec![Fallback::ContextTagDropped, Fallback::ReplyTagDropped],
+                false,
+            ),
+        ] {
+            assert_eq!(
+                is_threaded(replying, &fallbacks),
+                threaded,
+                "{replying} {fallbacks:?}"
+            );
         }
     }
 
