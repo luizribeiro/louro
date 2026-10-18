@@ -22,8 +22,8 @@ use crate::error::{Code, Error, Result};
 use crate::grants::DmHistory;
 use crate::inbox::{Connection, ConnectionState, Inbox, Invite, NOTICE, Presence, PresenceState};
 use crate::irc::{
-    self, History, HistoryQuery, Incoming, Irc, Listed, Member, NickAccount, Outgoing, Secret,
-    Sender, Update, Whowas, now, whole_seconds,
+    self, History, HistoryQuery, Incoming, Irc, Listed, NickAccount, Outgoing, Secret, Sender,
+    Update, now, whole_seconds,
 };
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -416,8 +416,9 @@ impl<I: Irc> Daemon<I> {
             Op::Names { channel } => self.names(channel),
             Op::Topic { channel, set: None } => {
                 self.require_joined(channel)?;
-                let topic = self.irc.topic(channel).map(|topic| text::clean(&topic));
-                Ok(json!({"channel": channel, "topic": topic, "untrusted": true}))
+                Ok(untrusted(
+                    json!({"channel": channel, "topic": self.irc.topic(channel)}),
+                ))
             }
             Op::Topic {
                 channel,
@@ -477,8 +478,10 @@ impl<I: Irc> Daemon<I> {
                     .await
             }
             Op::History { target, query } => self.history(target, query).await,
-            Op::Whois { nick } => self.whois(nick).await,
-            Op::Whowas { nick } => self.whowas(nick).await,
+            Op::Whois { nick } => Ok(untrusted(self.irc.whois(nick).await?)),
+            Op::Whowas { nick } => Ok(untrusted(
+                json!({"nick": nick, "entries": self.irc.whowas(nick).await?}),
+            )),
             Op::Watch { nick, remove } => self.watch(&op, nick, *remove).await,
             Op::Nick { nick } => {
                 text::check_field("a nick", nick, MAX_NICK_CHARS)?;
@@ -517,17 +520,10 @@ impl<I: Irc> Daemon<I> {
     }
 
     fn names(&self, channel: &str) -> Result<Value> {
-        let members: Vec<Member> = self
-            .irc
-            .names(channel)
-            .ok_or_else(|| not_in(channel))?
-            .into_iter()
-            .map(|member| Member {
-                user: member.user.sanitized(),
-                ..member
-            })
-            .collect();
-        Ok(json!({"channel": channel, "members": members}))
+        let members = self.irc.names(channel).ok_or_else(|| not_in(channel))?;
+        Ok(text::clean_json(
+            json!({"channel": channel, "members": members}),
+        ))
     }
 
     fn require_joined(&self, channel: &str) -> Result<()> {
@@ -535,23 +531,6 @@ impl<I: Irc> Daemon<I> {
             return Ok(());
         }
         Err(not_in(channel))
-    }
-
-    async fn whois(&self, nick: &str) -> Result<Value> {
-        let mut result = json!(self.irc.whois(nick).await?.sanitized());
-        result["untrusted"] = true.into();
-        Ok(result)
-    }
-
-    async fn whowas(&self, nick: &str) -> Result<Value> {
-        let entries: Vec<_> = self
-            .irc
-            .whowas(nick)
-            .await?
-            .into_iter()
-            .map(Whowas::sanitized)
-            .collect();
-        Ok(json!({"nick": nick, "entries": entries, "untrusted": true}))
     }
 
     async fn watch(&self, op: &Op, nick: &str, remove: bool) -> Result<Value> {
@@ -579,23 +558,18 @@ impl<I: Irc> Daemon<I> {
 
     async fn list(&self, pattern: Option<&str>) -> Result<Value> {
         let pattern = pattern.map(str::to_lowercase);
-        let mut channels: Vec<Listed> = self
-            .irc
-            .list()
-            .await?
-            .into_iter()
-            .map(Listed::sanitized)
-            .filter(|listed| {
-                pattern.as_ref().is_none_or(|pattern| {
-                    listed.channel.to_lowercase().contains(pattern)
-                        || listed.topic.to_lowercase().contains(pattern)
-                })
+        let mut channels: Vec<Listed> = self.irc.list().await?;
+        channels.retain(|listed| {
+            pattern.as_ref().is_none_or(|pattern| {
+                [&listed.channel, &listed.topic]
+                    .iter()
+                    .any(|text| text::clean(text).to_lowercase().contains(pattern))
             })
-            .collect();
+        });
         channels.sort_by_key(|listed| Reverse(listed.users));
         let more = channels.len() > MAX_LIST;
         channels.truncate(MAX_LIST);
-        Ok(json!({"channels": channels, "more": more, "untrusted": true}))
+        Ok(untrusted(json!({"channels": channels, "more": more})))
     }
 
     /// Never touches the inbox, so `wait`'s cursor stays where it was.
@@ -688,6 +662,13 @@ fn shown_text(op: &Op) -> Option<&str> {
     }
 }
 
+/// A result carrying text from the network, every string in it cleaned, and marked as such.
+fn untrusted(result: impl Serialize) -> Value {
+    let mut result = text::clean_json(result);
+    result["untrusted"] = true.into();
+    result
+}
+
 fn not_in(channel: &str) -> Error {
     Error::new(Code::NotAllowed, format!("louro is not in {channel}"))
         .with_hint("`louro status` lists the channels it is in")
@@ -738,7 +719,7 @@ mod tests {
 
     use super::*;
     use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender};
-    use crate::irc::{IrcStatus, Kind, Origin, Sender, Sent, Whois};
+    use crate::irc::{IrcStatus, Kind, Member, Origin, Sender, Sent, Whois, Whowas};
 
     const PASSWORD: &str = "c0rrect-h0rse-battery";
 

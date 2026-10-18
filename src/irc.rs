@@ -117,37 +117,11 @@ pub struct Whois {
     pub bot: bool,
 }
 
-impl Whois {
-    /// Every string comes from the network, so each is cleaned like chat.
-    pub fn sanitized(self) -> Self {
-        Self {
-            nick: text::clean(&self.nick),
-            account: self.account.as_deref().map(text::clean),
-            away: self.away.as_deref().map(text::clean),
-            channels: self
-                .channels
-                .iter()
-                .map(|channel| text::clean(channel))
-                .collect(),
-            ..self
-        }
-    }
-}
-
 /// Someone who used a nick before, as the server remembers them.
 #[derive(Serialize)]
 pub struct Whowas {
     pub nick: String,
     pub realname: Option<String>,
-}
-
-impl Whowas {
-    pub fn sanitized(self) -> Self {
-        Self {
-            nick: text::clean(&self.nick),
-            realname: self.realname.as_deref().map(text::clean),
-        }
-    }
 }
 
 /// A channel as the server's `LIST` shows it.
@@ -156,16 +130,6 @@ pub struct Listed {
     pub channel: String,
     pub users: usize,
     pub topic: String,
-}
-
-impl Listed {
-    pub fn sanitized(self) -> Self {
-        Self {
-            channel: text::clean(&self.channel),
-            topic: text::clean(&self.topic),
-            ..self
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

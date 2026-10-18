@@ -1,6 +1,9 @@
 //! Hygiene for chat text: sanitizing and capping inbound text, cleaning outbound text, and
 //! blocking the bot's password from being sent.
 
+use serde::Serialize;
+use serde_json::Value;
+
 use crate::error::{Code, Error, Result};
 use crate::irc::Secret;
 
@@ -30,6 +33,21 @@ pub fn sanitize(text: &str) -> (String, bool) {
 /// Text from the network, like a nick or topic, sanitized; a cut is not worth flagging there.
 pub fn clean(text: &str) -> String {
     sanitize(text).0
+}
+
+/// `value` as JSON with every string in it cleaned, for results that carry network text.
+pub fn clean_json(value: impl Serialize) -> Value {
+    fn clean_strings(value: &mut Value) {
+        match value {
+            Value::String(text) => *text = clean(text),
+            Value::Array(items) => items.iter_mut().for_each(clean_strings),
+            Value::Object(fields) => fields.values_mut().for_each(clean_strings),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(value).expect("louro's results are JSON");
+    clean_strings(&mut value);
+    value
 }
 
 pub fn clean_lines(text: &str) -> Result<String> {
