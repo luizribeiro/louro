@@ -209,10 +209,6 @@ fn stop_signal() -> io::Result<impl Future<Output = ()>> {
     })
 }
 
-pub fn already_running() -> Error {
-    Error::new(Code::SessionExists, "louro is already running").with_hint("run `louro quit` first")
-}
-
 fn create_runtime_dir(socket: &Path) -> Result<()> {
     let Some(dir) = socket.parent() else {
         return Ok(());

@@ -51,7 +51,8 @@ impl Args {
     async fn connect(self) -> Result<ExitCode> {
         let config = config::load(self.config.as_deref(), self.socket.as_deref())?;
         if is_running(config.server.socket.as_deref()).await {
-            return Err(daemon::already_running());
+            return Err(Error::new(Code::SessionExists, "louro is already running")
+                .with_hint("run `louro quit` first"));
         }
         if !self.foreground {
             return Ok(output::emit(background(&config)));
