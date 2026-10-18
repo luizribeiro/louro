@@ -238,6 +238,21 @@ def drop_louro_connection():
     machine.succeed(f"ss -K -tn state established '( src {local} )'")
 
 
+def say_while_cut_off(channel, text):
+    """luiz says text in channel while louro is cut off; returns the events up to when it
+    reaches wait after louro reconnects."""
+    louro_blocked(True)
+    drop_louro_connection()
+    louro_until(lambda status: not status["connected"], "status")
+    send_raw("luiz", f"PRIVMSG {channel} :{text}")
+    machine.wait_until_succeeds(
+        f"grep -q 'PRIVMSG {channel} :{text}' {human_file('mallory', 'log')}",
+        timeout=TIMEOUT,
+    )
+    louro_blocked(False)
+    return events_until(from_nick("luiz", text))
+
+
 def start_humans():
     for nick in settings["humans"]:
         machine.succeed(f"systemctl restart irc-human-{nick}")
@@ -490,16 +505,7 @@ with subtest("louro rides out an Ergo restart: sends fail fast, then chat flows 
     heard("luiz", "#bots", "glad to be back")
 
 with subtest("chat sent while louro was cut off arrives from history after it reconnects"):
-    louro_blocked(True)
-    drop_louro_connection()
-    louro_until(lambda status: not status["connected"], "status")
-    send_raw("luiz", "PRIVMSG #bots :you missed this")
-    machine.wait_until_succeeds(
-        f"grep -q 'PRIVMSG #bots :you missed this' {human_file('mallory', 'log')}",
-        timeout=TIMEOUT,
-    )
-    louro_blocked(False)
-    events = events_until(from_nick("luiz", "you missed this"))
+    events = say_while_cut_off("#bots", "you missed this")
     assert connection_states(events) == ["disconnected", "reconnected"], events
     assert isinstance(events[0]["retry_in"], int) and "untrusted" not in events[0], events
     [missed] = chat_from("luiz", events)
