@@ -68,6 +68,23 @@ struct Watchlist {
 }
 
 impl Watchlist {
+    /// The list saved at `file`; none there means an empty one.
+    fn load(file: PathBuf) -> Result<Self> {
+        let nicks = match fs::read_to_string(&file) {
+            Ok(text) => serde_json::from_str(&text).map_err(|err| err.to_string()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+            Err(err) => Err(err.to_string()),
+        }
+        .map_err(|err| {
+            Error::new(
+                Code::Internal,
+                format!("can't read the watch list {}: {err}", file.display()),
+            )
+            .with_hint("fix or delete it, then start louro again")
+        })?;
+        Ok(Self { file, nicks })
+    }
+
     fn save(&self) -> Result<()> {
         let temp = self.file.with_extension("json.tmp");
         fs::write(&temp, json!(self.nicks).to_string())
@@ -154,12 +171,13 @@ async fn run(
     limits: Limits,
     password: Option<Secret>,
     irc: impl Irc,
-    watching: Watchlist,
+    mut watching: Watchlist,
     mut updates: mpsc::Receiver<Update>,
     listener: UnixListener,
     socket_path: &Path,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
+    let saved = std::mem::take(&mut watching.nicks);
     let daemon = Arc::new(Daemon {
         grants,
         limits,
@@ -176,6 +194,7 @@ async fn run(
         send_total: RateWindows::default(),
         react_windows: RateWindows::default(),
     });
+    daemon.restore_watching(saved).await;
     tokio::pin!(stop);
     let outcome = loop {
         tokio::select! {
@@ -218,10 +237,7 @@ pub async fn start(
             format!("can't create {}: {err}", state_dir.display()),
         )
     })?;
-    let watching = Watchlist {
-        file: state_dir.join("watching.json"),
-        nicks: BTreeSet::new(),
-    };
+    let watching = Watchlist::load(state_dir.join("watching.json"))?;
     remove_socket(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let (irc, updates) = irc::connect(&server, password.clone()).await?;
     let listener = UnixListener::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
@@ -600,6 +616,27 @@ impl<I: Irc> Daemon<I> {
         Ok(json!({"nick": nick, "watching": !remove}))
     }
 
+    /// Watches the nicks an earlier run saved again, as far as the grants and the cap allow now.
+    async fn restore_watching(&self, saved: BTreeSet<String>) {
+        let watch = |nick: &String| Op::Watch {
+            nick: nick.clone(),
+            remove: false,
+        };
+        let granted = saved
+            .into_iter()
+            .filter(|nick| {
+                self.grants
+                    .check(&watch(nick), &DmHistory::default())
+                    .is_ok()
+            })
+            .take(MAX_WATCHING);
+        for nick in granted {
+            if self.irc.act(&watch(&nick)).await.is_ok() {
+                self.watching.lock().unwrap().nicks.insert(nick);
+            }
+        }
+    }
+
     async fn list(&self, pattern: Option<&str>) -> Result<Value> {
         let pattern = pattern.map(str::to_lowercase);
         let mut channels: Vec<Listed> = self.irc.list().await?;
@@ -960,12 +997,13 @@ mod tests {
     }
 
     fn launch_with(grants: Grants, limits: Limits) -> Running {
-        let dir = tempfile::tempdir().unwrap();
+        launch_in(tempfile::tempdir().unwrap(), grants, limits)
+    }
+
+    /// Launches a daemon whose socket and watch list are in `dir`.
+    fn launch_in(dir: TempDir, grants: Grants, limits: Limits) -> Running {
         let socket = dir.path().join("louro.sock");
-        let watching = Watchlist {
-            file: dir.path().join("watching.json"),
-            nicks: BTreeSet::new(),
-        };
+        let watching = Watchlist::load(dir.path().join("watching.json")).unwrap();
         let irc = Arc::new(FakeIrc::default());
         let (updates, receiver) = mpsc::channel(16);
         let (stop, stopped) = oneshot::channel();
@@ -1849,6 +1887,52 @@ mod tests {
             fs::read_to_string(daemon.watch_file()).unwrap(),
             r#"["luiz"]"#
         );
+    }
+
+    /// Launches a daemon as if an earlier run had saved `nicks` as its watch list.
+    fn launch_watching(grants: Grants, nicks: &[String]) -> Running {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("watching.json"), json!(nicks).to_string()).unwrap();
+        launch_in(dir, grants, Limits::default())
+    }
+
+    #[tokio::test]
+    async fn a_restart_watches_the_saved_nicks_the_grants_still_allow() {
+        let saved = ["luiz", "mallory", "user1"].map(String::from);
+        let daemon = launch_watching(grants(), &saved);
+        assert_eq!(
+            daemon.status().await["Ok"]["watching"],
+            json!(["luiz", "user1"])
+        );
+        assert_eq!(
+            *daemon.irc.acts.lock().unwrap(),
+            [watch_request("luiz", false), watch_request("user1", false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_watches_at_most_the_cap() {
+        let saved: Vec<_> = (0..MAX_WATCHING + 10).map(|n| format!("user{n}")).collect();
+        let daemon = launch_watching(grants(), &saved);
+        let status = daemon.status().await;
+        assert_eq!(
+            status["Ok"]["watching"].as_array().unwrap().len(),
+            MAX_WATCHING
+        );
+    }
+
+    #[test]
+    fn a_missing_watch_list_is_empty_and_an_invalid_one_refuses_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("watching.json");
+        assert!(Watchlist::load(file.clone()).unwrap().nicks.is_empty());
+
+        fs::write(&file, r#"{"luiz": true}"#).unwrap();
+        let Err(error) = Watchlist::load(file.clone()) else {
+            panic!("loaded an invalid watch list");
+        };
+        assert_eq!(error.code, Code::Internal);
+        assert!(error.message.contains(file.to_str().unwrap()), "{error}");
     }
 
     #[tokio::test]

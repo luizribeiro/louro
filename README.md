@@ -81,6 +81,7 @@ alt_nicks = ["louro_", "louro__"]
 sasl_username = "louro"
 # password_file = "/run/credentials/louro.service/password"
 autojoin = ["#bots", "#lounge"]
+# state_dir = "/var/lib/louro"  # keeps the watch list across restarts; default ~/.local/state/louro
 
 [grants]
 irc.join = ["#bots", "#lounge", "#help-*"]  # channels it may sit in and read, or `louro join`
