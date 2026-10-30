@@ -188,7 +188,15 @@ pub async fn start(
         limits,
     } = config;
     let socket = resolve_socket_path(server.socket.as_deref())?;
-    create_runtime_dir(&socket)?;
+    create_private_dir(socket.parent().unwrap_or(Path::new(".")))
+        .map_err(|err| cannot_listen(&socket, &err))?;
+    let state_dir = server.state_dir()?;
+    create_private_dir(&state_dir).map_err(|err| {
+        Error::new(
+            Code::Internal,
+            format!("can't create {}: {err}", state_dir.display()),
+        )
+    })?;
     remove_socket(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let (irc, updates) = irc::connect(&server, password.clone()).await?;
     let listener = UnixListener::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
@@ -220,13 +228,8 @@ fn stop_signal() -> io::Result<impl Future<Output = ()>> {
     })
 }
 
-fn create_runtime_dir(socket: &Path) -> Result<()> {
-    let dir = socket.parent().unwrap_or(Path::new("."));
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|err| cannot_listen(socket, &err))
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
 fn cannot_listen(socket: &Path, err: &io::Error) -> Error {

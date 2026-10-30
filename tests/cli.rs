@@ -62,11 +62,14 @@ fn closed_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Writes a louro.toml for a local server at `port` with `extra` `[server]` lines.
+/// Writes a louro.toml for a local server at `port`, keeping state in `dir/state`, with `extra`
+/// `[server]` lines.
 fn config(dir: &Path, port: u16, extra: &str) -> PathBuf {
     let path = dir.join("louro.toml");
+    let state_dir = dir.join("state");
+    let state_dir = state_dir.to_str().unwrap();
     let text = format!(
-        "[server]\naddress = \"irc://127.0.0.1:{port}\"\nnick = \"louro\"\n{extra}\n[grants]\nirc.join = [\"#bots\"]\n"
+        "[server]\naddress = \"irc://127.0.0.1:{port}\"\nnick = \"louro\"\nstate_dir = {state_dir:?}\n{extra}\n[grants]\nirc.join = [\"#bots\"]\n"
     );
     fs::write(&path, text).unwrap();
     path
@@ -228,11 +231,10 @@ fn connect_in_the_foreground_reports_a_failed_connection() {
         .failure()
         .code(9)
         .stdout(predicate::str::contains(r#""code":"connect_failed""#));
-    let mode = fs::metadata(socket.parent().unwrap())
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o700);
+    for private in [socket.parent().unwrap(), &dir.path().join("state")] {
+        let mode = fs::metadata(private).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{}", private.display());
+    }
     assert!(!socket.exists());
 }
 

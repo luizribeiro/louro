@@ -2,6 +2,7 @@
 //! `[limits]` how much.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -44,6 +45,7 @@ pub struct Server {
     #[serde(default)]
     pub autojoin: Vec<String>,
     pub socket: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
 }
 
 impl Server {
@@ -52,6 +54,27 @@ impl Server {
         self.sasl_username
             .as_deref()
             .or(self.password_file.as_ref().map(|_| self.nick.as_str()))
+    }
+
+    /// Where louro keeps what outlives a run: `state_dir`, else `$XDG_STATE_HOME/louro`, else
+    /// `~/.local/state/louro`, on macOS too.
+    pub fn state_dir(&self) -> Result<PathBuf> {
+        if let Some(dir) = &self.state_dir {
+            return Ok(dir.clone());
+        }
+        xdg_dir(
+            env::var_os("XDG_STATE_HOME"),
+            env::home_dir(),
+            ".local/state",
+        )
+        .map(|dir| dir.join("louro"))
+        .ok_or_else(|| {
+            Error::new(
+                Code::Usage,
+                "there is no home directory to keep louro's state in",
+            )
+            .with_hint("set server.state_dir in louro.toml")
+        })
     }
 }
 
@@ -245,11 +268,8 @@ pub fn load(path: Option<&Path>, socket: Option<&Path>) -> Result<Config> {
 
 /// `$XDG_CONFIG_HOME/louro/louro.toml`, else `~/.config/louro/louro.toml`, on macOS too.
 fn default_path() -> Result<PathBuf> {
-    let dir = env::var_os("XDG_CONFIG_HOME")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::home_dir().map(|home| home.join(".config")))
-        .ok_or_else(|| {
+    let dir =
+        xdg_dir(env::var_os("XDG_CONFIG_HOME"), env::home_dir(), ".config").ok_or_else(|| {
             Error::new(
                 Code::Usage,
                 "there is no home directory to find louro.toml in",
@@ -257,6 +277,15 @@ fn default_path() -> Result<PathBuf> {
             .with_hint("pass --config PATH")
         })?;
     Ok(dir.join("louro/louro.toml"))
+}
+
+/// An XDG base directory: the variable's value unless empty, else `fallback` under the home
+/// directory.
+fn xdg_dir(value: Option<OsString>, home: Option<PathBuf>, fallback: &str) -> Option<PathBuf> {
+    value
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(fallback)))
 }
 
 fn parse(text: &str) -> Result<Config, String> {
@@ -363,6 +392,26 @@ mod tests {
                 seconds: 60
             }
         );
+    }
+
+    #[test]
+    fn state_dir_is_the_setting_else_an_xdg_dir() {
+        let set = parse(&format!("{MINIMAL}state_dir = \"/var/lib/louro\"")).unwrap();
+        assert_eq!(set.server.state_dir().unwrap(), Path::new("/var/lib/louro"));
+
+        let home = || Some(PathBuf::from("/home/louro"));
+        for (value, home, dir) in [
+            (Some("/xdg/state"), home(), Some("/xdg/state")),
+            (Some(""), home(), Some("/home/louro/.local/state")),
+            (None, home(), Some("/home/louro/.local/state")),
+            (None, None, None),
+        ] {
+            assert_eq!(
+                xdg_dir(value.map(OsString::from), home, ".local/state"),
+                dir.map(PathBuf::from),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
