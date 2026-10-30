@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::DirBuilder;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,6 +57,27 @@ impl SentLog {
         self.0
             .iter()
             .any(|(sent_to, id)| id == msgid && sent_to.eq_ignore_ascii_case(target))
+    }
+}
+
+/// Lowercased nicks the agent asked to `watch`, saved to `file` as a JSON array after every
+/// change, so a restarted daemon watches them again.
+struct Watchlist {
+    file: PathBuf,
+    nicks: BTreeSet<String>,
+}
+
+impl Watchlist {
+    fn save(&self) -> Result<()> {
+        let temp = self.file.with_extension("json.tmp");
+        fs::write(&temp, json!(self.nicks).to_string())
+            .and_then(|()| fs::rename(&temp, &self.file))
+            .map_err(|err| {
+                Error::new(
+                    Code::Internal,
+                    format!("can't save the watch list {}: {err}", self.file.display()),
+                )
+            })
     }
 }
 
@@ -114,8 +135,7 @@ struct Daemon<I> {
     /// By lowercased nick, what DMs that reached the agent say, for `$first` and `account:`.
     dm_senders: Mutex<HashMap<String, DmHistory>>,
     sent: Mutex<SentLog>,
-    /// Lowercased nicks the agent asked to `watch`.
-    watching: Mutex<BTreeSet<String>>,
+    watching: Mutex<Watchlist>,
     last_error: Mutex<Option<Problem>>,
     /// Set from a disconnect until the next registration, so the agent hears of each outage once.
     offline: AtomicBool,
@@ -134,6 +154,7 @@ async fn run(
     limits: Limits,
     password: Option<Secret>,
     irc: impl Irc,
+    watching: Watchlist,
     mut updates: mpsc::Receiver<Update>,
     listener: UnixListener,
     socket_path: &Path,
@@ -147,7 +168,7 @@ async fn run(
         inbox: Inbox::default(),
         dm_senders: Mutex::default(),
         sent: Mutex::default(),
-        watching: Mutex::default(),
+        watching: Mutex::new(watching),
         last_error: Mutex::default(),
         offline: AtomicBool::new(false),
         quit: Notify::new(),
@@ -197,6 +218,10 @@ pub async fn start(
             format!("can't create {}: {err}", state_dir.display()),
         )
     })?;
+    let watching = Watchlist {
+        file: state_dir.join("watching.json"),
+        nicks: BTreeSet::new(),
+    };
     remove_socket(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let (irc, updates) = irc::connect(&server, password.clone()).await?;
     let listener = UnixListener::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
@@ -210,7 +235,7 @@ pub async fn start(
     })));
     Ok(async move {
         run(
-            grants, limits, password, irc, updates, listener, &socket, stop,
+            grants, limits, password, irc, watching, updates, listener, &socket, stop,
         )
         .await
     })
@@ -524,7 +549,7 @@ impl<I: Irc> Daemon<I> {
         let mut status = json!(self.irc.status());
         status["grants"] = json!(self.grants);
         status["limits"] = json!(self.limits);
-        status["watching"] = json!(*self.watching.lock().unwrap());
+        status["watching"] = json!(self.watching.lock().unwrap().nicks);
         status["last_error"] = json!(*self.last_error.lock().unwrap());
         status
     }
@@ -547,13 +572,14 @@ impl<I: Irc> Daemon<I> {
         self.watching
             .lock()
             .unwrap()
+            .nicks
             .contains(&nick.to_ascii_lowercase())
     }
 
     async fn watch(&self, op: &Op, nick: &str, remove: bool) -> Result<Value> {
         let nick_key = nick.to_ascii_lowercase();
         let full = {
-            let watching = self.watching.lock().unwrap();
+            let watching = &self.watching.lock().unwrap().nicks;
             !remove && !watching.contains(&nick_key) && watching.len() >= MAX_WATCHING
         };
         if full {
@@ -566,10 +592,11 @@ impl<I: Irc> Daemon<I> {
         self.irc.act(op).await?;
         let mut watching = self.watching.lock().unwrap();
         if remove {
-            watching.remove(&nick_key);
+            watching.nicks.remove(&nick_key);
         } else {
-            watching.insert(nick_key);
+            watching.nicks.insert(nick_key);
         }
+        watching.save()?;
         Ok(json!({"nick": nick, "watching": !remove}))
     }
 
@@ -920,7 +947,7 @@ mod tests {
     }
 
     struct Running {
-        _dir: TempDir,
+        dir: TempDir,
         socket: PathBuf,
         updates: mpsc::Sender<Update>,
         irc: Arc<FakeIrc>,
@@ -935,6 +962,10 @@ mod tests {
     fn launch_with(grants: Grants, limits: Limits) -> Running {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("louro.sock");
+        let watching = Watchlist {
+            file: dir.path().join("watching.json"),
+            nicks: BTreeSet::new(),
+        };
         let irc = Arc::new(FakeIrc::default());
         let (updates, receiver) = mpsc::channel(16);
         let (stop, stopped) = oneshot::channel();
@@ -948,13 +979,13 @@ mod tests {
             async move {
                 let listener = UnixListener::bind(&socket)?;
                 run(
-                    grants, limits, password, irc, receiver, listener, &socket, stopped,
+                    grants, limits, password, irc, watching, receiver, listener, &socket, stopped,
                 )
                 .await
             }
         });
         Running {
-            _dir: dir,
+            dir,
             socket,
             updates,
             irc,
@@ -1007,6 +1038,10 @@ mod tests {
 
         async fn status(&self) -> Value {
             self.call(request("status", json!({}))).await
+        }
+
+        fn watch_file(&self) -> PathBuf {
+            self.dir.path().join("watching.json")
         }
     }
 
@@ -1810,6 +1845,18 @@ mod tests {
         assert_eq!(refused["Err"]["code"], "not_allowed");
         assert_eq!(daemon.status().await["Ok"]["watching"], json!(["luiz"]));
         assert_eq!(*daemon.irc.acts.lock().unwrap(), watches);
+        assert_eq!(
+            fs::read_to_string(daemon.watch_file()).unwrap(),
+            r#"["luiz"]"#
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_fails_when_the_watch_list_cant_be_saved() {
+        let daemon = launch(grants());
+        fs::create_dir(daemon.watch_file()).unwrap();
+        let reply = daemon.call(watch_request("luiz", false)).await;
+        assert_eq!(reply["Err"]["code"], "internal");
     }
 
     #[tokio::test]
