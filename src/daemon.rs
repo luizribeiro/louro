@@ -277,12 +277,16 @@ impl<I: Irc> Daemon<I> {
                     }));
                 }
             }
-            Update::Presence { nick, online } => self.inbox.push_untrusted(json!({
-                "type": "presence",
-                "time": now(),
-                "nick": nick,
-                "state": if online { "online" } else { "offline" },
-            })),
+            Update::Presence { nick, online } => {
+                if self.is_watching(&nick) {
+                    self.inbox.push_untrusted(json!({
+                        "type": "presence",
+                        "time": now(),
+                        "nick": nick,
+                        "state": if online { "online" } else { "offline" },
+                    }));
+                }
+            }
             Update::Invited { from, channel } => {
                 if self.grants.may_hear_privately_from(&from) {
                     self.inbox.push_untrusted(json!({
@@ -529,6 +533,13 @@ impl<I: Irc> Daemon<I> {
             return Ok(());
         }
         Err(not_in(channel))
+    }
+
+    fn is_watching(&self, nick: &str) -> bool {
+        self.watching
+            .lock()
+            .unwrap()
+            .contains(&nick.to_ascii_lowercase())
     }
 
     async fn watch(&self, op: &Op, nick: &str, remove: bool) -> Result<Value> {
@@ -1807,14 +1818,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_reports_a_watched_nick_coming_online() {
-        let daemon = launch(Grants::default());
-        let presence = |online| Update::Presence {
-            nick: "luiz".into(),
+    async fn wait_reports_presence_only_for_watched_nicks() {
+        let daemon = launch(grants());
+        daemon.call(watch_request("Luiz", false)).await;
+        let presence = |nick: &str, online| Update::Presence {
+            nick: nick.into(),
             online,
         };
-        daemon.update(presence(true)).await;
-        daemon.update(presence(false)).await;
+        daemon.update(presence("user1", true)).await;
+        daemon.update(presence("luiz", true)).await;
+        daemon.update(presence("LUIZ", false)).await;
         let (_, reply) = daemon.wait(5).await;
         let events = reply["Ok"]["events"].as_array().unwrap();
         let states: Vec<_> = events
@@ -1825,7 +1838,7 @@ mod tests {
             states,
             [
                 (&json!("presence"), &json!("luiz"), &json!("online")),
-                (&json!("presence"), &json!("luiz"), &json!("offline")),
+                (&json!("presence"), &json!("LUIZ"), &json!("offline")),
             ]
         );
     }
