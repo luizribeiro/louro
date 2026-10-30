@@ -69,12 +69,14 @@ with subtest("the agent can read neither the credential nor its source"):
         machine.succeed(f"test -s {path}")
         machine.fail(as_user("agent", ["cat", path]))
 
-with subtest("a restart reconnects"):
+with subtest("a restart reconnects and keeps the watch list"):
     bot_sent("JOIN", 1)
+    code, out = louro_as("agent", "watch", "luiz")
+    assert code == 0 and out["watching"], out
     machine.succeed("systemctl restart louro")
     bot_sent("QUIT", 1)
     bot_sent("JOIN", 2)
-    until(status, joined)
+    assert until(status, joined)["watching"] == ["luiz"]
 
 with subtest("stopping louro quits IRC and removes the socket"):
     machine.succeed("systemctl stop louro")

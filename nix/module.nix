@@ -91,6 +91,7 @@ in
       }
     ];
 
+    services.louro.settings.server.state_dir = lib.mkDefault "/var/lib/louro";
     users.groups.${cfg.group} = { };
     environment.systemPackages = [ cfg.package ];
 
@@ -118,6 +119,8 @@ in
         Group = cfg.group;
         RuntimeDirectory = "louro";
         RuntimeDirectoryMode = "0750";
+        StateDirectory = "louro";
+        StateDirectoryMode = "0700";
         # louro binds its socket with this umask, and connecting needs write access to it.
         UMask = "0007";
 

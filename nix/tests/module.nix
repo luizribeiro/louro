@@ -40,6 +40,7 @@ pkgs.testers.runNixOSTest {
         grants.irc = {
           join = [ "#bots" ];
           send = [ "#bots" ];
+          watch = [ "luiz" ];
         };
       };
       inherit (settings) passwordFile;
