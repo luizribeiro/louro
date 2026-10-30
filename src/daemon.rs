@@ -277,14 +277,19 @@ impl<I: Irc> Daemon<I> {
                     }));
                 }
             }
-            Update::Presence { nick, online } => {
+            Update::Presence { nick, online, away } => {
                 if self.is_watching(&nick) {
-                    self.inbox.push_untrusted(json!({
+                    let mut event = json!({
                         "type": "presence",
                         "time": now(),
                         "nick": nick,
-                        "state": if online { "online" } else { "offline" },
-                    }));
+                        "state": "offline",
+                    });
+                    if online {
+                        event["state"] = "online".into();
+                        event["away"] = away.into();
+                    }
+                    self.inbox.push_untrusted(event);
                 }
             }
             Update::Invited { from, channel } => {
@@ -1818,27 +1823,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_reports_presence_only_for_watched_nicks() {
+    async fn wait_reports_presence_and_away_only_for_watched_nicks() {
         let daemon = launch(grants());
         daemon.call(watch_request("Luiz", false)).await;
-        let presence = |nick: &str, online| Update::Presence {
+        let presence = |nick: &str, online, away: Option<&str>| Update::Presence {
             nick: nick.into(),
             online,
+            away: away.map(String::from),
         };
-        daemon.update(presence("user1", true)).await;
-        daemon.update(presence("luiz", true)).await;
-        daemon.update(presence("LUIZ", false)).await;
+        daemon.update(presence("user1", true, Some("gone"))).await;
+        daemon
+            .update(presence("luiz", true, Some("lunch\u{7}")))
+            .await;
+        daemon.update(presence("luiz", true, None)).await;
+        daemon.update(presence("LUIZ", false, None)).await;
         let (_, reply) = daemon.wait(5).await;
-        let events = reply["Ok"]["events"].as_array().unwrap();
-        let states: Vec<_> = events
+        let events: Vec<_> = reply["Ok"]["events"]
+            .as_array()
+            .unwrap()
             .iter()
-            .map(|event| (&event["type"], &event["nick"], &event["state"]))
+            .map(|event| {
+                let mut event = event.clone();
+                event
+                    .as_object_mut()
+                    .unwrap()
+                    .retain(|key, _| key != "id" && key != "time");
+                event
+            })
             .collect();
         assert_eq!(
-            states,
+            events,
             [
-                (&json!("presence"), &json!("luiz"), &json!("online")),
-                (&json!("presence"), &json!("LUIZ"), &json!("offline")),
+                json!({"type": "presence", "nick": "luiz", "state": "online", "away": "lunch", "untrusted": true}),
+                json!({"type": "presence", "nick": "luiz", "state": "online", "away": null, "untrusted": true}),
+                json!({"type": "presence", "nick": "LUIZ", "state": "offline", "untrusted": true}),
             ]
         );
     }

@@ -86,7 +86,7 @@ pub struct Irc {
     pub whois: bool,
     /// Whether it may list the server's channels.
     pub list: bool,
-    /// Nicks it may watch come online and go offline.
+    /// Nicks it may watch come online, go offline and go away.
     pub watch: Selector,
     /// Whether it may change its own nick, away status and realname.
     pub identity: bool,

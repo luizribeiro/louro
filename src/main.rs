@@ -48,7 +48,7 @@ More, as granted:
   whois NICK, whowas NICK           look someone up
   list --match TEXT                 find channels
   join '#channel', part '#channel'  come and go
-  watch NICK                        get `presence` events (online, offline) in wait
+  watch NICK                        get `presence` events (online, offline, away) in wait
   nick NEW, setname TEXT            change your nick or realname
   away TEXT, away --back            mark yourself away, or back
 

@@ -381,7 +381,7 @@ with running(
         error = refused("not_allowed", "part", "#help-rust")
         assert error["message"] == "louro is not in #help-rust", error
 
-    with subtest("watch reports luiz online and ghost offline, and status lists both"):
+    with subtest("watch reports luiz online, away and back, ghost offline, and status lists both"):
         louro("watch", "luiz")
         louro("watch", "ghost")
 
@@ -390,6 +390,13 @@ with running(
 
         events = events_until(lambda events: {("luiz", "online"), ("ghost", "offline")} <= presence(events))
         assert all(event["untrusted"] for event in events if event["type"] == "presence"), events
+
+        def aways(events):
+            return [event["away"] for event in events if event["type"] == "presence" and event["nick"] == "luiz"]
+
+        send_raw("luiz", "AWAY :lunch")
+        send_raw("luiz", "AWAY")
+        events_until(lambda events: "lunch" in aways(events) and aways(events)[-1] is None)
         assert louro("status")["watching"] == ["ghost", "luiz"]
         refused("not_allowed", "watch", "mallory")
         louro("watch", "ghost", "--remove")

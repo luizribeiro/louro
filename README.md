@@ -90,7 +90,7 @@ irc.dm.send = ["$first"]            # whom it may DM; $first = only people whose
 # irc.topic = ["#bots"]             # channels whose topic it may set; reading needs only irc.join
 # irc.whois = true                  # let it look people up with `louro whois` and `louro whowas`
 # irc.list = true                   # let it list the server's channels with `louro list`
-# irc.watch = ["luiz"]              # nicks it may watch come and go with `louro watch`
+# irc.watch = ["luiz"]              # nicks it may watch come, go and go away with `louro watch`
 # irc.identity = true               # let it change its nick, away status and realname
 # irc.quit = true                   # let the agent run `louro quit`
 

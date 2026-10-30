@@ -30,10 +30,12 @@ pub enum Update {
     },
     /// Registration completed, first at connect and again after each reconnect.
     Registered,
-    /// A watched nick came online, or went offline.
+    /// A nick came online, went offline, or changed its away message; `away` is the message
+    /// while online and away, else `None`.
     Presence {
         nick: String,
         online: bool,
+        away: Option<String>,
     },
     /// Someone invited the bot to `channel`; louro never joins on its own.
     Invited {
@@ -355,12 +357,19 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             .into_iter()
             .collect(),
         Event::MonitorOnline(online) => vec![Update::Presence {
+            away: away_message(state, &online.nick),
             nick: online.nick.to_string(),
             online: true,
         }],
         Event::MonitorOffline(offline) => vec![Update::Presence {
             nick: offline.nick.to_string(),
             online: false,
+            away: None,
+        }],
+        Event::AwayChanged(changed) => vec![Update::Presence {
+            nick: changed.nick.to_string(),
+            online: true,
+            away: changed.message,
         }],
         Event::Disconnected(disconnected) => vec![Update::Disconnected {
             cause: disconnect_cause(&disconnected.cause),
@@ -395,10 +404,19 @@ fn known_sender(state: &State, nick: &str) -> Sender {
     }
 }
 
+fn away<'a>(state: &'a State, nick: &str) -> Option<&'a Away> {
+    state.user(nick).map(User::away)
+}
+
 fn is_away(state: &State, nick: &str) -> bool {
-    state
-        .user(nick)
-        .is_some_and(|user| matches!(user.away(), Away::Away { .. }))
+    matches!(away(state, nick), Some(Away::Away { .. }))
+}
+
+fn away_message(state: &State, nick: &str) -> Option<String> {
+    match away(state, nick) {
+        Some(Away::Away { message }) => message.clone(),
+        _ => None,
+    }
 }
 
 fn logged_in(account: &Account) -> Option<String> {
