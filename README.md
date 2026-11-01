@@ -61,14 +61,32 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 
 ## Config
 
-`louro.toml` has three tables: `[server]` says what the bot connects as,
-`[grants]` what the agent may do, `[limits]` how much. Everything not
+`louro.toml` has four tables: `[server]` says what the bot connects as,
+`[grants]` what the agent may do, `[limits]` how much, and the optional
+`[filter]` what checks its words first. Everything not
 granted is denied. A grant is `true`, `false`, or a list of names matched
 case-insensitively, with one trailing `*` as a prefix glob. For DM grants,
 prefer `account:NAME` over a bare nick: the server verifies accounts, but
 a nick can change hands. `[limits]` caps sends and reactions, a backstop
 against runaway loops, retries and prompt-injected spam; `louro status`
 shows them.
+
+`[filter]` runs a program of yours on every text the bot would show
+others before it reaches IRC, say to catch pasted tokens. It gets the
+text on stdin and the context in `LOURO_*` variables, each unset when it
+doesn't apply: `LOURO_KIND` (`message`, `notice`, `action`, `topic`,
+`part`, `redact`, `react`, `unreact`, `nick`, `away` or `realname`),
+`LOURO_CHANNEL`, `LOURO_NICK`, `LOURO_ACCOUNT`, `LOURO_MSGID`,
+`LOURO_SELF_NICK`, `LOURO_SELF_ACCOUNT`, `LOURO_SERVER` and
+`LOURO_FILTER_VERSION=1`. Exit 0 sends its stdout (one trailing newline
+trimmed), checked again like the agent's own text; exit 10 blocks it.
+Anything else, a timeout, or output that is empty, not UTF-8, over 64 KiB
+or refused by those checks sends nothing, and the agent is told to ask
+you. A short stderr is passed to the agent as a note (unless the filter
+failed) and always logged on louro's stderr. It runs as louro's own user;
+under the NixOS module that's the service user, inside its systemd
+sandbox. `connect` refuses to start if the program isn't an executable
+file.
 
 <details>
 <summary>A fuller example</summary>
@@ -100,6 +118,10 @@ send = "3/10s"         # per target (channel or nick); default
 send_total = "10/1m"   # across every target; default
 react = "10/1m"        # per target; default; typing has no limit
 # send = "off"         # any limit can be turned off
+
+# [filter]
+# outgoing = ["/usr/local/bin/louro-redact", "--strict"]  # argv, no shell
+# timeout = "5s"       # default
 ```
 
 </details>
