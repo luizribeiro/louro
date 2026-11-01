@@ -201,6 +201,21 @@ fn connect_refuses_to_prompt_without_a_terminal() {
 }
 
 #[test]
+fn connect_refuses_a_filter_it_cannot_run_before_connecting() {
+    let dir = tempdir().unwrap();
+    let config = config(dir.path(), closed_port(), "");
+    let missing = dir.path().join("louro-redact");
+    let filter = format!("[filter]\noutgoing = [{:?}]\n", missing.to_str().unwrap());
+    fs::write(&config, fs::read_to_string(&config).unwrap() + &filter).unwrap();
+    connect(&dir.path().join("louro.sock"), &config)
+        .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::contains(r#""code":"usage""#))
+        .stdout(predicate::str::contains("is not an executable file"));
+}
+
+#[test]
 fn connect_in_the_background_relays_the_daemons_failure() {
     let dir = tempdir().unwrap();
     let password_file = dir.path().join("louro.pass");

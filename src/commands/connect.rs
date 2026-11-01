@@ -50,6 +50,9 @@ impl Args {
 
     async fn connect(self) -> Result<ExitCode> {
         let config = config::load(self.config.as_deref(), self.socket.as_deref())?;
+        if let Some(filter) = &config.filter {
+            filter.check_program()?;
+        }
         if is_running(config.server.socket.as_deref()).await {
             return Err(Error::new(Code::SessionExists, "louro is already running")
                 .with_hint("run `louro quit` first"));

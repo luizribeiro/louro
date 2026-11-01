@@ -1,12 +1,14 @@
 //! `louro.toml`: `[server]` says what the bot connects as, `[grants]` what the agent may do,
-//! `[limits]` how much.
+//! `[limits]` how much, and `[filter]` what checks its words first.
 
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::{Code, Error, Result};
 
@@ -28,6 +30,7 @@ pub struct Config {
     pub grants: Grants,
     #[serde(default)]
     pub limits: Limits,
+    pub filter: Option<Filter>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +203,48 @@ impl Default for Limits {
     }
 }
 
+/// A program every text the bot would show others goes through first; see `filter.rs`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Filter {
+    /// The program's path and arguments, run without a shell.
+    pub outgoing: Vec<String>,
+    #[serde(default = "Filter::default_timeout", deserialize_with = "duration")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the daemon runs the filter from a later commit")
+    )]
+    pub timeout: Duration,
+}
+
+impl Filter {
+    const fn default_timeout() -> Duration {
+        Duration::from_secs(5)
+    }
+
+    /// Refuses a program that isn't there to run, so louro never starts with a filter that
+    /// would fail every send.
+    pub fn check_program(&self) -> Result<()> {
+        let program = Path::new(&self.outgoing[0]);
+        let runnable = fs::metadata(program)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
+        if runnable {
+            return Ok(());
+        }
+        Err(Error::new(
+            Code::Usage,
+            format!("the filter {} is not an executable file", program.display()),
+        )
+        .with_hint("fix filter.outgoing in louro.toml"))
+    }
+}
+
+fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    humantime::parse_duration(&raw)
+        .map_err(|_| serde::de::Error::custom(r#"want a duration like "5s""#))
+}
+
 /// `true` for everyone, or a list of names, each matched case-insensitively and allowed one
 /// trailing `*`. In a DM selector (see [`Selector::matches_sender`]), an entry can also be
 /// `account:NAME` to match the sender's logged-in account instead of their nick.
@@ -295,6 +340,13 @@ fn parse(text: &str) -> Result<Config, String> {
     if let Selector::Only(send) = &irc.send {
         within_join(irc, send, "irc.send")?;
     }
+    if config
+        .filter
+        .as_ref()
+        .is_some_and(|filter| filter.outgoing.is_empty())
+    {
+        return Err("filter.outgoing names no program".into());
+    }
     Ok(config)
 }
 
@@ -353,7 +405,9 @@ mod tests {
             server,
             grants,
             limits,
+            filter,
         } = parse(MINIMAL).unwrap();
+        assert!(filter.is_none());
         assert_eq!(server.nick, "louro");
         assert_eq!(server.sasl_username(), None);
         assert!(server.autojoin.is_empty());
@@ -508,5 +562,55 @@ mod tests {
         let bad_value = refusal(&format!("{MINIMAL}[limits]\nsend = \"0/1s\""));
         assert!(bad_value.ends_with(Limit::FORMAT), "{bad_value}");
         assert!(!bad_value.contains("0/1s"), "{bad_value}");
+    }
+
+    #[test]
+    fn a_filter_is_an_argv_with_a_timeout_that_defaults_to_5s() {
+        for (settings, timeout) in [("", 5), ("timeout = \"2s\"", 2)] {
+            let config = parse(&format!(
+                "{MINIMAL}[filter]\noutgoing = [\"/usr/local/bin/louro-redact\", \"--strict\"]\n{settings}"
+            ))
+            .unwrap();
+            let filter = config.filter.unwrap();
+            assert_eq!(filter.outgoing, ["/usr/local/bin/louro-redact", "--strict"]);
+            assert_eq!(filter.timeout, Duration::from_secs(timeout));
+        }
+    }
+
+    #[test]
+    fn a_filter_table_refuses_no_program_an_unknown_key_or_a_bad_timeout() {
+        for (settings, refused) in [
+            ("outgoing = []", "filter.outgoing names no program"),
+            (
+                "outgoing = [\"/bin/cat\"]\nincoming = [\"/bin/cat\"]",
+                "unknown field `incoming`",
+            ),
+            (
+                "outgoing = [\"/bin/cat\"]\ntimeout = \"soon\"",
+                r#"want a duration like "5s""#,
+            ),
+        ] {
+            let refusal = refusal(&format!("{MINIMAL}[filter]\n{settings}"));
+            assert!(refusal.contains(refused), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_filter_program_must_be_an_executable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("louro-redact");
+        let check = |path: &Path| {
+            Filter {
+                outgoing: vec![path.to_str().unwrap().into()],
+                timeout: Filter::default_timeout(),
+            }
+            .check_program()
+        };
+        assert_eq!(check(&program).unwrap_err().code, Code::Usage);
+        fs::write(&program, "#!/bin/sh\ncat\n").unwrap();
+        assert_eq!(check(&program).unwrap_err().code, Code::Usage);
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(check(&program).is_ok());
+        assert_eq!(check(dir.path()).unwrap_err().code, Code::Usage);
     }
 }

@@ -226,6 +226,7 @@ pub async fn start(
         server,
         grants,
         limits,
+        filter: _,
     } = config;
     let socket = resolve_socket_path(server.socket.as_deref())?;
     create_private_dir(socket.parent().unwrap_or(Path::new(".")))
