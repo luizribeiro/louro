@@ -198,35 +198,46 @@ fn verdict(text: &str, status: ExitStatus, mut stdout: Vec<u8>) -> Verdict {
     }
 }
 
+/// Filters written as shell scripts, for tests.
 #[cfg(test)]
-mod tests {
+pub mod fixtures {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::time::Duration;
 
     use tempfile::TempDir;
-    use tokio::task::JoinSet;
 
-    use super::*;
+    use super::Filter;
 
-    const TOKEN: &str = "ghp_4fQe9TzXb2LmN8vR1sWkYc7Hd0Jp3Ua6Bn5M";
-
-    fn script(dir: &TempDir, body: &str) -> Filter {
+    pub fn script(dir: &TempDir, body: &str) -> Filter {
         script_with_timeout(dir, body, Duration::from_secs(5))
     }
 
-    fn script_with_timeout(dir: &TempDir, body: &str, timeout: Duration) -> Filter {
+    pub fn script_with_timeout(dir: &TempDir, body: &str, timeout: Duration) -> Filter {
         let path = dir.path().join("filter");
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
         filter_at(&path, timeout)
     }
 
-    fn filter_at(path: &Path, timeout: Duration) -> Filter {
+    pub fn filter_at(path: &Path, timeout: Duration) -> Filter {
         let argv = vec![path.to_str().unwrap().into()];
         Filter::new(argv, timeout, "irc.example.org".into())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use tokio::task::JoinSet;
+
+    use super::fixtures::{filter_at, script, script_with_timeout};
+    use super::*;
+
+    const TOKEN: &str = "ghp_4fQe9TzXb2LmN8vR1sWkYc7Hd0Jp3Ua6Bn5M";
 
     fn message() -> Context {
         Context {
