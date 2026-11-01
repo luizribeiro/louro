@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::{fs, io};
+use std::{env, fs, io};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -250,6 +250,7 @@ pub async fn start(
     let listener = UnixListener::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let stop = stop_signal()
         .map_err(|err| Error::new(Code::Internal, format!("can't handle stop signals: {err}")))?;
+    leave_startup_dir()?;
     output::emit(Ok(json!({
         "server": server.address,
         "nick": server.nick,
@@ -261,6 +262,17 @@ pub async fn start(
             grants, limits, password, filter, irc, watching, updates, listener, &socket, stop,
         )
         .await
+    })
+}
+
+/// A launcher may delete the directory `connect` started in, and every filter would inherit it;
+/// paths the daemon still needs were made absolute when resolved.
+fn leave_startup_dir() -> Result<()> {
+    env::set_current_dir("/").map_err(|err| {
+        Error::new(
+            Code::Internal,
+            format!("can't change to the root directory: {err}"),
+        )
     })
 }
 

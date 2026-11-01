@@ -62,22 +62,23 @@ impl Server {
     /// Where louro keeps what outlives a run: `state_dir`, else `$XDG_STATE_HOME/louro`, else
     /// `~/.local/state/louro`, on macOS too.
     pub fn state_dir(&self) -> Result<PathBuf> {
-        if let Some(dir) = &self.state_dir {
-            return Ok(dir.clone());
-        }
-        xdg_dir(
-            env::var_os("XDG_STATE_HOME"),
-            env::home_dir(),
-            ".local/state",
-        )
-        .map(|dir| dir.join("louro"))
-        .ok_or_else(|| {
-            Error::new(
-                Code::Usage,
-                "there is no home directory to keep louro's state in",
+        let dir = match &self.state_dir {
+            Some(dir) => dir.clone(),
+            None => xdg_dir(
+                env::var_os("XDG_STATE_HOME"),
+                env::home_dir(),
+                ".local/state",
             )
-            .with_hint("set server.state_dir in louro.toml")
-        })
+            .map(|dir| dir.join("louro"))
+            .ok_or_else(|| {
+                Error::new(
+                    Code::Usage,
+                    "there is no home directory to keep louro's state in",
+                )
+                .with_hint("set server.state_dir in louro.toml")
+            })?,
+        };
+        absolute(&dir)
     }
 }
 
@@ -304,7 +305,22 @@ pub fn load(path: Option<&Path>, socket: Option<&Path>) -> Result<Config> {
     if let Some(socket) = socket {
         config.server.socket = Some(socket.to_path_buf());
     }
+    if let Some(filter) = &mut config.filter {
+        filter.outgoing[0] = absolute(Path::new(&filter.outgoing[0]))?
+            .to_string_lossy()
+            .into_owned();
+    }
     Ok(config)
+}
+
+/// `path` anchored at the current directory, for files the daemon opens after it moves to `/`.
+pub fn absolute(path: &Path) -> Result<PathBuf> {
+    std::path::absolute(path).map_err(|err| {
+        Error::new(
+            Code::Internal,
+            format!("can't resolve {}: {err}", path.display()),
+        )
+    })
 }
 
 /// `$XDG_CONFIG_HOME/louro/louro.toml`, else `~/.config/louro/louro.toml`, on macOS too.
@@ -441,6 +457,26 @@ mod tests {
                 count: 10,
                 seconds: 60
             }
+        );
+    }
+
+    #[test]
+    fn paths_used_after_startup_are_made_absolute() {
+        let cwd = env::current_dir().unwrap();
+        let set = parse(&format!("{MINIMAL}state_dir = \"state\"")).unwrap();
+        assert_eq!(set.server.state_dir().unwrap(), cwd.join("state"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("louro.toml");
+        fs::write(
+            &path,
+            format!("{MINIMAL}\n[filter]\noutgoing = [\"./redact\", \"--strict\"]\n"),
+        )
+        .unwrap();
+        let filter = load(Some(&path), None).unwrap().filter.unwrap();
+        assert_eq!(
+            filter.outgoing,
+            [cwd.join("redact").to_str().unwrap(), "--strict"]
         );
     }
 

@@ -83,9 +83,10 @@ trimmed), checked again like the agent's own text; exit 10 blocks it.
 Anything else, a timeout, or output that is empty, not UTF-8, over 64 KiB
 or refused by those checks sends nothing, and the agent is told to ask
 you. A short stderr is passed to the agent as a note (unless the filter
-failed) and always logged on louro's stderr. It runs as louro's own user;
-under the NixOS module that's the service user, inside its systemd
-sandbox. `connect` refuses to start if the program isn't an executable
+failed) and always logged on louro's stderr. It runs as louro's own user
+(under the NixOS module, the service user, inside its systemd sandbox)
+with `/` as its working directory. `connect` refuses to start if the
+program isn't an executable
 file.
 
 <details>

@@ -418,3 +418,85 @@ fn wait_reports_not_connected_when_louro_stops_mid_wait() {
         .stdout(predicate::str::contains("louro stopped"));
     daemon.join().unwrap();
 }
+
+/// An IRC server that registers whoever connects, supports MONITOR and lets them join any channel, until the
+/// listener is dropped with the process.
+fn fake_irc_server() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut writer = stream.unwrap();
+            let mut reader = BufReader::new(writer.try_clone().unwrap());
+            thread::spawn(move || {
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let reply = match line.split_whitespace().collect::<Vec<_>>()[..] {
+                        ["CAP", "LS", ..] => "CAP * LS :\r\n".to_owned(),
+                        ["CAP", "END"] => ":irc 001 louro :Welcome\r\n:irc 005 louro MONITOR=100 :are supported\r\n".to_owned(),
+                        ["JOIN", channel] => format!(":louro!louro@host JOIN {channel}\r\n"),
+                        ["PING", token] => format!("PONG {token}\r\n"),
+                        ["QUIT", ..] => return,
+                        _ => String::new(),
+                    };
+                    writer.write_all(reply.as_bytes()).unwrap();
+                    line.clear();
+                }
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn the_daemon_works_from_relative_paths_and_runs_filters_from_the_root() {
+    let dir = tempdir().unwrap();
+    let filter = dir.path().join("filter.sh");
+    fs::write(&filter, "#!/bin/sh\ncat\npwd >&2\n").unwrap();
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = dir.path().join("louro.toml");
+    let text = format!(
+        "[server]\naddress = \"irc://127.0.0.1:{}\"\nnick = \"louro\"\nautojoin = [\"#bots\"]\n\
+         state_dir = \"state\"\n[grants]\nirc.join = [\"#bots\"]\nirc.send = [\"#bots\"]\n\
+         irc.watch = true\nirc.quit = true\n[filter]\noutgoing = [\"./filter.sh\"]\n",
+        fake_irc_server()
+    );
+    fs::write(&config, text).unwrap();
+    let in_dir = |args: &[&str]| {
+        let mut louro = louro();
+        louro.current_dir(dir.path()).args(args);
+        louro
+    };
+
+    in_dir(&[
+        "connect",
+        "--config",
+        "louro.toml",
+        "--socket",
+        "louro.sock",
+    ])
+    .assert()
+    .success();
+    let socket = dir.path().join("louro.sock");
+    let client = |args: &[&str]| {
+        let mut louro = in_dir(args);
+        louro.env("LOURO_SOCKET", &socket);
+        louro
+    };
+    client(&["send", "#bots", "hello"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""note":"/""#));
+    client(&["watch", "maria"]).assert().success();
+    client(&["quit"]).assert().success();
+
+    let watching = fs::read_to_string(dir.path().join("state/watching.json")).unwrap();
+    assert_eq!(watching.trim(), r#"["maria"]"#);
+    for _ in 0..50 {
+        if !socket.exists() {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(!socket.exists());
+}

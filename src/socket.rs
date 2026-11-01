@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use crate::config::absolute;
 use crate::error::{Code, Error, Result};
 use crate::irc::{HistoryQuery, Outgoing, Typing};
 
@@ -257,6 +258,10 @@ fn louro_stopped(err: impl Display) -> Error {
 /// `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`. The agent-facing
 /// commands take no path, so the agent can't point louro at another socket.
 pub fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
+    absolute(&chosen_socket_path(explicit)?)
+}
+
+fn chosen_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
     let chosen = explicit.map(Path::to_path_buf).or_else(|| {
         env::var_os("LOURO_SOCKET")
             .filter(|path| !path.is_empty())
@@ -295,6 +300,12 @@ fn current_uid(base_dir: &Path) -> Result<u32> {
 mod tests {
     use super::*;
     use crate::irc::{HistoryQuery, Kind, Outgoing, Typing};
+
+    #[test]
+    fn an_explicit_relative_socket_path_is_made_absolute() {
+        let socket = resolve_socket_path(Some(Path::new("run/louro.sock"))).unwrap();
+        assert_eq!(socket, env::current_dir().unwrap().join("run/louro.sock"));
+    }
 
     #[test]
     fn wait_timeout_takes_seconds_or_none() {
