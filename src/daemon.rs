@@ -1715,25 +1715,27 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn the_filter_is_told_each_texts_kind_target_and_msgid() {
-        let grants = toml::from_str(
+    fn shown_grants() -> Grants {
+        toml::from_str(
             r##"
             irc.join = ["#bots", "#lounge"]
             irc.send = ["#bots"]
             irc.dm.send = ["maria"]
             irc.react = ["#bots", "maria"]
+            irc.typing = ["#bots"]
             irc.redact = true
             irc.topic = ["#bots"]
+            irc.whois = true
+            irc.watch = ["maria"]
             irc.identity = true
             "##,
         )
-        .unwrap();
-        let daemon = launch_telling(grants);
-        for (nick, account) in [("maria", "maria"), ("louro", "louro")] {
-            let mut accounts = daemon.irc.accounts.lock().unwrap();
-            accounts.insert(nick.into(), Some(account.into()));
-        }
+        .unwrap()
+    }
+
+    /// A request for each kind of shown text, with what the filter is told about it; the redact
+    /// is of a message sent to #bots first.
+    fn shown_requests() -> Vec<(Value, String)> {
         let send = |target: &str, kind: &str| {
             request(
                 "send",
@@ -1742,7 +1744,7 @@ mod tests {
         };
         let msgid = "4y8kq7j2c9mnz";
         let own_msgid = "c2m8w1u0pq7rs";
-        for (req, env) in [
+        vec![
             (
                 reply_request("#bots", msgid, "hi"),
                 format!("CHANNEL=#bots KIND=message MSGID={msgid}"),
@@ -1784,11 +1786,78 @@ mod tests {
                 request("setname", json!({"realname": "a parrot"})),
                 "KIND=realname".into(),
             ),
-        ] {
+        ]
+    }
+
+    #[tokio::test]
+    async fn the_filter_is_told_each_texts_kind_target_and_msgid() {
+        let daemon = launch_telling(shown_grants());
+        for (nick, account) in [("maria", "maria"), ("louro", "louro")] {
+            let mut accounts = daemon.irc.accounts.lock().unwrap();
+            accounts.insert(nick.into(), Some(account.into()));
+        }
+        for (req, env) in shown_requests() {
             let told = told(&daemon, req.clone()).await;
             let env = format!("{env} SELF_ACCOUNT=louro");
             assert_eq!(told, facts(&env), "{req}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_filter_sees_every_shown_text_and_nothing_else() {
+        let daemon = launch_filtered(
+            shown_grants(),
+            Limits::default(),
+            r#"[ "$(cat)" = seed ] && echo seed && exit 0
+exit 10"#,
+        );
+        let seed = daemon.call(send_request("#bots", "seed")).await;
+        assert!(seed["Ok"].is_object(), "{seed}");
+        for (req, _) in shown_requests() {
+            let reply = daemon.call(req.clone()).await;
+            assert_eq!(reply["Err"]["code"], "blocked", "{req}: {reply}");
+        }
+        let acts = [
+            request("typing", json!({"target": "#bots", "state": "active"})),
+            request("join", json!({"channel": "#lounge"})),
+            watch_request("maria", false),
+        ];
+        for req in acts
+            .iter()
+            .chain([&request("whois", json!({"nick": "maria"}))])
+        {
+            let reply = daemon.call(req.clone()).await;
+            assert!(reply["Ok"].is_object(), "{req}: {reply}");
+        }
+        assert_eq!(daemon.irc.sent.lock().unwrap().len(), 1);
+        assert_eq!(*daemon.irc.acts.lock().unwrap(), acts);
+    }
+
+    #[tokio::test]
+    async fn ops_refused_before_the_filter_never_start_it() {
+        let daemon = launch_filtered(
+            grants(),
+            one_send_per_10s(),
+            r#"echo run >>"$(dirname "$0")/runs"
+cat"#,
+        );
+        assert!(daemon.call(send_request("#bots", "first")).await["Ok"].is_object());
+        for (req, code) in [
+            (send_request("#bots", PASSWORD), "blocked_secret"),
+            (send_request("#lounge", "hi all"), "not_allowed"),
+            (reply_request("#bots", "4y8k\r\nQUIT", "hi"), "usage"),
+            (
+                request("part", json!({"channel": "#help-rust", "reason": "bye"})),
+                "not_allowed",
+            ),
+            (send_request("#bots", "again"), "rate_limited"),
+        ] {
+            let reply = daemon.call(req.clone()).await;
+            assert_eq!(reply["Err"]["code"], code, "{req}: {reply}");
+        }
+        assert!(daemon.call(names_request("#bots")).await["Ok"].is_object());
+        let runs = fs::read_to_string(daemon.dir.path().join("runs")).unwrap();
+        assert_eq!(runs.lines().count(), 1, "{runs}");
     }
 
     #[tokio::test]
