@@ -6,6 +6,11 @@ mod commands;
 mod config;
 mod daemon;
 mod error;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the daemon runs it from a later commit")
+)]
+mod filter;
 mod grants;
 mod inbox;
 mod irc;

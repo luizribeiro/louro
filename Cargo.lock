@@ -488,6 +488,7 @@ dependencies = [
  "papo",
  "predicates",
  "rpassword",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
