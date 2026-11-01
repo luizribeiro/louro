@@ -20,7 +20,7 @@ use tokio::time::Instant;
 use crate::config::{Config, Grants, Limit, Limits};
 use crate::error::{Code, Error, Result};
 use crate::filter::{self, Filter, Verdict};
-use crate::grants::DmHistory;
+use crate::grants::{self, DmHistory};
 use crate::inbox::{Inbox, NOTICE};
 use crate::irc::{
     self, History, HistoryQuery, Incoming, Irc, Listed, NickAccount, Outgoing, Secret, Sender,
@@ -500,12 +500,9 @@ impl<I: Irc> Daemon<I> {
         let (Some(filter), Some((kind, text))) = (&self.filter, shown_text(op)) else {
             return Ok(Filtered::default());
         };
-        let context = filter::Context {
-            kind,
-            self_nick: self.irc.status().nick,
-            ..filter::Context::default()
-        };
-        let outcome = filter.run(text, &context).await;
+        let text = text.clone();
+        let context = self.filter_context(kind, op);
+        let outcome = filter.run(&text, &context).await;
         let note = self.note(&outcome.stderr);
         if let Some(line) = journal_line(kind, &outcome.verdict, note.as_deref()) {
             eprintln!("{line}");
@@ -513,7 +510,9 @@ impl<I: Irc> Daemon<I> {
         let rewritten = match outcome.verdict {
             Verdict::Pass => false,
             Verdict::Rewritten(output) => {
-                *text = output;
+                if let Some((_, text)) = shown_text(op) {
+                    *text = output;
+                }
                 self.recheck(op)?;
                 true
             }
@@ -521,6 +520,38 @@ impl<I: Irc> Daemon<I> {
             Verdict::Failed(_) => return Err(filter_failed()),
         };
         Ok(Filtered { rewritten, note })
+    }
+
+    /// Where `op`'s text goes, the msgid it answers, and who the bot is, as the filter is told.
+    fn filter_context(&self, kind: &'static str, op: &Op) -> filter::Context {
+        let (target, msgid) = match op {
+            Op::Send(Outgoing {
+                target, reply_to, ..
+            }) => (Some(target), reply_to.clone()),
+            Op::Topic { channel, .. } | Op::Part { channel, .. } => (Some(channel), None),
+            Op::React { target, msgid, .. } | Op::Redact { target, msgid, .. } => {
+                (Some(target), Some(msgid.clone()))
+            }
+            _ => (None, None),
+        };
+        let logged_in = |nick: &str| match self.irc.account(nick) {
+            NickAccount::LoggedIn(account) => Some(account),
+            _ => None,
+        };
+        let (channel, nick) = match target {
+            Some(channel) if grants::is_channel(channel) => (Some(channel.clone()), None),
+            target => (None, target.cloned()),
+        };
+        let self_nick = self.irc.status().nick;
+        filter::Context {
+            kind,
+            channel,
+            account: nick.as_deref().and_then(logged_in),
+            nick,
+            msgid,
+            self_account: logged_in(&self_nick),
+            self_nick,
+        }
     }
 
     /// The checks the agent's text passed, now on the filter's; output louro would refuse from
@@ -1682,6 +1713,118 @@ mod tests {
             let daemon = launch_filtered(grants(), Limits::default(), &body);
             assert_eq!(daemon.call(send_request("#bots", "hi all")).await, reply);
         }
+    }
+
+    #[tokio::test]
+    async fn the_filter_is_told_each_texts_kind_target_and_msgid() {
+        let grants = toml::from_str(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.send = ["#bots"]
+            irc.dm.send = ["maria"]
+            irc.react = ["#bots", "maria"]
+            irc.redact = true
+            irc.topic = ["#bots"]
+            irc.identity = true
+            "##,
+        )
+        .unwrap();
+        let daemon = launch_telling(grants);
+        for (nick, account) in [("maria", "maria"), ("louro", "louro")] {
+            let mut accounts = daemon.irc.accounts.lock().unwrap();
+            accounts.insert(nick.into(), Some(account.into()));
+        }
+        let send = |target: &str, kind: &str| {
+            request(
+                "send",
+                json!({"target": target, "text": "hi", "kind": kind}),
+            )
+        };
+        let msgid = "4y8kq7j2c9mnz";
+        let own_msgid = "c2m8w1u0pq7rs";
+        for (req, env) in [
+            (
+                reply_request("#bots", msgid, "hi"),
+                format!("CHANNEL=#bots KIND=message MSGID={msgid}"),
+            ),
+            (
+                send("maria", "notice"),
+                "ACCOUNT=maria KIND=notice NICK=maria".into(),
+            ),
+            (send("#bots", "action"), "CHANNEL=#bots KIND=action".into()),
+            (
+                topic_request("#bots", Some("rust help")),
+                "CHANNEL=#bots KIND=topic".into(),
+            ),
+            (
+                request("part", json!({"channel": "#lounge", "reason": "bye"})),
+                "CHANNEL=#lounge KIND=part".into(),
+            ),
+            (
+                react_request("maria", "👍", false),
+                format!("ACCOUNT=maria KIND=react MSGID={msgid} NICK=maria"),
+            ),
+            (
+                react_request("#bots", "👍", true),
+                format!("CHANNEL=#bots KIND=unreact MSGID={msgid}"),
+            ),
+            (
+                redact_request("#bots", own_msgid, "oops"),
+                format!("CHANNEL=#bots KIND=redact MSGID={own_msgid}"),
+            ),
+            (
+                request("nick", json!({"nick": "louro_"})),
+                "KIND=nick".into(),
+            ),
+            (
+                request("away", json!({"text": "lunch", "back": false})),
+                "KIND=away".into(),
+            ),
+            (
+                request("setname", json!({"realname": "a parrot"})),
+                "KIND=realname".into(),
+            ),
+        ] {
+            let told = told(&daemon, req.clone()).await;
+            let env = format!("{env} SELF_ACCOUNT=louro");
+            assert_eq!(told, facts(&env), "{req}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_filter_is_told_an_account_only_when_papo_knows_it() {
+        let daemon = launch_telling(toml::from_str(r#"irc.dm.send = ["maria"]"#).unwrap());
+        let told = told(&daemon, reply_request("maria", "4y8kq7j2c9mnz", "hi")).await;
+        assert_eq!(told, facts("KIND=message MSGID=4y8kq7j2c9mnz NICK=maria"));
+    }
+
+    /// Launches a daemon whose filter passes every text and writes what it was told to `env`.
+    fn launch_telling(grants: Grants) -> Running {
+        launch_filtered(
+            grants,
+            Limits::default(),
+            r#"env | grep '^LOURO_' | sort >"$(dirname "$0")/env"
+cat"#,
+        )
+    }
+
+    /// The LOURO_ variables a filter from [`launch_telling`] got for `req`.
+    async fn told(daemon: &Running, req: Value) -> Vec<String> {
+        let reply = daemon.call(req.clone()).await;
+        assert!(reply["Ok"].is_object(), "{req}: {reply}");
+        let env = fs::read_to_string(daemon.dir.path().join("env")).unwrap();
+        env.lines().map(String::from).collect()
+    }
+
+    /// `facts` as sorted LOURO_ variables, with the ones every text gets.
+    fn facts(facts: &str) -> Vec<String> {
+        let mut env: Vec<String> =
+            format!("{facts} FILTER_VERSION=1 SELF_NICK=louro SERVER=irc.example.org")
+                .split(' ')
+                .map(|fact| format!("LOURO_{fact}"))
+                .collect();
+        env.sort();
+        env
     }
 
     #[test]

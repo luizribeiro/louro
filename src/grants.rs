@@ -149,13 +149,18 @@ enum TargetKind {
     Nick,
 }
 
+/// Whether `target` names a channel rather than a nick.
+pub fn is_channel(target: &str) -> bool {
+    target.starts_with(['#', '&', '+', '!'])
+}
+
 /// Refuses anything that isn't one channel or one nick.
 fn target_kind(target: &str) -> Result<TargetKind> {
     // `PRIVMSG maria,#lounge` would also reach a target no grant covers.
     if target.contains(',') {
         return Err(not_allowed("name one target at a time"));
     }
-    if target.starts_with(['#', '&', '+', '!']) {
+    if is_channel(target) {
         return Ok(TargetKind::Channel);
     }
     if target.starts_with(['@', '%', '~']) {
