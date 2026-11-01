@@ -455,61 +455,44 @@ impl<I: Irc> Daemon<I> {
         Ok(())
     }
 
-    async fn handle(&self, op: Op) -> Result<Value> {
+    async fn handle(&self, mut op: Op) -> Result<Value> {
         if let Some(text) = shown_text(&op) {
             text::check_secret(self.password.as_ref(), text)?;
         }
         self.check_grants(&op)?;
-        match &op {
-            Op::Status {} => Ok(self.status()),
-            Op::Wait { .. } => unreachable!("serve answers wait itself"),
-            Op::Send(message) => self.send(message).await,
-            Op::Names { channel } => self.names(channel),
-            Op::Topic { channel, set: None } => {
-                self.require_joined(channel)?;
-                Ok(untrusted(
-                    json!({"channel": channel, "topic": self.irc.topic(channel)}),
-                ))
+        self.prepare(&mut op)?;
+        let reserved = self.reserve(&op)?;
+        let result = self.carry_out(&op).await;
+        if result.is_err() {
+            self.release(&op, reserved);
+        }
+        result
+    }
+
+    /// Refuses an op louro won't carry out as given, and cleans a send's text in place.
+    fn prepare(&self, op: &mut Op) -> Result<()> {
+        match op {
+            Op::Send(message) => {
+                if let Some(msgid) = &message.reply_to {
+                    text::check_msgid(msgid)?;
+                }
+                message.text = text::clean_lines(&message.text)?;
             }
-            Op::Topic {
-                channel,
-                set: Some(topic),
-            } => {
-                text::check_field("a topic", topic, MAX_TOPIC_CHARS)?;
+            Op::Topic { channel, set } => {
+                if let Some(topic) = set {
+                    text::check_field("a topic", topic, MAX_TOPIC_CHARS)?;
+                }
                 self.require_joined(channel)?;
-                self.act(&op, json!({"channel": channel, "topic": topic}))
-                    .await
-            }
-            Op::Join { channel } => {
-                self.act(&op, json!({"channel": channel, "joined": true}))
-                    .await
             }
             Op::Part { channel, reason } => {
                 text::check_one_line(reason)?;
                 self.require_joined(channel)?;
-                self.act(&op, json!({"channel": channel, "parted": true}))
-                    .await
             }
             Op::React {
-                target,
-                msgid,
-                reaction,
-                remove,
+                msgid, reaction, ..
             } => {
                 text::check_msgid(msgid)?;
                 text::check_field("a reaction", reaction, text::MAX_REACTION_CHARS)?;
-                if let Some(retry_after) =
-                    self.react_windows
-                        .reserve(target, self.limits.react, Instant::now())
-                {
-                    return Err(rate_limited("react", retry_after));
-                }
-                let reacted = json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove});
-                self.act(&op, reacted).await
-            }
-            Op::Typing { target, state } => {
-                self.act(&op, json!({"target": target, "state": state}))
-                    .await
             }
             Op::Redact {
                 target,
@@ -525,7 +508,63 @@ impl<I: Irc> Daemon<I> {
                     )
                     .with_hint("louro redacts only its own messages, sent since it started"));
                 }
-                self.act(&op, json!({"target": target, "msgid": msgid}))
+            }
+            Op::Nick { nick } => text::check_field("a nick", nick, MAX_NICK_CHARS)?,
+            Op::Away {
+                text: Some(text),
+                back: false,
+            } => text::check_field("an away message", text, MAX_AWAY_CHARS)?,
+            Op::Away {
+                text: None,
+                back: false,
+            } => return Err(Error::new(Code::Usage, "give an away message, or --back")),
+            Op::Setname { realname } => {
+                text::check_field("a realname", realname, MAX_REALNAME_CHARS)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn carry_out(&self, op: &Op) -> Result<Value> {
+        match op {
+            Op::Status {} => Ok(self.status()),
+            Op::Wait { .. } => unreachable!("serve answers wait itself"),
+            Op::Send(message) => self.send(message).await,
+            Op::Names { channel } => self.names(channel),
+            Op::Topic { channel, set: None } => Ok(untrusted(
+                json!({"channel": channel, "topic": self.irc.topic(channel)}),
+            )),
+            Op::Topic {
+                channel,
+                set: Some(topic),
+            } => {
+                self.act(op, json!({"channel": channel, "topic": topic}))
+                    .await
+            }
+            Op::Join { channel } => {
+                self.act(op, json!({"channel": channel, "joined": true}))
+                    .await
+            }
+            Op::Part { channel, .. } => {
+                self.act(op, json!({"channel": channel, "parted": true}))
+                    .await
+            }
+            Op::React {
+                target,
+                msgid,
+                reaction,
+                remove,
+            } => {
+                let reacted = json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove});
+                self.act(op, reacted).await
+            }
+            Op::Typing { target, state } => {
+                self.act(op, json!({"target": target, "state": state}))
+                    .await
+            }
+            Op::Redact { target, msgid, .. } => {
+                self.act(op, json!({"target": target, "msgid": msgid}))
                     .await
             }
             Op::History { target, query } => self.history(target, query).await,
@@ -533,24 +572,11 @@ impl<I: Irc> Daemon<I> {
             Op::Whowas { nick } => Ok(untrusted(
                 json!({"nick": nick, "entries": self.irc.whowas(nick).await?}),
             )),
-            Op::Watch { nick, remove } => self.watch(&op, nick, *remove).await,
-            Op::Nick { nick } => {
-                text::check_field("a nick", nick, MAX_NICK_CHARS)?;
-                self.act(&op, json!({"nick": nick})).await
-            }
-            Op::Away {
-                text: Some(text),
-                back: false,
-            } => {
-                text::check_field("an away message", text, MAX_AWAY_CHARS)?;
-                self.act(&op, json!({"away": text})).await
-            }
-            Op::Away { back: true, .. } => self.act(&op, json!({"away": null})).await,
-            Op::Away { .. } => Err(Error::new(Code::Usage, "give an away message, or --back")),
-            Op::Setname { realname } => {
-                text::check_field("a realname", realname, MAX_REALNAME_CHARS)?;
-                self.act(&op, json!({"realname": realname})).await
-            }
+            Op::Watch { nick, remove } => self.watch(op, nick, *remove).await,
+            Op::Nick { nick } => self.act(op, json!({"nick": nick})).await,
+            Op::Away { back: true, .. } => self.act(op, json!({"away": null})).await,
+            Op::Away { text, .. } => self.act(op, json!({"away": text})).await,
+            Op::Setname { realname } => self.act(op, json!({"realname": realname})).await,
             Op::List { pattern } => self.list(pattern.as_deref()).await,
             Op::Quit {} => Ok(json!({})),
         }
@@ -674,52 +700,54 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn send(&self, message: &Outgoing) -> Result<Value> {
-        if let Some(msgid) = &message.reply_to {
-            text::check_msgid(msgid)?;
-        }
-        let message = Outgoing {
-            text: text::clean_lines(&message.text)?,
-            ..message.clone()
-        };
-        let now = self.reserve_send_budget(&message.target)?;
-        let (target, lines) = (message.target.clone(), message.text.lines().count());
-        let is_reply = message.reply_to.is_some();
-        let sent = match self.irc.send(message).await {
-            Ok(sent) => sent,
-            Err(error) => {
-                self.release_send_budget(&target, now);
-                return Err(error);
-            }
-        };
+        let sent = self.irc.send(message.clone()).await?;
+        let target = &message.target;
+        let lines = message.text.lines().count();
         let mut result = json!({"sent": true, "target": target, "lines": lines});
         if let Some(msgid) = sent.msgid {
-            self.sent.lock().unwrap().record(&target, msgid.clone());
+            self.sent.lock().unwrap().record(target, msgid.clone());
             result["msgid"] = msgid.into();
         }
-        if is_reply {
+        if message.reply_to.is_some() {
             result["threaded"] = sent.threaded.into();
         }
         Ok(result)
     }
 
-    /// Refuses once `target` reached `limits.send` or all targets `limits.send_total`; a refused
-    /// send touches neither, and one that never reaches IRC gives its slots back with
-    /// [`Self::release_send_budget`].
-    fn reserve_send_budget(&self, target: &str) -> Result<Instant> {
-        let now = Instant::now();
-        if let Some(retry_after) = self.send_windows.reserve(target, self.limits.send, now) {
-            return Err(rate_limited("send", retry_after));
+    /// The rate windows `op` counts against, each with its key, limit and the action it names.
+    fn budgets<'a>(&'a self, op: &'a Op) -> Vec<(&'a RateWindows, &'a str, Limit, &'static str)> {
+        match op {
+            Op::Send(Outgoing { target, .. }) => vec![
+                (&self.send_windows, target, self.limits.send, "send"),
+                (&self.send_total, TOTAL, self.limits.send_total, "send"),
+            ],
+            Op::React { target, .. } => {
+                vec![(&self.react_windows, target, self.limits.react, "react")]
+            }
+            _ => vec![],
         }
-        if let Some(retry_after) = self.send_total.reserve(TOTAL, self.limits.send_total, now) {
-            self.send_windows.release(target, now);
-            return Err(rate_limited("send", retry_after));
+    }
+
+    /// Takes a slot in each of `op`'s windows, or none if one is full; [`Self::release`] gives
+    /// them back if the op then fails.
+    fn reserve(&self, op: &Op) -> Result<Instant> {
+        let now = Instant::now();
+        let budgets = self.budgets(op);
+        for (taken, &(windows, key, limit, action)) in budgets.iter().enumerate() {
+            if let Some(retry_after) = windows.reserve(key, limit, now) {
+                for &(windows, key, ..) in &budgets[..taken] {
+                    windows.release(key, now);
+                }
+                return Err(rate_limited(action, retry_after));
+            }
         }
         Ok(now)
     }
 
-    fn release_send_budget(&self, target: &str, now: Instant) {
-        self.send_windows.release(target, now);
-        self.send_total.release(TOTAL, now);
+    fn release(&self, op: &Op, reserved: Instant) {
+        for (windows, key, ..) in self.budgets(op) {
+            windows.release(key, reserved);
+        }
     }
 }
 
