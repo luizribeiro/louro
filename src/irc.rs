@@ -168,6 +168,16 @@ pub enum Kind {
     Action,
 }
 
+impl Kind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Notice => "notice",
+            Self::Action => "action",
+        }
+    }
+}
+
 /// The IRC connection as the daemon sees it; `PapoIrc` below implements it over a papo client.
 pub trait Irc: Send + Sync + 'static {
     fn status(&self) -> IrcStatus;

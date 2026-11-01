@@ -457,9 +457,7 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn handle(&self, mut op: Op) -> Result<Value> {
-        if let Some(text) = shown_text(&op) {
-            text::check_secret(self.password.as_ref(), text)?;
-        }
+        self.check_shown_secret(&mut op)?;
         self.check_grants(&op)?;
         self.prepare(&mut op)?;
         let reserved = self.reserve(&op)?;
@@ -468,6 +466,13 @@ impl<I: Irc> Daemon<I> {
             self.release(&op, reserved);
         }
         result
+    }
+
+    fn check_shown_secret(&self, op: &mut Op) -> Result<()> {
+        match shown_text(op) {
+            Some((_, text)) => text::check_secret(self.password.as_ref(), text),
+            None => Ok(()),
+        }
     }
 
     /// Refuses an op louro won't carry out as given, and cleans a send's text in place.
@@ -752,21 +757,24 @@ impl<I: Irc> Daemon<I> {
     }
 }
 
-/// What others on IRC would see of `op`, which must never carry the bot's password.
-fn shown_text(op: &Op) -> Option<&str> {
+/// What others on IRC would see of `op`, which must never carry the bot's password, with the
+/// kind of text it is, as the outgoing filter is told.
+fn shown_text(op: &mut Op) -> Option<(&'static str, &mut String)> {
     match op {
-        Op::Send(Outgoing { text, .. })
-        | Op::Topic {
+        Op::Send(Outgoing { kind, text, .. }) => Some((kind.as_str(), text)),
+        Op::Topic {
             set: Some(text), ..
-        }
-        | Op::Part { reason: text, .. }
-        | Op::React { reaction: text, .. }
-        | Op::Redact { reason: text, .. }
-        | Op::Nick { nick: text }
-        | Op::Away {
+        } => Some(("topic", text)),
+        Op::Part { reason, .. } => Some(("part", reason)),
+        Op::React {
+            reaction, remove, ..
+        } => Some((if *remove { "unreact" } else { "react" }, reaction)),
+        Op::Redact { reason, .. } => Some(("redact", reason)),
+        Op::Nick { nick } => Some(("nick", nick)),
+        Op::Away {
             text: Some(text), ..
-        }
-        | Op::Setname { realname: text } => Some(text),
+        } => Some(("away", text)),
+        Op::Setname { realname } => Some(("realname", realname)),
         _ => None,
     }
 }
