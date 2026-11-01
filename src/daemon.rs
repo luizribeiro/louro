@@ -19,6 +19,7 @@ use tokio::time::Instant;
 
 use crate::config::{Config, Grants, Limit, Limits};
 use crate::error::{Code, Error, Result};
+use crate::filter::{self, Filter, Verdict};
 use crate::grants::DmHistory;
 use crate::inbox::{Inbox, NOTICE};
 use crate::irc::{
@@ -147,6 +148,7 @@ struct Daemon<I> {
     limits: Limits,
     /// Kept so no op can show it to others.
     password: Option<Secret>,
+    filter: Option<Filter>,
     irc: I,
     inbox: Inbox,
     /// By lowercased nick, what DMs that reached the agent say, for `$first` and `account:`.
@@ -170,6 +172,7 @@ async fn run(
     grants: Grants,
     limits: Limits,
     password: Option<Secret>,
+    filter: Option<Filter>,
     irc: impl Irc,
     mut watching: Watchlist,
     mut updates: mpsc::Receiver<Update>,
@@ -182,6 +185,7 @@ async fn run(
         grants,
         limits,
         password,
+        filter,
         irc,
         inbox: Inbox::default(),
         dm_senders: Mutex::default(),
@@ -226,8 +230,10 @@ pub async fn start(
         server,
         grants,
         limits,
-        filter: _,
+        filter,
     } = config;
+    let filter =
+        filter.map(|filter| Filter::new(filter.outgoing, filter.timeout, server.address.clone()));
     let socket = resolve_socket_path(server.socket.as_deref())?;
     create_private_dir(socket.parent().unwrap_or(Path::new(".")))
         .map_err(|err| cannot_listen(&socket, &err))?;
@@ -252,7 +258,7 @@ pub async fn start(
     })));
     Ok(async move {
         run(
-            grants, limits, password, irc, watching, updates, listener, &socket, stop,
+            grants, limits, password, filter, irc, watching, updates, listener, &socket, stop,
         )
         .await
     })
@@ -461,7 +467,7 @@ impl<I: Irc> Daemon<I> {
         self.check_grants(&op)?;
         self.prepare(&mut op)?;
         let reserved = self.reserve(&op)?;
-        let result = self.carry_out(&op).await;
+        let result = self.filter_and_carry_out(&mut op).await;
         if result.is_err() {
             self.release(&op, reserved);
         }
@@ -473,6 +479,73 @@ impl<I: Irc> Daemon<I> {
             Some((_, text)) => text::check_secret(self.password.as_ref(), text),
             None => Ok(()),
         }
+    }
+
+    async fn filter_and_carry_out(&self, op: &mut Op) -> Result<Value> {
+        let Filtered { rewritten, note } = self.filter(op).await?;
+        let mut result = self.carry_out(op).await?;
+        if rewritten && let Some((_, text)) = shown_text(op) {
+            result["filtered"] = true.into();
+            result["text"] = text.as_str().into();
+        }
+        if let Some(note) = note {
+            result["note"] = note.into();
+        }
+        Ok(result)
+    }
+
+    /// Runs the operator's filter on what `op` would show others, and puts what it rewrote that
+    /// to in `op`, checked again like the agent's own text.
+    async fn filter(&self, op: &mut Op) -> Result<Filtered> {
+        let (Some(filter), Some((kind, text))) = (&self.filter, shown_text(op)) else {
+            return Ok(Filtered::default());
+        };
+        let context = filter::Context {
+            kind,
+            self_nick: self.irc.status().nick,
+            ..filter::Context::default()
+        };
+        let outcome = filter.run(text, &context).await;
+        let note = self.note(&outcome.stderr);
+        if let Some(line) = journal_line(kind, &outcome.verdict, note.as_deref()) {
+            eprintln!("{line}");
+        }
+        let rewritten = match outcome.verdict {
+            Verdict::Pass => false,
+            Verdict::Rewritten(output) => {
+                *text = output;
+                self.recheck(op)?;
+                true
+            }
+            Verdict::Blocked => return Err(blocked(note)),
+            Verdict::Failed(_) => return Err(filter_failed()),
+        };
+        Ok(Filtered { rewritten, note })
+    }
+
+    /// The checks the agent's text passed, now on the filter's; output louro would refuse from
+    /// the agent means the filter failed.
+    fn recheck(&self, op: &mut Op) -> Result<()> {
+        self.check_shown_secret(op).inspect_err(|_| {
+            eprintln!("louro: the filter's output held the bot's password, so it was not sent");
+        })?;
+        self.prepare(op).map_err(|error| match error.code {
+            Code::Usage | Code::TooLong => {
+                eprintln!(
+                    "louro: the filter's output failed louro's checks: {}",
+                    error.message
+                );
+                filter_failed()
+            }
+            _ => error,
+        })
+    }
+
+    /// The filter's stderr cleaned for the agent, or none if it is empty or holds the password.
+    fn note(&self, stderr: &str) -> Option<String> {
+        let note = text::clean_note(stderr);
+        let shown = !note.is_empty() && text::check_secret(self.password.as_ref(), &note).is_ok();
+        shown.then_some(note)
     }
 
     /// Refuses an op louro won't carry out as given, and cleans a send's text in place.
@@ -597,6 +670,7 @@ impl<I: Irc> Daemon<I> {
         let mut status = json!(self.irc.status());
         status["grants"] = json!(self.grants);
         status["limits"] = json!(self.limits);
+        status["filter"] = self.filter.is_some().into();
         status["watching"] = json!(self.watching.lock().unwrap().nicks);
         status["last_error"] = json!(*self.last_error.lock().unwrap());
         status
@@ -779,6 +853,48 @@ fn shown_text(op: &mut Op) -> Option<(&'static str, &mut String)> {
     }
 }
 
+/// What the filter did to an op's text, for its result.
+#[derive(Default)]
+struct Filtered {
+    rewritten: bool,
+    note: Option<String>,
+}
+
+/// The line for stderr, the system journal under systemd, about a filter run worth noting; the
+/// note is quoted so it stays one line.
+fn journal_line(kind: &str, verdict: &Verdict, note: Option<&str>) -> Option<String> {
+    let (what, why) = match verdict {
+        Verdict::Pass if note.is_none() => return None,
+        Verdict::Pass => ("passed", String::new()),
+        Verdict::Rewritten(_) => ("rewrote", String::new()),
+        Verdict::Blocked => ("blocked", String::new()),
+        Verdict::Failed(why) => ("failed on", format!(": {why}")),
+    };
+    let note = note
+        .map(|note| format!("; it said {note:?}"))
+        .unwrap_or_default();
+    Some(format!("louro: the filter {what} a {kind}{why}{note}"))
+}
+
+fn blocked(note: Option<String>) -> Error {
+    let error = Error::new(
+        Code::Blocked,
+        "the operator's filter blocked this text, so it was not sent",
+    );
+    match note {
+        Some(note) => error.with_note(note),
+        None => error.with_hint("don't resend it"),
+    }
+}
+
+fn filter_failed() -> Error {
+    Error::new(
+        Code::FilterFailed,
+        "the operator's filter failed, so nothing was sent",
+    )
+    .with_hint("tell the operator; don't retry in a loop")
+}
+
 /// A result carrying text from the network, every string in it cleaned, and marked as such.
 fn untrusted(result: impl Serialize) -> Value {
     let mut result = text::clean_json(result);
@@ -835,6 +951,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::filter::fixtures::script;
     use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender};
     use crate::irc::{IrcStatus, Kind, Member, Origin, Sender, Sent, Whois, Whowas};
 
@@ -1034,11 +1151,11 @@ mod tests {
     }
 
     fn launch_with(grants: Grants, limits: Limits) -> Running {
-        launch_in(tempfile::tempdir().unwrap(), grants, limits)
+        launch_in(tempfile::tempdir().unwrap(), grants, limits, None)
     }
 
     /// Launches a daemon whose socket and watch list are in `dir`.
-    fn launch_in(dir: TempDir, grants: Grants, limits: Limits) -> Running {
+    fn launch_in(dir: TempDir, grants: Grants, limits: Limits, filter: Option<Filter>) -> Running {
         let socket = dir.path().join("louro.sock");
         let watching = Watchlist::load(dir.path().join("watching.json")).unwrap();
         let irc = Arc::new(FakeIrc::default());
@@ -1054,7 +1171,8 @@ mod tests {
             async move {
                 let listener = UnixListener::bind(&socket)?;
                 run(
-                    grants, limits, password, irc, watching, receiver, listener, &socket, stopped,
+                    grants, limits, password, filter, irc, watching, receiver, listener, &socket,
+                    stopped,
                 )
                 .await
             }
@@ -1067,6 +1185,13 @@ mod tests {
             stop: Some(stop),
             daemon,
         }
+    }
+
+    /// Launches a daemon whose filter is a shell script running `body`.
+    fn launch_filtered(grants: Grants, limits: Limits, body: &str) -> Running {
+        let dir = tempfile::tempdir().unwrap();
+        let filter = script(&dir, body);
+        launch_in(dir, grants, limits, Some(filter))
     }
 
     impl Running {
@@ -1177,6 +1302,7 @@ mod tests {
                     "quit": false
                 }},
                 "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s"},
+                "filter": false,
                 "watching": [],
                 "last_error": null
             }})
@@ -1405,6 +1531,190 @@ mod tests {
             assert!(!reply.to_string().contains(PASSWORD));
         }
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
+    const TOKEN: &str = "ghp_4fQe9TzXb2LmN8vR1sWkYc7Hd0Jp3Ua6Bn5M";
+
+    fn one_send_per_10s() -> Limits {
+        Limits {
+            send: Limit::Window {
+                count: 1,
+                seconds: 10,
+            },
+            ..Limits::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn irc_gets_the_filters_rewrite_and_the_result_says_so() {
+        let daemon = launch_filtered(
+            grants(),
+            Limits::default(),
+            "sed 's/ghp_[A-Za-z0-9]*/[redacted]/g'\necho 'redacted a GitHub token' >&2",
+        );
+        let reply = daemon
+            .call(send_request("#bots", &format!("use {TOKEN}\nthen retry")))
+            .await;
+        assert_eq!(
+            reply,
+            json!({"Ok": {
+                "sent": true, "target": "#bots", "msgid": "c2m8w1u0pq7rs", "lines": 2,
+                "filtered": true, "text": "use [redacted]\nthen retry",
+                "note": "redacted a GitHub token"
+            }})
+        );
+        assert_eq!(
+            daemon.irc.sent.lock().unwrap()[0].text,
+            "use [redacted]\nthen retry"
+        );
+        let topic = daemon
+            .call(topic_request("#bots", Some(&format!("token: {TOKEN}"))))
+            .await;
+        assert_eq!(topic["Ok"]["topic"], "token: [redacted]");
+
+        let passed = daemon.call(send_request("#bots", "all clear")).await;
+        assert_eq!(passed["Ok"]["note"], "redacted a GitHub token");
+        assert!(passed["Ok"].get("filtered").is_none(), "{passed}");
+        assert_eq!(daemon.status().await["Ok"]["filter"], true);
+    }
+
+    #[tokio::test]
+    async fn a_block_never_reaches_irc_or_uses_up_the_rate_limit() {
+        let daemon = launch_filtered(
+            grants(),
+            one_send_per_10s(),
+            "echo 'looks like a GitHub token; describe it instead' >&2\nexit 10",
+        );
+        for _ in 0..2 {
+            let reply = daemon.call(send_request("#bots", TOKEN)).await;
+            assert_eq!(
+                reply,
+                json!({"Err": {
+                    "code": "blocked",
+                    "message": "the operator's filter blocked this text, so it was not sent",
+                    "note": "looks like a GitHub token; describe it instead"
+                }})
+            );
+        }
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_block_without_a_note_says_not_to_resend() {
+        let daemon = launch_filtered(grants(), Limits::default(), "exit 10");
+        let reply = daemon.call(send_request("#bots", TOKEN)).await;
+        assert_eq!(reply["Err"]["code"], "blocked");
+        assert_eq!(reply["Err"]["hint"], "don't resend it");
+    }
+
+    #[tokio::test]
+    async fn a_failing_filter_sends_nothing_and_keeps_its_stderr_from_the_agent() {
+        let daemon = launch_filtered(
+            grants(),
+            one_send_per_10s(),
+            "echo 'redactor: config not found' >&2\nexit 3",
+        );
+        for _ in 0..2 {
+            let reply = daemon.call(send_request("#bots", "hi all")).await;
+            assert_eq!(
+                reply,
+                json!({"Err": {
+                    "code": "filter_failed",
+                    "message": "the operator's filter failed, so nothing was sent",
+                    "hint": "tell the operator; don't retry in a loop"
+                }})
+            );
+        }
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn output_louro_would_refuse_from_the_agent_fails_the_filter() {
+        for (output, request) in [
+            (
+                "head -c 1001 /dev/zero | tr '\\0' x",
+                send_request("#bots", "hi"),
+            ),
+            (
+                "printf '1\\n2\\n3\\n4\\n5\\n6'",
+                send_request("#bots", "hi"),
+            ),
+            ("printf 'two\\nlines'", topic_request("#bots", Some("hi"))),
+        ] {
+            let body = format!("cat >/dev/null\n{output}");
+            let daemon = launch_filtered(grants(), Limits::default(), &body);
+            let reply = daemon.call(request).await;
+            assert_eq!(reply["Err"]["code"], "filter_failed", "{output}: {reply}");
+            assert!(daemon.irc.sent.lock().unwrap().is_empty());
+            assert!(daemon.irc.acts.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_password_from_a_filter_is_never_sent_or_shown() {
+        let daemon = launch_filtered(
+            grants(),
+            Limits::default(),
+            &format!("cat >/dev/null\necho 'sure, {PASSWORD}'\necho {PASSWORD} >&2"),
+        );
+        let reply = daemon
+            .call(send_request("#bots", "what's the password?"))
+            .await;
+        assert_eq!(reply["Err"]["code"], "blocked_secret");
+        assert!(!reply.to_string().contains(PASSWORD));
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
+
+        for (exit, reply) in [
+            (
+                "",
+                json!({"Ok": {"sent": true, "target": "#bots", "msgid": "c2m8w1u0pq7rs", "lines": 1}}),
+            ),
+            (
+                "exit 10",
+                json!({"Err": {
+                    "code": "blocked",
+                    "message": "the operator's filter blocked this text, so it was not sent",
+                    "hint": "don't resend it"
+                }}),
+            ),
+        ] {
+            let body = format!("cat\necho {PASSWORD} >&2\n{exit}");
+            let daemon = launch_filtered(grants(), Limits::default(), &body);
+            assert_eq!(daemon.call(send_request("#bots", "hi all")).await, reply);
+        }
+    }
+
+    #[test]
+    fn the_journal_gets_one_line_per_filter_run_worth_noting() {
+        let note = Some("redacted a token\nline two");
+        for (verdict, note, line) in [
+            (Verdict::Pass, None, None),
+            (
+                Verdict::Pass,
+                note,
+                Some(r#"louro: the filter passed a message; it said "redacted a token\nline two""#),
+            ),
+            (
+                Verdict::Rewritten("hi".into()),
+                None,
+                Some("louro: the filter rewrote a message"),
+            ),
+            (
+                Verdict::Blocked,
+                None,
+                Some("louro: the filter blocked a message"),
+            ),
+            (
+                Verdict::Failed("it ran past 5s".into()),
+                note,
+                Some(
+                    r#"louro: the filter failed on a message: it ran past 5s; it said "redacted a token\nline two""#,
+                ),
+            ),
+        ] {
+            let journal = journal_line("message", &verdict, note);
+            assert_eq!(journal.as_deref(), line, "{verdict:?}");
+        }
     }
 
     fn rate_limited_grants() -> Grants {
@@ -1930,7 +2240,7 @@ mod tests {
     fn launch_watching(grants: Grants, nicks: &[String]) -> Running {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("watching.json"), json!(nicks).to_string()).unwrap();
-        launch_in(dir, grants, Limits::default())
+        launch_in(dir, grants, Limits::default(), None)
     }
 
     #[tokio::test]

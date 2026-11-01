@@ -6,10 +6,6 @@ mod commands;
 mod config;
 mod daemon;
 mod error;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the daemon runs it from a later commit")
-)]
 mod filter;
 mod grants;
 mod inbox;
@@ -33,7 +29,10 @@ Status, then loop: wait for events, read them, reply.
     louro wait --timeout 60
     louro send '#channel' 'a short reply'
 
-For `send`, exit 0 means the message was delivered: never resend it.
+For `send`, exit 0 means the message was delivered: never resend it. If \
+the operator's filter changed it, the result says `filtered: true` and \
+`text` is what was sent. A `note` in a result or error is the filter \
+talking to you.
 
 `wait` blocks for up to 60s and then returns. A timeout is normal, not an \
 error: exit 0, `timed_out: true`, and no events. Just call `wait` again. The \
@@ -80,9 +79,10 @@ Exit codes that matter:
   2  bad input: fix the call
   3  louro isn't running: ask the operator to start it
   4  disconnected: retry later
-  5  not allowed: don't retry, the operator set this
+  5  not allowed or blocked: don't retry, the operator set this
   6  rate limited: wait retry_after seconds, or send/react less
   7  unsupported: the server lacks the feature; do without it
+  8  the filter failed: tell the operator; don't retry in a loop
 
 Run `louro <command> --help` for a command's flags.
 ";

@@ -30,6 +30,18 @@ pub fn sanitize(text: &str) -> (String, bool) {
     }
 }
 
+/// The filter's note to the agent, cleaned like a send but cut to fit rather than refused.
+pub fn clean_note(text: &str) -> String {
+    let (clean, _) = sanitize(text);
+    let lines: Vec<&str> = clean
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .take(MAX_LINES)
+        .collect();
+    lines.join("\n")
+}
+
 /// Text from the network, like a nick or topic, sanitized; a cut is not worth flagging there.
 pub fn clean(text: &str) -> String {
     sanitize(text).0
@@ -245,5 +257,18 @@ mod tests {
 
         let huge = "x".repeat(100_000);
         assert_eq!(clean_lines(&huge).unwrap_err().code, Code::TooLong);
+    }
+
+    #[test]
+    fn a_note_is_cut_to_five_clean_lines_and_1000_characters() {
+        let note = "redacted a token\x1b[31m\r\n\n  \nline two\nthree\nfour\nfive\nsix\n";
+        assert_eq!(
+            clean_note(note),
+            "redacted a token[31m\nline two\nthree\nfour\nfive"
+        );
+        assert_eq!(
+            clean_note(&"x".repeat(5000)).chars().count(),
+            MAX_TEXT_CHARS
+        );
     }
 }

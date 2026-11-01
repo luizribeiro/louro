@@ -210,10 +210,6 @@ pub struct Filter {
     /// The program's path and arguments, run without a shell.
     pub outgoing: Vec<String>,
     #[serde(default = "Filter::default_timeout", deserialize_with = "duration")]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the daemon runs the filter from a later commit")
-    )]
     pub timeout: Duration,
 }
 

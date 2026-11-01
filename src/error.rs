@@ -14,6 +14,7 @@ pub enum Code {
     NotConnected,
     NotAllowed,
     BlockedSecret,
+    Blocked,
     RateLimited,
     Unsupported,
     AuthFailed,
@@ -21,6 +22,7 @@ pub enum Code {
     Tls,
     ServerError,
     RequestTimeout,
+    FilterFailed,
 }
 
 impl Code {
@@ -30,9 +32,10 @@ impl Code {
             Self::Usage | Self::TooLong => 2,
             Self::NoSession | Self::SessionExists => 3,
             Self::NotConnected => 4,
-            Self::NotAllowed | Self::BlockedSecret => 5,
+            Self::NotAllowed | Self::BlockedSecret | Self::Blocked => 5,
             Self::RateLimited => 6,
             Self::Unsupported => 7,
+            Self::FilterFailed => 8,
             Self::AuthFailed | Self::ConnectFailed | Self::Tls => 9,
             Self::ServerError | Self::RequestTimeout => 10,
         }
@@ -48,6 +51,9 @@ pub struct Error {
     /// Whole seconds until a `RateLimited` refusal's window allows again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<u64>,
+    /// What the operator's filter said about the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -59,6 +65,7 @@ impl Error {
             message: message.into(),
             hint: None,
             retry_after: None,
+            note: None,
         }
     }
 
@@ -69,6 +76,11 @@ impl Error {
 
     pub fn with_retry_after(mut self, seconds: u64) -> Self {
         self.retry_after = Some(seconds);
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
         self
     }
 }
