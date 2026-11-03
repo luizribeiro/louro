@@ -412,10 +412,10 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    /// Checks `op` against the grants with what DMs from its target recorded and, when papo knows
-    /// the account that nick has now, for that account too, so a grant an earlier holder earned
-    /// isn't handed on. When papo doesn't know it and the DMs don't suffice, the account WHOIS
-    /// reports decides, so a restarted daemon can still DM someone it hasn't heard from yet.
+    /// Checks `op` against the grants with what DMs from its target recorded, then for the
+    /// account that nick has now: papo's state, or else WHOIS when the record alone refuses. A
+    /// grant an earlier holder earned isn't handed on, and a restarted daemon can still DM
+    /// someone it hasn't heard from yet.
     async fn check_grants(&self, op: &Op) -> Result<()> {
         let (Op::Send(Outgoing { target, .. })
         | Op::React { target, .. }
@@ -431,38 +431,27 @@ impl<I: Irc> Daemon<I> {
             .get(&target.to_ascii_lowercase())
             .cloned()
             .unwrap_or_default();
-        let known = self.irc.account(target);
-        if let Err(refused) = self.grants.check(op, &dm) {
-            if !grants::is_channel(target)
-                && matches!(known, NickAccount::Unknown)
-                && self.whois_allows(op, target, &dm).await
-            {
-                return Ok(());
-            }
-            return Err(refused);
-        }
-        let account = match known {
-            NickAccount::Unknown => return Ok(()),
-            NickAccount::LoggedOut => None,
-            NickAccount::LoggedIn(account) => Some(account),
+        let record = self.grants.check(op, &dm);
+        let current = match (self.irc.account(target), &record) {
+            (NickAccount::LoggedIn(account), _) => Some(account),
+            (NickAccount::LoggedOut, _) => None,
+            (NickAccount::Unknown, Ok(())) => return Ok(()),
+            (NickAccount::Unknown, Err(_)) if grants::is_channel(target) => return record,
+            (NickAccount::Unknown, Err(_)) => match self.irc.whois(target).await {
+                Ok(whois) => whois.account,
+                Err(_) => return record,
+            },
         };
-        self.grants
-            .check(op, &dm.held_by(account.as_deref()))
-            .map_err(|_| {
-                Error::new(
-                    Code::NotAllowed,
-                    format!("{target} is now logged in as a different account"),
-                )
-                .with_hint("don't retry; someone else may hold the nick")
-            })
-    }
-
-    async fn whois_allows(&self, op: &Op, target: &str, dm: &DmHistory) -> bool {
-        self.irc.whois(target).await.is_ok_and(|whois| {
-            self.grants
-                .check(op, &dm.held_by(whois.account.as_deref()))
-                .is_ok()
-        })
+        let held = self.grants.check(op, &dm.held_by(current.as_deref()));
+        match (record, held) {
+            (_, Ok(())) => Ok(()),
+            (Err(refused), Err(_)) => Err(refused),
+            (Ok(()), Err(_)) => Err(Error::new(
+                Code::NotAllowed,
+                format!("{target} is now logged in as a different account"),
+            )
+            .with_hint("don't retry; someone else may hold the nick")),
+        }
     }
 
     async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
@@ -2355,11 +2344,22 @@ cat"#,
         assert!(daemon.call(send_request("luiz", "sure")).await["Ok"].is_object());
         assert_eq!(daemon.irc.whoises(), 0);
 
-        for account in [Some("luiz"), Some("mallory"), None] {
+        for (account, allowed) in [
+            (Some("Luiz"), true),
+            (Some("mallory"), false),
+            (None, false),
+        ] {
             let daemon = launch(dm_luiz_by_account());
             daemon.irc.whois_says("luiz", Some("luiz"));
             daemon.irc.papo_knows("luiz", account);
-            daemon.call(send_request("luiz", "morning")).await;
+            for (request, refused) in to_luiz() {
+                let reply = daemon.call(request).await;
+                if allowed {
+                    assert!(reply["Ok"].is_object(), "{account:?}: {reply}");
+                } else {
+                    assert_eq!(reply["Err"]["message"], refused, "{account:?}");
+                }
+            }
             assert_eq!(daemon.irc.whoises(), 0, "{account:?}");
         }
 
