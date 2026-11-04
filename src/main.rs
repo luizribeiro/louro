@@ -39,6 +39,12 @@ error: exit 0, `timed_out: true`, and no events. Just call `wait` again. The \
 daemon remembers where you left off, so events are never missed and never \
 replayed.
 
+If `status` shows `typing.after_wait` other than `off`, louro shows typing \
+for you to anyone who DMed you (or mentioned you, with `dms+mentions`) in \
+the events you just got, where `typing` is granted, so you needn't. It \
+stops when you send or react there, `wait` again, or it times out; \
+`typing TARGET done` stops it sooner.
+
 Every result includes `now`, the current time.
 
 More, as granted:
