@@ -1,5 +1,6 @@
 //! `louro.toml`: `[server]` says what the bot connects as, `[grants]` what the agent may do,
-//! `[limits]` how much, and `[filter]` what checks its words first.
+//! `[limits]` how much, `[filter]` what checks its words first, and `[typing]` when the daemon
+//! shows typing on the agent's behalf.
 
 use std::env;
 use std::ffi::OsString;
@@ -8,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{Code, Error, Result};
 
@@ -31,6 +32,8 @@ pub struct Config {
     #[serde(default)]
     pub limits: Limits,
     pub filter: Option<Filter>,
+    #[serde(default)]
+    pub typing: TypingConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,6 +239,41 @@ impl Filter {
     }
 }
 
+/// Whom the daemon shows typing to once the agent acks a `wait` batch, until the agent answers
+/// them, waits again, or `timeout` passes.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TypingConfig {
+    pub after_wait: AfterWait,
+    #[serde(deserialize_with = "duration", serialize_with = "as_humantime")]
+    pub timeout: Duration,
+}
+
+impl Default for TypingConfig {
+    fn default() -> Self {
+        Self {
+            after_wait: AfterWait::Off,
+            timeout: Duration::from_secs(60),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterWait {
+    #[default]
+    Off,
+    /// The sender of each live DM.
+    Dms,
+    /// Those, and each channel whose live message mentions the bot.
+    #[serde(rename = "dms+mentions")]
+    DmsAndMentions,
+}
+
+fn as_humantime<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(&humantime::format_duration(*duration))
+}
+
 fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     let raw = String::deserialize(deserializer)?;
     humantime::parse_duration(&raw)
@@ -418,8 +456,11 @@ mod tests {
             grants,
             limits,
             filter,
+            typing,
         } = parse(MINIMAL).unwrap();
         assert!(filter.is_none());
+        assert_eq!(typing.after_wait, AfterWait::Off);
+        assert_eq!(typing.timeout, Duration::from_secs(60));
         assert_eq!(server.nick, "louro");
         assert_eq!(server.sasl_username(), None);
         assert!(server.autojoin.is_empty());
@@ -625,6 +666,20 @@ mod tests {
             let refusal = refusal(&format!("{MINIMAL}[filter]\n{settings}"));
             assert!(refusal.contains(refused), "{refusal}");
         }
+    }
+
+    #[test]
+    fn a_typing_table_spells_its_settings_the_same_both_ways() {
+        let typing = parse(&format!(
+            "{MINIMAL}[typing]\nafter_wait = \"dms+mentions\"\ntimeout = \"90s\""
+        ))
+        .unwrap()
+        .typing;
+        assert_eq!(typing.after_wait, AfterWait::DmsAndMentions);
+        assert_eq!(
+            serde_json::to_value(&typing).unwrap(),
+            serde_json::json!({"after_wait": "dms+mentions", "timeout": "1m 30s"})
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
-use crate::config::{Config, Grants, Limit, Limits};
+use crate::config::{Config, Grants, Limit, Limits, TypingConfig};
 use crate::error::{Code, Error, Result};
 use crate::filter::{self, Filter, Verdict};
 use crate::grants::{self, DmHistory};
@@ -146,6 +146,7 @@ impl RateWindows {
 struct Daemon<I> {
     grants: Grants,
     limits: Limits,
+    typing: TypingConfig,
     /// Kept so no op can show it to others.
     password: Option<Secret>,
     filter: Option<Filter>,
@@ -171,6 +172,7 @@ struct Daemon<I> {
 async fn run(
     grants: Grants,
     limits: Limits,
+    typing: TypingConfig,
     password: Option<Secret>,
     filter: Option<Filter>,
     irc: impl Irc,
@@ -184,6 +186,7 @@ async fn run(
     let daemon = Arc::new(Daemon {
         grants,
         limits,
+        typing,
         password,
         filter,
         irc,
@@ -231,6 +234,7 @@ pub async fn start(
         grants,
         limits,
         filter,
+        typing,
     } = config;
     let filter =
         filter.map(|filter| Filter::new(filter.outgoing, filter.timeout, server.address.clone()));
@@ -259,7 +263,8 @@ pub async fn start(
     })));
     Ok(async move {
         run(
-            grants, limits, password, filter, irc, watching, updates, listener, &socket, stop,
+            grants, limits, typing, password, filter, irc, watching, updates, listener, &socket,
+            stop,
         )
         .await
     })
@@ -721,6 +726,7 @@ impl<I: Irc> Daemon<I> {
         status["grants"] = json!(self.grants);
         status["limits"] = json!(self.limits);
         status["filter"] = self.filter.is_some().into();
+        status["typing"] = json!(self.typing);
         status["watching"] = json!(self.watching.lock().unwrap().nicks);
         status["last_error"] = json!(*self.last_error.lock().unwrap());
         status
@@ -1232,7 +1238,16 @@ mod tests {
             async move {
                 let listener = UnixListener::bind(&socket)?;
                 run(
-                    grants, limits, password, filter, irc, watching, receiver, listener, &socket,
+                    grants,
+                    limits,
+                    TypingConfig::default(),
+                    password,
+                    filter,
+                    irc,
+                    watching,
+                    receiver,
+                    listener,
+                    &socket,
                     stopped,
                 )
                 .await
@@ -1364,6 +1379,7 @@ mod tests {
                 }},
                 "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s"},
                 "filter": false,
+                "typing": {"after_wait": "off", "timeout": "1m"},
                 "watching": [],
                 "last_error": null
             }})
