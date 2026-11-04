@@ -61,9 +61,10 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 
 ## Config
 
-`louro.toml` has four tables: `[server]` says what the bot connects as,
-`[grants]` what the agent may do, `[limits]` how much, and the optional
-`[filter]` what checks its words first. Everything not
+`louro.toml` has five tables: `[server]` says what the bot connects as,
+`[grants]` what the agent may do, `[limits]` how much, the optional
+`[filter]` what checks its words first, and the optional `[typing]` when
+the bot shows typing on its own. Everything not
 granted is denied. A grant is `true`, `false`, or a list of names matched
 case-insensitively, with one trailing `*` as a prefix glob. For DM grants,
 prefer `account:NAME` over a bare nick: the server verifies accounts, but
@@ -88,6 +89,15 @@ failed) and always logged on louro's stderr. It runs as louro's own user
 with `/` as its working directory. `connect` refuses to start if the
 program isn't an executable
 file.
+
+`[typing]` shows the bot typing while the agent works on an answer.
+With `after_wait = "dms"`, once the agent takes events from `louro wait`,
+louro shows typing to each person whose DM was among them;
+`"dms+mentions"` also covers each channel where a message mentioned the
+bot. Notices and chat replayed after a reconnect don't count, and each
+target needs `irc.typing`. It stops when the agent sends or reacts there
+(or sets typing there itself), calls `wait` again, or after `timeout`
+(60s by default). The default is `off`.
 
 <details>
 <summary>A fuller example</summary>
@@ -123,6 +133,10 @@ react = "10/1m"        # per target; default; typing has no limit
 # [filter]
 # outgoing = ["/usr/local/bin/louro-redact", "--strict"]  # argv, no shell
 # timeout = "5s"       # default
+
+# [typing]
+# after_wait = "dms"   # off (default), dms, or dms+mentions
+# timeout = "60s"      # default
 ```
 
 </details>
