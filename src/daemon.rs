@@ -103,11 +103,16 @@ impl Watchlist {
 }
 
 /// The daemon showing typing to `target` on the agent's behalf, stopped when dropped.
-struct TypingLoop(JoinHandle<()>);
+struct TypingLoop {
+    target: String,
+    /// Set once the loop sends `done` itself, at the timeout.
+    ended: Arc<AtomicBool>,
+    task: JoinHandle<()>,
+}
 
 impl Drop for TypingLoop {
     fn drop(&mut self) {
-        self.0.abort();
+        self.task.abort();
     }
 }
 
@@ -481,6 +486,7 @@ impl<I: Irc> Daemon<I> {
             Err(_) => Err(Error::new(Code::Usage, "the request is not a JSON line")),
         };
         if let Ok(Op::Wait { timeout, max }) = op {
+            self.end_typing(|_| true).await;
             let batch = self.inbox.wait(timeout, max).await;
             let cursor = batch.cursor;
             let addressed = self.addressed(&batch);
@@ -542,16 +548,24 @@ impl<I: Irc> Daemon<I> {
             }
             let daemon = Arc::clone(self);
             let shown = target.clone();
-            let task = tokio::spawn(async move { daemon.keep_typing(&shown).await });
-            self.typing_loops
-                .lock()
-                .unwrap()
-                .insert(target.to_ascii_lowercase(), TypingLoop(task));
+            let ended = Arc::new(AtomicBool::new(false));
+            let task = tokio::spawn({
+                let ended = Arc::clone(&ended);
+                async move { daemon.keep_typing(&shown, &ended).await }
+            });
+            self.typing_loops.lock().unwrap().insert(
+                target.to_ascii_lowercase(),
+                TypingLoop {
+                    target,
+                    ended,
+                    task,
+                },
+            );
         }
     }
 
     /// Errors are ignored, so a server without typing support never troubles `wait`.
-    async fn keep_typing(&self, target: &str) {
+    async fn keep_typing(&self, target: &str, ended: &AtomicBool) {
         let until = Instant::now() + self.typing.timeout;
         loop {
             let _ = self.irc.act(&typing(target, Typing::Active)).await;
@@ -562,7 +576,27 @@ impl<I: Irc> Daemon<I> {
                 break;
             }
         }
+        ended.store(true, Ordering::Relaxed);
         let _ = self.irc.act(&typing(target, Typing::Done)).await;
+    }
+
+    /// Stops the daemon's typing to each lowercased target `stops` picks, and returns those it
+    /// was still showing typing to.
+    fn stop_typing(&self, stops: impl Fn(&str) -> bool) -> Vec<String> {
+        self.typing_loops
+            .lock()
+            .unwrap()
+            .extract_if(|key, _| stops(key))
+            .filter(|(_, shown)| !shown.ended.load(Ordering::Relaxed))
+            .map(|(_, shown)| shown.target.clone())
+            .collect()
+    }
+
+    /// Like [`Self::stop_typing`], then sends `done` to each, so their clients stop showing it.
+    async fn end_typing(&self, stops: impl Fn(&str) -> bool) {
+        for target in self.stop_typing(stops) {
+            let _ = self.irc.act(&typing(&target, Typing::Done)).await;
+        }
     }
 
     async fn handle(&self, mut op: Op) -> Result<Value> {
@@ -743,7 +777,11 @@ impl<I: Irc> Daemon<I> {
         match op {
             Op::Status {} => Ok(self.status()),
             Op::Wait { .. } => unreachable!("serve answers wait itself"),
-            Op::Send(message) => self.send(message).await,
+            Op::Send(message) => {
+                self.end_typing(|key| key.eq_ignore_ascii_case(&message.target))
+                    .await;
+                self.send(message).await
+            }
             Op::Names { channel } => self.names(channel),
             Op::Topic { channel, set: None } => Ok(untrusted(
                 json!({"channel": channel, "topic": self.irc.topic(channel)}),
@@ -770,9 +808,12 @@ impl<I: Irc> Daemon<I> {
                 remove,
             } => {
                 let reacted = json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove});
+                self.end_typing(|key| key.eq_ignore_ascii_case(target))
+                    .await;
                 self.act(op, reacted).await
             }
             Op::Typing { target, state } => {
+                self.stop_typing(|key| key.eq_ignore_ascii_case(target));
                 self.act(op, json!({"target": target, "state": state}))
                     .await
             }
@@ -2192,8 +2233,10 @@ cat"#,
         assert_eq!(*daemon.irc.acts.lock().unwrap(), granted);
     }
 
+    const TYPING_TIMEOUT_SECS: u64 = 10;
+
     /// A daemon that may show typing in #bots and to luiz and maria, but not in #lounge, and
-    /// does so after a wait as `after_wait` says, for 10s.
+    /// does so after a wait as `after_wait` says.
     fn launch_typing(after_wait: &str) -> Running {
         let grants = toml::from_str(
             r##"
@@ -2206,8 +2249,10 @@ cat"#,
             "##,
         )
         .unwrap();
-        let typing =
-            toml::from_str(&format!("after_wait = \"{after_wait}\"\ntimeout = \"10s\"")).unwrap();
+        let typing = toml::from_str(&format!(
+            "after_wait = \"{after_wait}\"\ntimeout = \"{TYPING_TIMEOUT_SECS}s\""
+        ))
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         launch_in(dir, grants, Limits::default(), None, typing)
     }
@@ -2293,10 +2338,95 @@ cat"#,
         time::sleep(Duration::from_secs(7)).await;
         assert_eq!(daemon.typing_acts().await, typed(&[("luiz", "active"); 3]));
 
-        time::sleep(Duration::from_secs(10)).await;
+        time::sleep(Duration::from_secs(TYPING_TIMEOUT_SECS)).await;
         let mut acts = typed(&[("luiz", "active"); 4]);
         acts.extend(typed(&[("luiz", "done")]));
         assert_eq!(daemon.typing_acts().await, acts);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_next_wait_ends_typing_to_each_target_still_shown() {
+        let daemon = launch_typing("dms");
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.say(dm(from_maria("louro: you there?"))).await;
+        daemon.wait_and_ack(5).await;
+        daemon.wait(0).await;
+        let mut acts = daemon.typing_acts().await;
+        acts[2..].sort();
+        let mut shown = typed(&[("luiz", "active"), ("maria", "active")]);
+        shown.extend(typed(&[("luiz", "done"), ("maria", "done")]));
+        assert_eq!(acts, shown);
+
+        daemon.say(dm(from_maria("louro: still there?"))).await;
+        daemon.wait_and_ack(5).await;
+        time::sleep(Duration::from_secs(TYPING_TIMEOUT_SECS + 1)).await;
+        daemon.wait(0).await;
+        let acts = daemon.typing_acts().await;
+        shown.extend(typed(&[("maria", "active"); 4]));
+        shown.extend(typed(&[("maria", "done")]));
+        assert_eq!(acts[4..], shown[4..]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn answering_a_target_ends_typing_there_first_and_nowhere_else() {
+        let daemon = launch_typing("dms+mentions");
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.say(dm(from_maria("louro: you there?"))).await;
+        daemon.say(from_maria("louro: and here?")).await;
+        daemon.wait_and_ack(5).await;
+        daemon.call(send_request("LUIZ", "sure")).await;
+        daemon.call(react_request("#bots", "👍", false)).await;
+        time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(
+            daemon.typing_acts().await,
+            typed(&[
+                ("luiz", "active"),
+                ("maria", "active"),
+                ("#bots", "active"),
+                ("luiz", "done"),
+                ("#bots", "done"),
+                ("maria", "active"),
+            ])
+        );
+        let acts = daemon.irc.acts.lock().unwrap();
+        let react = acts.iter().position(|act| act["op"] == "react").unwrap();
+        assert_eq!(
+            acts[react - 1]["args"],
+            json!({"target": "#bots", "state": "done"})
+        );
+        assert_eq!(daemon.irc.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_agents_own_typing_takes_over_from_the_daemons() {
+        let daemon = launch_typing("dms");
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.wait_and_ack(5).await;
+        let paused = request("typing", json!({"target": "luiz", "state": "paused"}));
+        daemon.call(paused).await;
+        time::sleep(Duration::from_secs(TYPING_TIMEOUT_SECS + 1)).await;
+        daemon.call(send_request("luiz", "sure")).await;
+        daemon.wait(0).await;
+        assert_eq!(
+            daemon.typing_acts().await,
+            typed(&[("luiz", "active"), ("luiz", "paused")])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_its_own_typing_there_the_daemon_never_sends_done() {
+        for (after_wait, incoming, target) in [
+            ("off", dm(from_luiz("hey, got a sec?")), "luiz"),
+            ("dms", from_maria("louro: you there?"), "#bots"),
+        ] {
+            let daemon = launch_typing(after_wait);
+            daemon.say(incoming).await;
+            daemon.wait_and_ack(5).await;
+            daemon.call(send_request(target, "sure")).await;
+            daemon.call(react_request(target, "👍", false)).await;
+            daemon.wait(0).await;
+            assert_eq!(daemon.typing_acts().await, [], "{after_wait}");
+        }
     }
 
     fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {
