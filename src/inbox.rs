@@ -67,6 +67,15 @@ pub struct Batch {
     events: Vec<Event>,
 }
 
+impl Batch {
+    pub fn chat(&self) -> impl Iterator<Item = &Incoming> {
+        self.events.iter().filter_map(|event| match &event.body {
+            Body::Chat { incoming, .. } => Some(incoming),
+            _ => None,
+        })
+    }
+}
+
 #[derive(Default)]
 struct Buffer {
     unread: VecDeque<Event>,

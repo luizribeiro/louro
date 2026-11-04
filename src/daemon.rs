@@ -15,16 +15,17 @@ use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, mpsc};
-use tokio::time::Instant;
+use tokio::task::JoinHandle;
+use tokio::time::{self, Instant};
 
-use crate::config::{Config, Grants, Limit, Limits, TypingConfig};
+use crate::config::{AfterWait, Config, Grants, Limit, Limits, TypingConfig};
 use crate::error::{Code, Error, Result};
 use crate::filter::{self, Filter, Verdict};
 use crate::grants::{self, DmHistory};
-use crate::inbox::{Inbox, NOTICE};
+use crate::inbox::{Batch, Inbox, NOTICE};
 use crate::irc::{
-    self, History, HistoryQuery, Incoming, Irc, Listed, NickAccount, Outgoing, Secret, Sender,
-    Update, now, whole_seconds,
+    self, History, HistoryQuery, Incoming, Irc, Kind, Listed, NickAccount, Origin, Outgoing,
+    Secret, Sender, Typing, Update, now, whole_seconds,
 };
 use crate::output;
 use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
@@ -41,6 +42,8 @@ const MAX_REALNAME_CHARS: usize = 100;
 const MAX_WATCHING: usize = 50;
 /// The most channels a `list` returns, busiest first.
 const MAX_LIST: usize = 200;
+/// Clients drop `active` after about 6s.
+const TYPING_REFRESH: Duration = Duration::from_secs(3);
 
 /// The bot's own recent messages as (lowercased target, msgid), the only ones `redact` removes.
 #[derive(Default)]
@@ -96,6 +99,15 @@ impl Watchlist {
                     format!("can't save the watch list {}: {err}", self.file.display()),
                 )
             })
+    }
+}
+
+/// The daemon showing typing to `target` on the agent's behalf, stopped when dropped.
+struct TypingLoop(JoinHandle<()>);
+
+impl Drop for TypingLoop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -163,6 +175,8 @@ struct Daemon<I> {
     send_windows: RateWindows,
     send_total: RateWindows,
     react_windows: RateWindows,
+    /// By lowercased target.
+    typing_loops: Mutex<HashMap<String, TypingLoop>>,
 }
 
 /// Serves requests on `listener` and buffers chat from `updates` until a `quit`
@@ -200,6 +214,7 @@ async fn run(
         send_windows: RateWindows::default(),
         send_total: RateWindows::default(),
         react_windows: RateWindows::default(),
+        typing_loops: Mutex::default(),
     });
     daemon.restore_watching(saved).await;
     tokio::pin!(stop);
@@ -459,7 +474,7 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    async fn serve(&self, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
+    async fn serve(self: &Arc<Self>, conn: &mut BufReader<UnixStream>) -> io::Result<()> {
         let op = match read_line::<Value>(conn).await {
             Ok(Some(request)) => parse_request(request),
             Ok(None) => return Ok(()),
@@ -468,9 +483,11 @@ impl<I: Irc> Daemon<I> {
         if let Ok(Op::Wait { timeout, max }) = op {
             let batch = self.inbox.wait(timeout, max).await;
             let cursor = batch.cursor;
+            let addressed = self.addressed(&batch);
             write_line(conn, &Ok::<_, Error>(batch)).await?;
             if let Some(Ack { ack: true }) = read_line(conn).await? {
                 self.inbox.ack(cursor);
+                self.start_typing(addressed).await;
             }
             return Ok(());
         }
@@ -484,6 +501,68 @@ impl<I: Irc> Daemon<I> {
             self.quit.notify_one();
         }
         Ok(())
+    }
+
+    /// Whom `batch` addressed live, as far as `typing.after_wait` counts it, each once. Notices
+    /// don't count: IRC bots never answer them.
+    fn addressed(&self, batch: &Batch) -> Vec<String> {
+        let with_mentions = match self.typing.after_wait {
+            AfterWait::Off => return vec![],
+            AfterWait::Dms => false,
+            AfterWait::DmsAndMentions => true,
+        };
+        let mut targets: Vec<String> = vec![];
+        let live = batch
+            .chat()
+            .filter(|chat| chat.origin == Origin::Live && chat.kind != Kind::Notice);
+        for chat in live {
+            let target = if chat.private {
+                &chat.from.nick
+            } else if chat.mentions_me && with_mentions {
+                &chat.target
+            } else {
+                continue;
+            };
+            if !targets.iter().any(|seen| seen.eq_ignore_ascii_case(target)) {
+                targets.push(target.clone());
+            }
+        }
+        targets
+    }
+
+    /// Shows typing to each of `targets` that `irc.typing` grants, until the timeout.
+    async fn start_typing(self: &Arc<Self>, targets: Vec<String>) {
+        for target in targets {
+            if self
+                .check_grants(&typing(&target, Typing::Active))
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let daemon = Arc::clone(self);
+            let shown = target.clone();
+            let task = tokio::spawn(async move { daemon.keep_typing(&shown).await });
+            self.typing_loops
+                .lock()
+                .unwrap()
+                .insert(target.to_ascii_lowercase(), TypingLoop(task));
+        }
+    }
+
+    /// Errors are ignored, so a server without typing support never troubles `wait`.
+    async fn keep_typing(&self, target: &str) {
+        let until = Instant::now() + self.typing.timeout;
+        loop {
+            let _ = self.irc.act(&typing(target, Typing::Active)).await;
+            if time::timeout_at(until, time::sleep(TYPING_REFRESH))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = self.irc.act(&typing(target, Typing::Done)).await;
     }
 
     async fn handle(&self, mut op: Op) -> Result<Value> {
@@ -958,6 +1037,13 @@ fn untrusted(result: impl Serialize) -> Value {
     result
 }
 
+fn typing(target: &str, state: Typing) -> Op {
+    Op::Typing {
+        target: target.into(),
+        state,
+    }
+}
+
 fn not_in(channel: &str) -> Error {
     Error::new(Code::NotAllowed, format!("louro is not in {channel}"))
         .with_hint("`louro status` lists the channels it is in")
@@ -1218,11 +1304,23 @@ mod tests {
     }
 
     fn launch_with(grants: Grants, limits: Limits) -> Running {
-        launch_in(tempfile::tempdir().unwrap(), grants, limits, None)
+        launch_in(
+            tempfile::tempdir().unwrap(),
+            grants,
+            limits,
+            None,
+            TypingConfig::default(),
+        )
     }
 
     /// Launches a daemon whose socket and watch list are in `dir`.
-    fn launch_in(dir: TempDir, grants: Grants, limits: Limits, filter: Option<Filter>) -> Running {
+    fn launch_in(
+        dir: TempDir,
+        grants: Grants,
+        limits: Limits,
+        filter: Option<Filter>,
+        typing: TypingConfig,
+    ) -> Running {
         let socket = dir.path().join("louro.sock");
         let watching = Watchlist::load(dir.path().join("watching.json")).unwrap();
         let irc = Arc::new(FakeIrc::default());
@@ -1238,17 +1336,8 @@ mod tests {
             async move {
                 let listener = UnixListener::bind(&socket)?;
                 run(
-                    grants,
-                    limits,
-                    TypingConfig::default(),
-                    password,
-                    filter,
-                    irc,
-                    watching,
-                    receiver,
-                    listener,
-                    &socket,
-                    stopped,
+                    grants, limits, typing, password, filter, irc, watching, receiver, listener,
+                    &socket, stopped,
                 )
                 .await
             }
@@ -1267,7 +1356,7 @@ mod tests {
     fn launch_filtered(grants: Grants, limits: Limits, body: &str) -> Running {
         let dir = tempfile::tempdir().unwrap();
         let filter = script(&dir, body);
-        launch_in(dir, grants, limits, Some(filter))
+        launch_in(dir, grants, limits, Some(filter), TypingConfig::default())
     }
 
     impl Running {
@@ -2103,6 +2192,113 @@ cat"#,
         assert_eq!(*daemon.irc.acts.lock().unwrap(), granted);
     }
 
+    /// A daemon that may show typing in #bots and to luiz and maria, but not in #lounge, and
+    /// does so after a wait as `after_wait` says, for 10s.
+    fn launch_typing(after_wait: &str) -> Running {
+        let grants = toml::from_str(
+            r##"
+            irc.join = ["#bots", "#lounge"]
+            irc.send = ["#bots", "#lounge"]
+            irc.dm.read = ["luiz", "maria"]
+            irc.dm.send = ["$first"]
+            irc.react = ["#bots", "luiz", "maria"]
+            irc.typing = ["#bots", "luiz", "maria"]
+            "##,
+        )
+        .unwrap();
+        let typing =
+            toml::from_str(&format!("after_wait = \"{after_wait}\"\ntimeout = \"10s\"")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        launch_in(dir, grants, Limits::default(), None, typing)
+    }
+
+    impl Running {
+        /// Each typing act so far, as (target, state), once background typing has had its turn.
+        async fn typing_acts(&self) -> Vec<(String, String)> {
+            time::sleep(Duration::from_millis(100)).await;
+            self.irc
+                .acts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|act| act["op"] == "typing")
+                .map(|act| {
+                    let arg = |key: &str| act["args"][key].as_str().unwrap().to_owned();
+                    (arg("target"), arg("state"))
+                })
+                .collect()
+        }
+    }
+
+    fn typed(acts: &[(&str, &str)]) -> Vec<(String, String)> {
+        acts.iter()
+            .map(|&(target, state)| (target.into(), state.into()))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_acked_wait_shows_typing_only_to_whom_it_addressed_live() {
+        let channel = |target: &str, incoming| Incoming {
+            target: target.into(),
+            ..incoming
+        };
+        for (after_wait, typing_to) in [
+            ("off", vec![]),
+            ("dms", vec!["luiz"]),
+            ("dms+mentions", vec!["luiz", "#bots"]),
+        ] {
+            let daemon = launch_typing(after_wait);
+            daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+            daemon.say(dm(from_luiz("it's about ergo"))).await;
+            daemon
+                .say(from_maria("louro: does ergo do chathistory?"))
+                .await;
+            daemon
+                .say(channel("#BOTS", from_maria("louro: and DMs?")))
+                .await;
+            daemon
+                .say(channel("#lounge", from_maria("louro: hi")))
+                .await;
+            daemon.say(from_joao("it does")).await;
+            daemon
+                .say(Incoming {
+                    kind: Kind::Notice,
+                    ..dm(from_maria("louro: ping"))
+                })
+                .await;
+            daemon
+                .say(Incoming {
+                    origin: Origin::History,
+                    ..dm(from_maria("louro: missed me?"))
+                })
+                .await;
+
+            daemon.wait(5).await;
+            assert_eq!(
+                daemon.typing_acts().await,
+                [],
+                "{after_wait} without an ack"
+            );
+            daemon.wait_and_ack(5).await;
+            let active: Vec<_> = typing_to.iter().map(|&target| (target, "active")).collect();
+            assert_eq!(daemon.typing_acts().await, typed(&active), "{after_wait}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn typing_after_wait_refreshes_every_3s_until_the_timeout() {
+        let daemon = launch_typing("dms");
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.wait_and_ack(5).await;
+        time::sleep(Duration::from_secs(7)).await;
+        assert_eq!(daemon.typing_acts().await, typed(&[("luiz", "active"); 3]));
+
+        time::sleep(Duration::from_secs(10)).await;
+        let mut acts = typed(&[("luiz", "active"); 4]);
+        acts.extend(typed(&[("luiz", "done")]));
+        assert_eq!(daemon.typing_acts().await, acts);
+    }
+
     fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {
         request(
             "redact",
@@ -2604,7 +2800,13 @@ cat"#,
     fn launch_watching(grants: Grants, nicks: &[String]) -> Running {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("watching.json"), json!(nicks).to_string()).unwrap();
-        launch_in(dir, grants, Limits::default(), None)
+        launch_in(
+            dir,
+            grants,
+            Limits::default(),
+            None,
+            TypingConfig::default(),
+        )
     }
 
     #[tokio::test]
