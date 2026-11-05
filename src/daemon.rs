@@ -795,14 +795,12 @@ impl<I: Irc> Daemon<I> {
     /// The caller leaving, by closing `caller` or writing to it, closes the ask too.
     async fn ask(&self, mut op: Op, caller: &mut BufReader<UnixStream>) -> Result<Value> {
         let reserved = self.admit(&mut op).await?;
-        let Op::Ask(question) = &op else {
-            unreachable!("serve passes only asks")
-        };
-        let posted = self.post(question).await;
+        let posted = self.filter_and_post(&mut op).await;
         if posted.is_err() {
             self.release(&op, reserved);
         }
         let (id, mut answered) = posted?;
+        let question = question(&op);
         let timeout = Duration::from_secs(question.timeout);
         let waited = tokio::select! {
             waited = time::timeout(timeout, &mut answered) => waited,
@@ -823,6 +821,24 @@ impl<I: Irc> Daemon<I> {
             "answer": answer,
             "timed_out": answer.is_none(),
         }))
+    }
+
+    /// Runs the filter on the question and posts it, unless the filter changed it: an answer
+    /// is good only for the very text the target read.
+    async fn filter_and_post(&self, op: &mut Op) -> Result<(String, oneshot::Receiver<String>)> {
+        let Filtered { rewritten, note } = self.filter(op).await?;
+        if rewritten {
+            let error = Error::new(
+                Code::Blocked,
+                "the operator's filter changed this question, so it was not asked",
+            )
+            .with_hint("ask without what the filter changed; louro asks only the exact text");
+            return Err(match note {
+                Some(note) => error.with_note(note),
+                None => error,
+            });
+        }
+        self.post(question(op)).await
     }
 
     /// Sends the question under a new id, with how to answer it, and returns the id and where
@@ -919,6 +935,7 @@ impl<I: Irc> Daemon<I> {
             Op::React { target, msgid, .. } | Op::Redact { target, msgid, .. } => {
                 (Some(target), Some(msgid.clone()))
             }
+            Op::Ask(Question { target, .. }) => (Some(target), None),
             _ => (None, None),
         };
         let logged_in = |nick: &str| match self.irc.account(nick) {
@@ -1390,6 +1407,13 @@ fn check_choices(choices: &[String]) -> Result<()> {
         ),
     )
     .with_hint("like --choices yes,no"))
+}
+
+fn question(op: &Op) -> &Question {
+    let Op::Ask(question) = op else {
+        unreachable!("serve passes only asks")
+    };
+    question
 }
 
 /// `a`, `a or b`, `a, b or c`.
@@ -2777,6 +2801,11 @@ cat"#,
     /// A daemon that may ask luiz, logged in as luiz, may speak in #bots, and shows typing to
     /// whoever DMs it. It reads luiz's DMs by nick, so an impostor's `!yes` shows up as chat.
     fn launch_asking(limits: Limits) -> Running {
+        launch_asking_through(limits, None)
+    }
+
+    /// Like [`launch_asking`], with a filter that is a shell script running `filter`, if any.
+    fn launch_asking_through(limits: Limits, filter: Option<&str>) -> Running {
         let grants = toml::from_str(
             r##"
             irc.join = ["#bots"]
@@ -2793,7 +2822,9 @@ cat"#,
             "after_wait = \"dms\"\ntimeout = \"{TYPING_TIMEOUT_SECS}s\""
         ))
         .unwrap();
-        let daemon = launch_in(tempfile::tempdir().unwrap(), grants, limits, None, typing);
+        let dir = tempfile::tempdir().unwrap();
+        let filter = filter.map(|body| script(&dir, body));
+        let daemon = launch_in(dir, grants, limits, filter, typing);
         daemon.irc.whois_says("luiz", Some("luiz"));
         daemon
     }
@@ -3153,6 +3184,43 @@ cat"#,
         let (_, waited) = daemon.wait(0).await;
         assert_eq!(texts(&waited), [late.as_str()]);
         assert!(daemon.call(send_request("luiz", "never mind")).await["Ok"].is_object());
+    }
+
+    #[tokio::test]
+    async fn a_question_the_filter_changes_or_blocks_is_never_asked() {
+        let filter = r#"text=$(cat)
+case "$text" in
+  *ghp_*) echo "$text" | sed 's/ghp_[A-Za-z0-9]*/[redacted]/g'; echo 'redacted a token' >&2 ;;
+  *prod*) echo "$text" | sed 's/prod/staging/' ;;
+  *drop*) exit 10 ;;
+  *crash*) exit 1 ;;
+  *) [ "$LOURO_KIND $LOURO_NICK $LOURO_ACCOUNT" = "ask luiz luiz" ] || exit 10; echo "$text" ;;
+esac"#;
+        let daemon = launch_asking_through(one_send_per_10s(), Some(filter));
+        daemon.irc.papo_knows("luiz", Some("luiz"));
+        let rewritten = daemon.call(yes_or_no(&format!("push with {TOKEN}?"))).await;
+        assert_eq!(
+            rewritten,
+            json!({"Err": {
+                "code": "blocked",
+                "message": "the operator's filter changed this question, so it was not asked",
+                "hint": "ask without what the filter changed; louro asks only the exact text",
+                "note": "redacted a token"
+            }})
+        );
+        let unnoted = daemon.call(yes_or_no("deploy to prod?")).await;
+        assert_eq!(unnoted["Err"]["code"], "blocked", "{unnoted}");
+        assert!(unnoted["Err"]["hint"].is_string() && unnoted["Err"].get("note").is_none());
+        for (question, code) in [("drop the db?", "blocked"), ("crash it?", "filter_failed")] {
+            let refused = daemon.call(yes_or_no(question)).await;
+            assert_eq!(refused["Err"]["code"], code, "{refused}");
+        }
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
+
+        let passed = daemon.call(ask_request("deploy?", &["yes", "no"], 1)).await;
+        assert_eq!(passed["Ok"]["timed_out"], true, "{passed}");
+        let question = &daemon.irc.sent.lock().unwrap()[0].text;
+        assert!(question.contains("] deploy?\nreply !yes "), "{question}");
     }
 
     #[tokio::test]
