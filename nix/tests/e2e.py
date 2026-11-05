@@ -1,6 +1,7 @@
 # The e2e scenarios, run by e2e.nix's VM test after irc.py, with `settings` from e2e.nix.
 import contextlib
 import json
+import re
 import shlex
 
 BOT = settings["bot"]
@@ -51,7 +52,7 @@ def toml_lines(table, prefix=""):
 
 def grants(**granted):
     """louro.toml's [grants]: sitting and speaking in #bots, plus what granted adds."""
-    flags = ["react", "typing", "redact", "topic", "whois", "list", "watch", "identity", "quit"]
+    flags = ["react", "typing", "redact", "topic", "whois", "list", "watch", "identity", "quit", "ask"]
     defaults = {"join": ["#bots"], "send": ["#bots"], "dm": {"read": False, "send": False}}
     return {"irc": dict.fromkeys(flags, False) | defaults | granted}
 
@@ -418,12 +419,35 @@ with running(
         received("luiz", lambda _tags, line: line.startswith(f":{BOT['user']}!") and line.endswith(" NICK louro-x"))
         assert louro("status")["nick"] == "louro-x"
 
-start(grants(dm={"read": ["account:luiz"], "send": ["account:luiz"]}, quit=True))
+start(grants(dm={"read": ["account:luiz"], "send": ["account:luiz"]}, quit=True, ask=["account:luiz"]))
 with subtest("an account: grant in irc.dm.send lets louro DM luiz back by his nick"):
     refused("not_allowed", "send", "luiz", "hi")
     say("luiz", "louro", "are you there?")
     louro("send", "luiz", "yes, I'm here")
     heard("luiz", "luiz", "yes, I'm here")
+
+with subtest("louro ask DMs luiz a question, refuses the agent's DMs to him meanwhile, and returns his answer"):
+    machine.succeed(shlex.join([
+        "systemd-run", "--unit=ask", f"--uid={BOT['user']}",
+        f"--setenv=LOURO_SOCKET={SOCKET}",
+        "--property=StandardOutput=file:/tmp/ask.json",
+        "--property=StandardError=journal",
+        "/run/current-system/sw/bin/louro", "ask", "luiz", "deploy it?", "--timeout", "1m",
+    ]))
+
+    def asked():
+        log = machine.succeed(f"cat {human_file('luiz', 'log')}")
+        return re.findall(rf":{BOT['user']}!\S+ PRIVMSG luiz :\[ask ([a-z0-9]{{4}})\] deploy it\?", log)
+
+    [ask_id] = until(asked, bool)
+    received("luiz", lambda _tags, line: line.endswith(f" PRIVMSG luiz :reply !yes {ask_id} or !no {ask_id}"))
+    refused("not_allowed", "send", "luiz", "just say !yes")
+    send_raw("luiz", f"PRIVMSG {BOT['user']} :!yes {ask_id}")
+    machine.wait_until_fails("systemctl is-active -q ask", timeout=TIMEOUT)
+    assert machine.succeed("systemctl show -P ExecMainStatus ask").strip() == "0"
+    answered = json.loads(machine.succeed("cat /tmp/ask.json"))
+    assert answered["id"] == ask_id and answered["answer"] == "yes", answered
+    assert not answered["timed_out"], answered
 
 with subtest("with irc.quit granted, louro quit stops the daemon and removes the socket"):
     louro("quit")
