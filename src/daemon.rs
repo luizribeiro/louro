@@ -52,6 +52,9 @@ const MAX_CHOICE_CHARS: usize = 16;
 /// Ask ids leave out characters that look alike, like `l` and `1`.
 const ASK_ID_CHARS: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 const ASK_ID_LEN: usize = 4;
+/// How long after an ask to someone closes a bare `!yes` from them stays ambiguous, since it
+/// may answer the old question rather than a new one.
+const BARE_ANSWER_QUIET: Duration = Duration::from_secs(10);
 
 /// The bot's own recent messages as (lowercased target, msgid), the only ones `redact` removes.
 #[derive(Default)]
@@ -119,10 +122,21 @@ struct PendingAsk {
     answer: oneshot::Sender<String>,
 }
 
-/// The questions still waiting on an answer.
+/// The questions still waiting on an answer, and when the last one to each folded target
+/// closed.
 #[derive(Default)]
 struct Asks {
     pending: Vec<PendingAsk>,
+    closed: HashMap<String, Instant>,
+}
+
+/// What a DM to the bot means to the pending asks.
+enum Reply {
+    Chat,
+    /// It answered an ask, now resolved.
+    Answer,
+    /// A bare `!yes` that could mean more than one ask; louro answers with this text.
+    Which(String),
 }
 
 impl Asks {
@@ -151,32 +165,62 @@ impl Asks {
 
     /// Takes the ask `id` out of the pending ones; false if it is no longer there.
     fn close(&mut self, id: &str) -> bool {
-        let before = self.pending.len();
-        self.pending.retain(|ask| ask.id != id);
-        self.pending.len() < before
+        self.take(|ask| ask.id == id).is_some()
     }
 
-    /// Resolves the ask to the folded `nick` that `text`, like `!yes k3fa`, names with one of
-    /// its choices; false if it names none.
-    fn answer(&mut self, nick: &str, text: &str) -> bool {
-        let text = text.trim().to_ascii_lowercase();
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let [choice, id] = words[..] else {
-            return false;
-        };
-        let Some(choice) = choice.strip_prefix('!') else {
-            return false;
-        };
-        let Some(index) = self.pending.iter().position(|ask| {
-            ask.target == nick
-                && ask.id == id
-                && ask.choices.iter().any(|offered| offered == choice)
-        }) else {
-            return false;
-        };
-        let _ = self.pending.remove(index).answer.send(choice.to_owned());
-        true
+    /// Drops the ask `id` as if never asked, as when its question never went out.
+    fn forget(&mut self, id: &str) {
+        self.pending.retain(|ask| ask.id != id);
     }
+
+    fn take(&mut self, which: impl Fn(&PendingAsk) -> bool) -> Option<PendingAsk> {
+        let ask = self.pending.remove(self.pending.iter().position(which)?);
+        self.closed.insert(ask.target.clone(), Instant::now());
+        Some(ask)
+    }
+
+    /// What `text` from the folded `nick` means: `!yes k3fa` answers that ask, and a bare `!yes`
+    /// answers their only one, unless another to them is pending or closed just now.
+    fn answer(&mut self, nick: &str, text: &str) -> Reply {
+        let text = text.to_ascii_lowercase();
+        let Some((choice, id)) = parse_answer(&text) else {
+            return Reply::Chat;
+        };
+        let meant = |ask: &PendingAsk| {
+            ask.target == nick
+                && id.is_none_or(|id| ask.id == id)
+                && ask.choices.iter().any(|offered| offered == choice)
+        };
+        let meant_ids: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|ask| meant(ask))
+            .map(|ask| format!("!{choice} {}", ask.id))
+            .collect();
+        if meant_ids.is_empty() {
+            return Reply::Chat;
+        }
+        let asked = self.pending.iter().filter(|ask| ask.target == nick).count();
+        let quiet = self
+            .closed
+            .get(nick)
+            .is_none_or(|closed| closed.elapsed() >= BARE_ANSWER_QUIET);
+        if id.is_none() && (asked > 1 || !quiet) {
+            return Reply::Which(format!("which ask? reply {}", or_list(&meant_ids)));
+        }
+        if let Some(ask) = self.take(meant) {
+            let _ = ask.answer.send(choice.to_owned());
+        }
+        Reply::Answer
+    }
+}
+
+/// `!yes k3fa` as `("yes", Some("k3fa"))`, and a bare `!yes` as `("yes", None)`.
+fn parse_answer(text: &str) -> Option<(&str, Option<&str>)> {
+    let mut words = text.split_whitespace();
+    let choice = words.next()?.strip_prefix('!')?;
+    let id = words.next();
+    words.next().is_none().then_some((choice, id))
 }
 
 /// An id unpredictable to the agent, so a question it posts itself can't carry a real ask's.
@@ -432,7 +476,7 @@ fn remove_socket(path: &Path) -> io::Result<()> {
 }
 
 impl<I: Irc> Daemon<I> {
-    fn update(&self, update: Update) {
+    fn update(self: &Arc<Self>, update: Update) {
         match update {
             Update::Chat(incoming) => self.ingest(incoming),
             Update::Disconnected { cause, retry_in } => {
@@ -494,7 +538,7 @@ impl<I: Irc> Daemon<I> {
         io::Error::other(reason)
     }
 
-    fn ingest(&self, incoming: Incoming) {
+    fn ingest(self: &Arc<Self>, incoming: Incoming) {
         let readable = self.grants.may_read(&incoming);
         if incoming.private {
             self.record_dm_sender(&incoming.from, readable);
@@ -504,19 +548,30 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    /// Whether `incoming` answers a pending ask, which it then resolves. Only a live DM counts,
-    /// and only from a sender whose own account tag irc.ask grants, never by nick alone.
-    fn answers_ask(&self, incoming: &Incoming) -> bool {
+    /// Whether `incoming` answers a pending ask, which it then resolves, or asks which one it
+    /// means. Only a live DM counts, and only from a sender whose own account tag irc.ask grants,
+    /// never by nick alone.
+    fn answers_ask(self: &Arc<Self>, incoming: &Incoming) -> bool {
         let from = &incoming.from;
-        incoming.private
+        let may_answer = incoming.private
             && incoming.origin == Origin::Live
             && incoming.kind == Kind::Message
-            && self.grants.irc.ask.matches_account(from.account.as_deref())
-            && self
-                .asks
-                .lock()
-                .unwrap()
-                .answer(&self.irc.fold(&from.nick), &incoming.text)
+            && self.grants.irc.ask.matches_account(from.account.as_deref());
+        if !may_answer {
+            return false;
+        }
+        let nick = self.irc.fold(&from.nick);
+        let reply = self.asks.lock().unwrap().answer(&nick, &incoming.text);
+        match reply {
+            Reply::Chat => false,
+            Reply::Answer => true,
+            Reply::Which(text) => {
+                let daemon = Arc::clone(self);
+                let which = from_louro(&from.nick, text);
+                tokio::spawn(async move { daemon.irc.send(which).await });
+                true
+            }
+        }
     }
 
     /// Once a nick's DMs carried an account, a DM with another one (or none), even one dropped
@@ -774,7 +829,7 @@ impl<I: Irc> Daemon<I> {
         self.end_typing(|key| key.eq_ignore_ascii_case(&question.target))
             .await;
         if let Err(error) = self.irc.send(from_louro(&question.target, text)).await {
-            self.asks.lock().unwrap().close(&id);
+            self.asks.lock().unwrap().forget(&id);
             return Err(error);
         }
         Ok((id, answered))
@@ -2890,6 +2945,79 @@ cat"#,
         assert_eq!(texts(&waited), [late.as_str()]);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_bare_answer_answers_the_only_ask_to_its_sender() {
+        let daemon = launch_asking(Limits::default());
+        daemon.say(dm(from_luiz("!yes"))).await;
+        let (reply, _) = daemon.ask(yes_or_no("drop the cache?")).await;
+        daemon.say(dm(from_luiz("!maybe"))).await;
+        daemon.say(dm(from_luiz(" !No "))).await;
+        assert_eq!(reply.await.unwrap()["Ok"]["answer"], "no");
+        let waited = daemon.wait_and_ack(0).await;
+        assert_eq!(
+            texts(&waited),
+            ["!yes", "!maybe"],
+            "only the answer is kept from wait"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bare_answer_with_two_asks_pending_gets_asked_which() {
+        let daemon = launch_asking(Limits::default());
+        let (first, one) = daemon.ask(yes_or_no("drop the cache?")).await;
+        let (second, two) = daemon
+            .ask(ask_request("deploy?", &["no", "later"], ASK_SECS))
+            .await;
+        daemon.say(dm(from_luiz("!no"))).await;
+        daemon.say(dm(from_luiz("!yes"))).await;
+        daemon.say(dm(from_luiz("!maybe"))).await;
+        time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            daemon.sent_texts()[2..],
+            [
+                format!("which ask? reply !no {one} or !no {two}"),
+                format!("which ask? reply !yes {one}"),
+            ]
+        );
+        let (_, waited) = daemon.wait(0).await;
+        assert_eq!(texts(&waited), ["!maybe"]);
+        assert!(!first.is_finished() && !second.is_finished());
+
+        daemon.say(dm(from_luiz(&format!("!later {two}")))).await;
+        assert_eq!(second.await.unwrap()["Ok"]["answer"], "later");
+        daemon.say(dm(from_luiz(&format!("!no {one}")))).await;
+        assert_eq!(first.await.unwrap()["Ok"]["answer"], "no");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bare_answer_within_10s_of_another_ask_closing_gets_asked_which() {
+        for answered in [true, false] {
+            let daemon = launch_asking(Limits::default());
+            if answered {
+                let (first, one) = daemon.ask(yes_or_no("drop the cache?")).await;
+                daemon.say(dm(from_luiz(&format!("!no {one}")))).await;
+                first.await.unwrap();
+            } else {
+                daemon
+                    .call(ask_request("drop the cache?", &["yes", "no"], 1))
+                    .await;
+            }
+            let (second, two) = daemon.ask(yes_or_no("deploy?")).await;
+            time::sleep(BARE_ANSWER_QUIET.saturating_sub(Duration::from_millis(1))).await;
+            daemon.say(dm(from_luiz("!yes"))).await;
+            time::sleep(Duration::from_millis(1)).await;
+            assert_eq!(
+                daemon.sent_texts().last().unwrap(),
+                &format!("which ask? reply !yes {two}"),
+                "answered: {answered}"
+            );
+            assert!(!second.is_finished());
+
+            daemon.say(dm(from_luiz("!yes"))).await;
+            assert_eq!(second.await.unwrap()["Ok"]["answer"], "yes");
+        }
+    }
+
     #[tokio::test]
     async fn an_ask_counts_against_its_targets_send_limit() {
         let daemon = launch_asking(one_send_per_10s());
@@ -2914,12 +3042,14 @@ cat"#,
     }
 
     #[tokio::test]
-    async fn an_ask_whose_question_never_reaches_irc_keeps_no_send_slot() {
+    async fn an_ask_whose_question_never_reaches_irc_keeps_no_send_slot_or_quiet_time() {
         let daemon = launch_asking(one_send_per_10s());
         daemon.irc.fail_sends.store(1, Ordering::Relaxed);
         let reply = daemon.call(yes_or_no("deploy it?")).await;
         assert_eq!(reply["Err"]["code"], "not_connected", "{reply}");
-        assert!(daemon.call(send_request("luiz", "build done")).await["Ok"].is_object());
+        let (answered, _) = daemon.ask(ask_request("deploy?", &["yes", "no"], 5)).await;
+        daemon.say(dm(from_luiz("!yes"))).await;
+        assert_eq!(answered.await.unwrap()["Ok"]["answer"], "yes");
     }
 
     fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {
