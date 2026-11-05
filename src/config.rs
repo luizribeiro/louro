@@ -121,6 +121,8 @@ pub struct Irc {
     /// Whether it may change its own nick, away status and realname.
     pub identity: bool,
     pub quit: bool,
+    /// Accounts it may `ask` a question and take the answer from; `account:NAME` entries only.
+    pub ask: Selector,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -308,15 +310,22 @@ impl Selector {
     /// account (case-insensitively, no glob); other entries keep matching `nick`, as `matches`
     /// does. A sender with no account never matches an `account:` entry.
     pub fn matches_sender(&self, nick: &str, account: Option<&str>) -> bool {
-        let by_account = account.is_some_and(|account| {
-            matches!(self, Self::Only(patterns) if patterns.iter().any(|pattern| {
-                pattern
-                    .strip_prefix("account:")
-                    .is_some_and(|wanted| wanted.eq_ignore_ascii_case(account))
-            }))
-        });
-        by_account || self.matches(nick)
+        self.matches_account(account) || self.matches(nick)
     }
+
+    /// Whether an `account:NAME` entry names `account`; no account never matches.
+    pub fn matches_account(&self, account: Option<&str>) -> bool {
+        account.is_some_and(|account| {
+            matches!(self, Self::Only(patterns) if patterns.iter().any(|pattern| {
+                account_name(pattern).is_some_and(|wanted| wanted.eq_ignore_ascii_case(account))
+            }))
+        })
+    }
+}
+
+/// The account an `account:NAME` entry names.
+fn account_name(entry: &str) -> Option<&str> {
+    entry.strip_prefix("account:")
 }
 
 fn glob_matches(pattern: &str, name: &str) -> bool {
@@ -390,6 +399,7 @@ fn parse(text: &str) -> Result<Config, String> {
     if let Selector::Only(send) = &irc.send {
         within_join(irc, send, "irc.send")?;
     }
+    accounts_only(&irc.ask, "irc.ask")?;
     if config
         .filter
         .as_ref()
@@ -423,6 +433,22 @@ fn without_value(message: &str) -> String {
         }
         _ => message.to_owned(),
     }
+}
+
+/// A grant whose answer the bot acts on, like `irc.ask`, trusts only what the server verifies.
+fn accounts_only(selector: &Selector, setting: &str) -> Result<(), String> {
+    let valid = match selector {
+        Selector::All(all) => !all,
+        Selector::Only(entries) => entries
+            .iter()
+            .all(|entry| account_name(entry).is_some_and(|name| !name.is_empty())),
+    };
+    if valid {
+        return Ok(());
+    }
+    Err(format!(
+        "{setting} takes only account:NAME entries, since a nick can change hands"
+    ))
 }
 
 /// The bot can't read or speak where it may not sit.
@@ -474,6 +500,7 @@ mod tests {
             &irc.typing,
             &irc.topic,
             &irc.watch,
+            &irc.ask,
         ] {
             assert!(!selector.matches("#bots") && !selector.matches("maria"));
         }
@@ -571,6 +598,28 @@ mod tests {
             let refusal = refusal(&format!("{MINIMAL}{settings}"));
             assert!(refusal.starts_with(position), "{refusal}");
             assert!(!refusal.contains(value), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn irc_ask_refuses_anything_but_account_entries() {
+        for ask in [
+            "true",
+            r#"["luiz"]"#,
+            r#"["account:luiz", "maria"]"#,
+            r#"["account:"]"#,
+        ] {
+            let refusal = refusal(&format!("{MINIMAL}[grants]\nirc.ask = {ask}"));
+            assert_eq!(
+                refusal, "irc.ask takes only account:NAME entries, since a nick can change hands",
+                "{ask}"
+            );
+        }
+        for ask in ["false", r#"["account:luiz"]"#] {
+            assert!(
+                parse(&format!("{MINIMAL}[grants]\nirc.ask = {ask}")).is_ok(),
+                "{ask}"
+            );
         }
     }
 

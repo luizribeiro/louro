@@ -1505,7 +1505,8 @@ mod tests {
                     "list": true,
                     "watch": ["luiz", "user*"],
                     "identity": true,
-                    "quit": false
+                    "quit": false,
+                    "ask": false
                 }},
                 "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s"},
                 "filter": false,
