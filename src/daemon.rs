@@ -666,7 +666,7 @@ impl<I: Irc> Daemon<I> {
             return Ok(());
         }
         if let Ok(op @ Op::Ask(_)) = op {
-            let result = self.ask(op).await;
+            let result = self.ask(op, conn).await;
             return write_line(conn, &result).await;
         }
         let quit = matches!(op, Ok(Op::Quit {}));
@@ -791,7 +791,9 @@ impl<I: Irc> Daemon<I> {
 
     /// Sends `op`'s question and waits for its target's answer or the timeout, whichever is
     /// first.
-    async fn ask(&self, mut op: Op) -> Result<Value> {
+    ///
+    /// The caller leaving, by closing `caller` or writing to it, closes the ask too.
+    async fn ask(&self, mut op: Op, caller: &mut BufReader<UnixStream>) -> Result<Value> {
         let reserved = self.admit(&mut op).await?;
         let Op::Ask(question) = &op else {
             unreachable!("serve passes only asks")
@@ -802,7 +804,15 @@ impl<I: Irc> Daemon<I> {
         }
         let (id, mut answered) = posted?;
         let timeout = Duration::from_secs(question.timeout);
-        let answer = match time::timeout(timeout, &mut answered).await {
+        let waited = tokio::select! {
+            waited = time::timeout(timeout, &mut answered) => waited,
+            _ = read_line::<Value>(caller) => {
+                self.close(&question.target, &id).await;
+                // Nobody reads this: the caller is gone.
+                return Err(Error::new(Code::Usage, "the caller left, so the ask was closed"));
+            }
+        };
+        let answer = match waited {
             Ok(answer) => answer.ok(),
             Err(_) if self.close(&question.target, &id).await => None,
             Err(_) => answered.try_recv().ok(),
@@ -3128,6 +3138,21 @@ cat"#,
         time::sleep(Duration::from_millis(100)).await;
         let sent = daemon.sent_texts();
         assert!(sent[1].contains("drop the db?"), "{sent:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_ask_whose_caller_leaves_closes_and_tells_its_target() {
+        let daemon = launch_asking(Limits::default());
+        let (reply, id) = daemon.ask(yes_or_no("drop the cache?")).await;
+        reply.abort();
+        time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(daemon.sent_texts()[1..], [format!("(ask {id} closed)")]);
+
+        let late = format!("!yes {id}");
+        daemon.say(dm(from_luiz(&late))).await;
+        let (_, waited) = daemon.wait(0).await;
+        assert_eq!(texts(&waited), [late.as_str()]);
+        assert!(daemon.call(send_request("luiz", "never mind")).await["Ok"].is_object());
     }
 
     #[tokio::test]
