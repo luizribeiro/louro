@@ -398,25 +398,27 @@ fn a_reply_that_is_not_from_louro_is_never_echoed() {
 }
 
 #[test]
-fn wait_reports_not_connected_when_louro_stops_mid_wait() {
-    let dir = tempdir().unwrap();
-    let socket = dir.path().join("louro.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let daemon = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let mut request = String::new();
-        BufReader::new(stream).read_line(&mut request).unwrap();
-    });
+fn wait_and_ask_report_not_connected_when_louro_stops_while_they_block() {
+    for args in [vec!["wait"], vec!["ask", "luiz", "deploy it?"]] {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("louro.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let daemon = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream).read_line(&mut request).unwrap();
+        });
 
-    louro()
-        .env("LOURO_SOCKET", &socket)
-        .arg("wait")
-        .assert()
-        .failure()
-        .code(4)
-        .stdout(predicate::str::contains(r#""code":"not_connected""#))
-        .stdout(predicate::str::contains("louro stopped"));
-    daemon.join().unwrap();
+        louro()
+            .env("LOURO_SOCKET", &socket)
+            .args(&args)
+            .assert()
+            .failure()
+            .code(4)
+            .stdout(predicate::str::contains(r#""code":"not_connected""#))
+            .stdout(predicate::str::contains("louro stopped"));
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
