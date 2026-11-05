@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::net::unix::UCred;
 
 use crate::config::absolute;
 use crate::error::{Code, Error, Result};
@@ -231,6 +232,10 @@ impl Connection {
         Ok(Self {
             socket: BufReader::new(stream),
         })
+    }
+
+    pub fn peer_cred(&self) -> io::Result<UCred> {
+        self.socket.get_ref().peer_cred()
     }
 
     pub async fn request(&mut self, op: Op) -> Result<Value> {

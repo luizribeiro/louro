@@ -1,15 +1,18 @@
 //! `louro connect`: the operator starts the daemon that holds the IRC connection.
 
 use std::env;
+use std::fmt::Display;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{self, ExitCode, Stdio};
+use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
+use rustix::process::{self, Pid, Signal};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::config::{self, Config, Server};
+use crate::config::{self, Server};
 use crate::daemon;
 use crate::error::{Code, Error, Result};
 use crate::irc::Secret;
@@ -36,6 +39,10 @@ pub struct Args {
     /// Run in this terminal instead of in the background
     #[arg(long)]
     pub foreground: bool,
+    /// Stop the louro running on this socket (SIGTERM), once the config and password are read,
+    /// then start this one in its place
+    #[arg(long)]
+    pub replace: bool,
     /// Read the password from stdin; how `connect` hands it to its background daemon
     #[arg(long, hide = true)]
     pub password_stdin: bool,
@@ -53,14 +60,20 @@ impl Args {
         if let Some(filter) = &config.filter {
             filter.check_program()?;
         }
-        if is_running(config.server.socket.as_deref()).await {
+        let socket = config.server.socket.as_deref();
+        let running = Connection::connect(socket).await.ok();
+        if running.is_some() && !self.replace {
             return Err(Error::new(Code::SessionExists, "louro is already running")
-                .with_hint("run `louro quit` first"));
-        }
-        if !self.foreground {
-            return Ok(output::emit(background(&config)));
+                .with_hint("run `louro connect --replace`, or `louro quit` first"));
         }
         let password = read_password(self.password_stdin, &config.server)?;
+        if let Some(running) = running {
+            stop(&running)?;
+            wait_until_stopped(socket).await?;
+        }
+        if !self.foreground {
+            return Ok(output::emit(background(password)));
+        }
         if let Err(err) = daemon::start(config, password).await?.await {
             eprintln!("louro: {err}");
             return Ok(ExitCode::FAILURE);
@@ -83,17 +96,43 @@ fn read_password(password_stdin: bool, server: &Server) -> Result<Option<Secret>
     source.map(|source| password::read(&source)).transpose()
 }
 
-/// A daemon of another socket version still counts: it accepts connections but refuses requests.
-async fn is_running(socket: Option<&Path>) -> bool {
-    Connection::connect(socket).await.is_ok()
+/// Works on a daemon of any socket version: it only needs the connection's peer credentials.
+fn stop(running: &Connection) -> Result<()> {
+    let peer = running.peer_cred().map_err(cannot_replace)?;
+    if peer.uid() != process::getuid().as_raw() {
+        return Err(cannot_replace("it runs as another user"));
+    }
+    let pid = peer
+        .pid()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| cannot_replace("the socket doesn't say which process it is"))?;
+    process::kill_process(pid, Signal::TERM).map_err(cannot_replace)
 }
 
-/// Re-runs this binary as `connect --foreground` in its own process group,
-/// hands it the password on stdin, and relays the line it prints once ready.
-fn background(config: &Config) -> Result<Value> {
-    let password = read_password(false, &config.server)?;
-    let mut daemon = process::Command::new(env::current_exe().map_err(|err| cannot_start(&err))?)
-        .args(env::args_os().skip(1))
+/// The daemon removes its socket last, once its IRC connection has quit.
+async fn wait_until_stopped(socket: Option<&Path>) -> Result<()> {
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if Connection::connect(socket).await.is_err() {
+            return Ok(());
+        }
+    }
+    Err(cannot_replace("it didn't stop within 10s"))
+}
+
+fn cannot_replace(why: impl Display) -> Error {
+    Error::new(
+        Code::SessionExists,
+        format!("can't replace the running louro: {why}"),
+    )
+}
+
+/// Re-runs this binary as `connect --foreground` in its own process group, without `--replace`
+/// since that already happened, hands it the password on stdin, and relays the line it prints once
+/// ready.
+fn background(password: Option<Secret>) -> Result<Value> {
+    let mut daemon = Command::new(env::current_exe().map_err(|err| cannot_start(&err))?)
+        .args(env::args_os().skip(1).filter(|arg| arg != "--replace"))
         .arg("--foreground")
         .args(password.is_some().then_some("--password-stdin"))
         .stdin(Stdio::piped())

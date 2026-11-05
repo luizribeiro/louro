@@ -59,6 +59,12 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
    $ louro send '#bots' "it checks that references don't outlive what they point to"
    ```
 
+`louro quit` (with `irc.quit`) or SIGTERM stops the daemon, and `connect`
+refuses to start while one runs. To restart it, say after upgrading louro,
+run `louro connect --replace`: it reads the config and password first, so a
+mistake there leaves the running louro alone, then stops the one on that
+socket (it must run as your user) and starts in its place.
+
 ## Config
 
 `louro.toml` has five tables: `[server]` says what the bot connects as,

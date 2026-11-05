@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::process::{self, Child, Stdio};
 use std::thread;
 
 use assert_cmd::Command;
@@ -187,7 +188,7 @@ fn connect_refuses_when_louro_is_already_running_even_another_version() {
         .failure()
         .code(3)
         .stdout(predicate::str::contains(r#""code":"session_exists""#))
-        .stdout(predicate::str::contains("run `louro quit` first"));
+        .stdout(predicate::str::contains("louro connect --replace"));
     daemon.join().unwrap();
     assert!(socket.exists());
 }
@@ -534,4 +535,115 @@ fn the_daemon_works_from_relative_paths_and_runs_filters_from_the_root() {
         thread::sleep(std::time::Duration::from_millis(100));
     }
     assert!(!socket.exists());
+}
+
+/// A config for the fake IRC server that lets the agent quit.
+fn quittable_config(dir: &Path) -> PathBuf {
+    let path = config(dir, fake_irc_server(), "");
+    fs::write(
+        &path,
+        fs::read_to_string(&path).unwrap() + "irc.quit = true\n",
+    )
+    .unwrap();
+    path
+}
+
+/// Runs `connect --foreground` with `args` and returns once it says it's connected.
+fn foreground_daemon(socket: &Path, config: &Path, args: &[&str]) -> Child {
+    let mut daemon = process::Command::new(env!("CARGO_BIN_EXE_louro"))
+        .arg("connect")
+        .arg("--foreground")
+        .arg("--socket")
+        .arg(socket)
+        .arg("--config")
+        .arg(config)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    BufReader::new(daemon.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert!(ready.contains(r#""nick":"louro""#), "{ready}");
+    daemon
+}
+
+fn client(socket: &Path, command: &str) -> Command {
+    let mut louro = louro();
+    louro.env("LOURO_SOCKET", socket).arg(command);
+    louro
+}
+
+#[test]
+fn connect_replace_stops_the_running_louro_and_takes_its_place() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let config = quittable_config(dir.path());
+    let mut first = foreground_daemon(&socket, &config, &[]);
+
+    let mut second = foreground_daemon(&socket, &config, &["--replace"]);
+    assert!(first.wait().unwrap().success());
+    connect(&socket, &config)
+        .arg("--replace")
+        .assert()
+        .success();
+    assert!(second.wait().unwrap().success());
+
+    client(&socket, "status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""connected":true"#));
+    client(&socket, "quit").assert().success();
+}
+
+#[test]
+fn connect_replace_with_nothing_running_just_connects() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let config = quittable_config(dir.path());
+
+    connect(&socket, &config)
+        .arg("--replace")
+        .assert()
+        .success();
+    client(&socket, "status").assert().success();
+    client(&socket, "quit").assert().success();
+}
+
+#[test]
+fn connect_replace_leaves_louro_running_when_the_config_or_password_is_broken() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let config = quittable_config(dir.path());
+    let mut running = foreground_daemon(&socket, &config, &[]);
+    let broken_config = dir.path().join("broken.toml");
+    fs::write(&broken_config, "[server\n").unwrap();
+    let missing_password = dir.path().join("missing.toml");
+    let missing_file = dir.path().join("louro.pass");
+    fs::write(
+        &missing_password,
+        fs::read_to_string(&config).unwrap().replacen(
+            "[server]\n",
+            &format!(
+                "[server]\npassword_file = {:?}\n",
+                missing_file.to_str().unwrap()
+            ),
+            1,
+        ),
+    )
+    .unwrap();
+
+    for broken in [broken_config, missing_password] {
+        connect(&socket, &broken)
+            .arg("--replace")
+            .assert()
+            .failure()
+            .stdout(predicate::str::contains(r#""error""#));
+        assert!(running.try_wait().unwrap().is_none());
+    }
+    client(&socket, "status").assert().success();
+    client(&socket, "quit").assert().success();
+    assert!(running.wait().unwrap().success());
 }
