@@ -163,13 +163,16 @@ fn connect_says_the_same_for_a_missing_or_an_unreadable_config() {
 }
 
 #[test]
-fn connect_refuses_when_louro_is_already_running() {
+fn connect_refuses_when_louro_is_already_running_even_another_version() {
     let dir = tempdir().unwrap();
     let socket = dir.path().join("louro.sock");
-    let daemon = fake_daemon_expecting_one_request(
-        &socket,
-        json!({"Ok": {"connected": true, "nick": "louro", "channels": ["#bots"]}}),
-    );
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mismatch =
+            json!({"Err": {"code": "version_mismatch", "message": "different protocol versions"}});
+        let _ = writeln!(stream, "{mismatch}");
+    });
     let config = config(
         dir.path(),
         closed_port(),
@@ -186,6 +189,7 @@ fn connect_refuses_when_louro_is_already_running() {
         .stdout(predicate::str::contains(r#""code":"session_exists""#))
         .stdout(predicate::str::contains("run `louro quit` first"));
     daemon.join().unwrap();
+    assert!(socket.exists());
 }
 
 #[test]

@@ -15,7 +15,7 @@ use crate::error::{Code, Error, Result};
 use crate::irc::Secret;
 use crate::output;
 use crate::password::{self, Source};
-use crate::socket::{Connection, Op};
+use crate::socket::Connection;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -83,11 +83,9 @@ fn read_password(password_stdin: bool, server: &Server) -> Result<Option<Secret>
     source.map(|source| password::read(&source)).transpose()
 }
 
+/// A daemon of another socket version still counts: it accepts connections but refuses requests.
 async fn is_running(socket: Option<&Path>) -> bool {
-    let Ok(mut louro) = Connection::connect(socket).await else {
-        return false;
-    };
-    louro.request(Op::Status {}).await.is_ok()
+    Connection::connect(socket).await.is_ok()
 }
 
 /// Re-runs this binary as `connect --foreground` in its own process group,
