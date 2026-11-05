@@ -600,15 +600,21 @@ impl<I: Irc> Daemon<I> {
     }
 
     async fn handle(&self, mut op: Op) -> Result<Value> {
-        self.check_shown_secret(&mut op)?;
-        self.check_grants(&op).await?;
-        self.prepare(&mut op)?;
-        let reserved = self.reserve(&op)?;
+        let reserved = self.admit(&mut op).await?;
         let result = self.filter_and_carry_out(&mut op).await;
         if result.is_err() {
             self.release(&op, reserved);
         }
         result
+    }
+
+    /// Every check before an op's text goes anywhere; the rate-limit slots it takes are released
+    /// with [`Self::release`] if the op then fails.
+    async fn admit(&self, op: &mut Op) -> Result<Instant> {
+        self.check_shown_secret(op)?;
+        self.check_grants(op).await?;
+        self.prepare(op)?;
+        self.reserve(op)
     }
 
     fn check_shown_secret(&self, op: &mut Op) -> Result<()> {
