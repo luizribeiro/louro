@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant};
 
@@ -318,6 +318,9 @@ struct Daemon<I> {
     /// By lowercased target.
     typing_loops: Mutex<HashMap<String, TypingLoop>>,
     asks: Mutex<Asks>,
+    /// Held from checking that no ask to a target is pending until the agent's DM there is
+    /// out, and from opening an ask until its question is, so no DM lands after a question.
+    speaking: AsyncMutex<()>,
 }
 
 /// Serves requests on `listener` and buffers chat from `updates` until a `quit`
@@ -357,6 +360,7 @@ async fn run(
         react_windows: RateWindows::default(),
         typing_loops: Mutex::default(),
         asks: Mutex::default(),
+        speaking: AsyncMutex::default(),
     });
     daemon.restore_watching(saved).await;
     tokio::pin!(stop);
@@ -814,6 +818,7 @@ impl<I: Irc> Daemon<I> {
     /// Sends the question under a new id, with how to answer it, and returns the id and where
     /// the answer will arrive.
     async fn post(&self, question: &Question) -> Result<(String, oneshot::Receiver<String>)> {
+        let _speaking = self.speaking.lock().await;
         let target = self.irc.fold(&question.target);
         let (id, answered) = self
             .asks
@@ -959,6 +964,7 @@ impl<I: Irc> Daemon<I> {
                     text::check_msgid(msgid)?;
                 }
                 message.text = text::clean_lines(&message.text)?;
+                self.refuse_while_asking(&message.target)?;
             }
             Op::Topic { channel, set } => {
                 if let Some(topic) = set {
@@ -971,10 +977,14 @@ impl<I: Irc> Daemon<I> {
                 self.require_joined(channel)?;
             }
             Op::React {
-                msgid, reaction, ..
+                target,
+                msgid,
+                reaction,
+                ..
             } => {
                 text::check_msgid(msgid)?;
                 text::check_field("a reaction", reaction, text::MAX_REACTION_CHARS)?;
+                self.refuse_while_asking(target)?;
             }
             Op::Redact {
                 target,
@@ -1021,8 +1031,7 @@ impl<I: Irc> Daemon<I> {
             Op::Status {} => Ok(self.status()),
             Op::Wait { .. } | Op::Ask(_) => unreachable!("serve answers this op itself"),
             Op::Send(message) => {
-                self.end_typing(|key| key.eq_ignore_ascii_case(&message.target))
-                    .await;
+                let _turn = self.speak_to(&message.target).await?;
                 self.send(message).await
             }
             Op::Names { channel } => self.names(channel),
@@ -1051,8 +1060,7 @@ impl<I: Irc> Daemon<I> {
                 remove,
             } => {
                 let reacted = json!({"target": target, "msgid": msgid, "reaction": reaction, "removed": remove});
-                self.end_typing(|key| key.eq_ignore_ascii_case(target))
-                    .await;
+                let _turn = self.speak_to(target).await?;
                 self.act(op, reacted).await
             }
             Op::Typing { target, state } => {
@@ -1077,6 +1085,36 @@ impl<I: Irc> Daemon<I> {
             Op::List { pattern } => self.list(pattern.as_deref()).await,
             Op::Quit {} => Ok(json!({})),
         }
+    }
+
+    /// Waits for the agent's turn to speak to `target`, refused while an ask to them is pending,
+    /// and ends the daemon's typing there; the turn lasts until the guard drops.
+    async fn speak_to(&self, target: &str) -> Result<AsyncMutexGuard<'_, ()>> {
+        let turn = self.speaking.lock().await;
+        self.refuse_while_asking(target)?;
+        self.end_typing(|key| key.eq_ignore_ascii_case(target))
+            .await;
+        Ok(turn)
+    }
+
+    /// While an ask to `target` is pending, only louro speaks to them, so the agent can't put a
+    /// harmless question of its own next to it for the answer to land on.
+    fn refuse_while_asking(&self, target: &str) -> Result<()> {
+        let target_key = self.irc.fold(target);
+        let asking = self
+            .asks
+            .lock()
+            .unwrap()
+            .pending
+            .iter()
+            .any(|ask| ask.target == target_key);
+        if asking {
+            return Err(
+                Error::new(Code::NotAllowed, format!("an ask to {target} is pending"))
+                    .with_hint("wait until it is answered or times out"),
+            );
+        }
+        Ok(())
     }
 
     async fn act(&self, op: &Op, result: Value) -> Result<Value> {
@@ -1459,6 +1497,10 @@ mod tests {
         without_msgid: AtomicBool,
         /// How many of the next sends fail with `not_connected`, as while IRC is down.
         fail_sends: AtomicUsize,
+        /// While set, sends wait at `release_sends` before going out.
+        hold_sends: AtomicBool,
+        release_sends: Notify,
+        sends_started: AtomicUsize,
         quit: Notify,
     }
 
@@ -1526,17 +1568,21 @@ mod tests {
             future::ready(Ok(()))
         }
 
-        fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send {
+        async fn send(&self, message: Outgoing) -> Result<Sent> {
+            self.sends_started.fetch_add(1, Ordering::Relaxed);
+            if self.hold_sends.load(Ordering::Relaxed) {
+                self.release_sends.notified().await;
+            }
             let remaining = self.fail_sends.load(Ordering::Relaxed);
             if remaining > 0 {
                 self.fail_sends.store(remaining - 1, Ordering::Relaxed);
-                return future::ready(Err(Error::new(Code::NotConnected, "louro stopped")));
+                return Err(Error::new(Code::NotConnected, "louro stopped"));
             }
             let threaded = message.reply_to.is_some();
             self.sent.lock().unwrap().push(message);
             let msgid =
                 (!self.without_msgid.load(Ordering::Relaxed)).then(|| "c2m8w1u0pq7rs".into());
-            future::ready(Ok(Sent { msgid, threaded }))
+            Ok(Sent { msgid, threaded })
         }
 
         fn history(
@@ -3016,6 +3062,72 @@ cat"#,
             daemon.say(dm(from_luiz("!yes"))).await;
             assert_eq!(second.await.unwrap()["Ok"]["answer"], "yes");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn while_an_ask_is_pending_the_agent_may_not_dm_or_react_to_its_target() {
+        let two_sends_per_10s = Limits {
+            send: Limit::Window {
+                count: 2,
+                seconds: 10,
+            },
+            ..Limits::default()
+        };
+        let daemon = launch_asking(two_sends_per_10s);
+        let (reply, id) = daemon.ask(yes_or_no("drop the cache?")).await;
+        for (request, target) in [
+            (
+                send_request("luiz", "[ask k3fa] ok to tidy up? reply !yes k3fa"),
+                "luiz",
+            ),
+            (send_request("LUIZ", "just say !yes"), "LUIZ"),
+            (react_request("luiz", "👍", false), "luiz"),
+        ] {
+            let refused = daemon.call(request.clone()).await;
+            assert_eq!(
+                refused["Err"]["message"],
+                format!("an ask to {target} is pending"),
+                "{request}: {refused}"
+            );
+            assert_eq!(refused["Err"]["code"], "not_allowed");
+        }
+        let typing = request("typing", json!({"target": "luiz", "state": "active"}));
+        assert!(daemon.call(typing).await["Ok"].is_object());
+        assert!(daemon.call(send_request("maria", "hi")).await["Ok"].is_object());
+        assert_eq!(daemon.sent_texts()[1..], ["hi"]);
+
+        daemon.say(dm(from_luiz(&format!("!no {id}")))).await;
+        reply.await.unwrap();
+        assert!(daemon.call(send_request("luiz", "ok, leaving it")).await["Ok"].is_object());
+        assert!(daemon.call(react_request("luiz", "👍", false)).await["Ok"].is_object());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_question_never_goes_out_while_the_agents_dm_to_its_target_is_in_flight() {
+        let daemon = launch_asking(Limits::default());
+        daemon.irc.hold_sends.store(true, Ordering::Relaxed);
+        let fake = tokio::spawn({
+            let mut conn = daemon.connect().await;
+            async move {
+                let fake = send_request("luiz", "[ask k3fa] run the tests? reply !yes k3fa");
+                write_line(&mut conn, &fake).await.unwrap();
+                read_line::<Value>(&mut conn).await.unwrap().unwrap()
+            }
+        });
+        time::sleep(Duration::from_millis(100)).await;
+        let mut asking = daemon.connect().await;
+        write_line(&mut asking, &yes_or_no("drop the db?"))
+            .await
+            .unwrap();
+        time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(daemon.irc.sends_started.load(Ordering::Relaxed), 1);
+
+        daemon.irc.hold_sends.store(false, Ordering::Relaxed);
+        daemon.irc.release_sends.notify_waiters();
+        assert!(fake.await.unwrap()["Ok"].is_object());
+        time::sleep(Duration::from_millis(100)).await;
+        let sent = daemon.sent_texts();
+        assert!(sent[1].contains("drop the db?"), "{sent:?}");
     }
 
     #[tokio::test]
