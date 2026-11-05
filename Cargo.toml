@@ -8,6 +8,7 @@ repository = "https://github.com/luizribeiro/louro"
 description = "Let any coding agent act as an IRC bot"
 
 [dependencies]
+getrandom = "0.4.3"
 humantime = "2.4.0"
 # cargo-deny counts a git dependency without a version as a wildcard.
 papo = { version = "=0.0.0", git = "https://github.com/luizribeiro/papo", rev = "3a09eda902ec634f851a306fbbace284c7ff6073" }

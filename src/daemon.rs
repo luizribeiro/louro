@@ -49,6 +49,9 @@ const TYPING_REFRESH: Duration = Duration::from_secs(3);
 const MAX_ASK_SECS: u64 = 60 * 60;
 const MAX_CHOICES: usize = 5;
 const MAX_CHOICE_CHARS: usize = 16;
+/// Ask ids leave out characters that look alike, like `l` and `1`.
+const ASK_ID_CHARS: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+const ASK_ID_LEN: usize = 4;
 
 /// The bot's own recent messages as (lowercased target, msgid), the only ones `redact` removes.
 #[derive(Default)]
@@ -105,6 +108,44 @@ impl Watchlist {
                 )
             })
     }
+}
+
+/// The ids of the questions `ask` sent and still waits on.
+#[derive(Default)]
+struct Asks {
+    pending: Vec<String>,
+}
+
+impl Asks {
+    /// Records a question under a fresh random id, unique among pending ones, and returns it.
+    fn open(&mut self) -> Result<String> {
+        let id = loop {
+            let id = random_id()?;
+            if !self.pending.contains(&id) {
+                break id;
+            }
+        };
+        self.pending.push(id.clone());
+        Ok(id)
+    }
+
+    fn close(&mut self, id: &str) {
+        self.pending.retain(|pending| pending != id);
+    }
+}
+
+/// An id unpredictable to the agent, so a question it posts itself can't carry a real ask's.
+fn random_id() -> Result<String> {
+    let mut random = getrandom::u32()
+        .map_err(|err| Error::new(Code::Internal, format!("can't pick a random ask id: {err}")))?
+        as usize;
+    Ok((0..ASK_ID_LEN)
+        .map(|_| {
+            let digit = ASK_ID_CHARS[random % ASK_ID_CHARS.len()];
+            random /= ASK_ID_CHARS.len();
+            char::from(digit)
+        })
+        .collect())
 }
 
 /// The daemon showing typing to `target` on the agent's behalf, stopped when dropped.
@@ -187,6 +228,7 @@ struct Daemon<I> {
     react_windows: RateWindows,
     /// By lowercased target.
     typing_loops: Mutex<HashMap<String, TypingLoop>>,
+    asks: Mutex<Asks>,
 }
 
 /// Serves requests on `listener` and buffers chat from `updates` until a `quit`
@@ -225,6 +267,7 @@ async fn run(
         send_total: RateWindows::default(),
         react_windows: RateWindows::default(),
         typing_loops: Mutex::default(),
+        asks: Mutex::default(),
     });
     daemon.restore_watching(saved).await;
     tokio::pin!(stop);
@@ -503,6 +546,10 @@ impl<I: Irc> Daemon<I> {
             }
             return Ok(());
         }
+        if let Ok(op @ Op::Ask(_)) = op {
+            let result = self.ask(op).await;
+            return write_line(conn, &result).await;
+        }
         let quit = matches!(op, Ok(Op::Quit {}));
         let result = match op {
             Ok(op) => self.handle(op).await,
@@ -621,6 +668,54 @@ impl<I: Irc> Daemon<I> {
         self.check_grants(op).await?;
         self.prepare(op)?;
         self.reserve(op)
+    }
+
+    /// Sends `op`'s question and waits for its target's answer or the timeout, whichever is
+    /// first.
+    async fn ask(&self, mut op: Op) -> Result<Value> {
+        let reserved = self.admit(&mut op).await?;
+        let Op::Ask(question) = &op else {
+            unreachable!("serve passes only asks")
+        };
+        let posted = self.post(question).await;
+        if posted.is_err() {
+            self.release(&op, reserved);
+        }
+        let id = posted?;
+        time::sleep(Duration::from_secs(question.timeout)).await;
+        self.close(&question.target, &id).await;
+        Ok(json!({
+            "id": id,
+            "target": question.target,
+            "answer": null,
+            "timed_out": true,
+        }))
+    }
+
+    /// Sends the question under a new id, with how to answer it, and returns the id.
+    async fn post(&self, question: &Question) -> Result<String> {
+        let id = self.asks.lock().unwrap().open()?;
+        let answers: Vec<String> = question
+            .choices
+            .iter()
+            .map(|choice| format!("!{choice} {id}"))
+            .collect();
+        let text = format!("[ask {id}] {}\nreply {}", question.text, or_list(&answers));
+        self.end_typing(|key| key.eq_ignore_ascii_case(&question.target))
+            .await;
+        if let Err(error) = self.irc.send(from_louro(&question.target, text)).await {
+            self.asks.lock().unwrap().close(&id);
+            return Err(error);
+        }
+        Ok(id)
+    }
+
+    /// Closes the ask `id` and tells its target so.
+    async fn close(&self, target: &str, id: &str) {
+        self.asks.lock().unwrap().close(id);
+        let notice = from_louro(target, format!("(ask {id} closed)"));
+        // The caller gets its result whether or not the notice gets out.
+        let _ = self.irc.send(notice).await;
     }
 
     fn check_shown_secret(&self, op: &mut Op) -> Result<()> {
@@ -796,8 +891,7 @@ impl<I: Irc> Daemon<I> {
     async fn carry_out(&self, op: &Op) -> Result<Value> {
         match op {
             Op::Status {} => Ok(self.status()),
-            Op::Wait { .. } => unreachable!("serve answers wait itself"),
-            Op::Ask(_) => Err(Error::new(Code::Unsupported, "louro can't ask yet")),
+            Op::Wait { .. } | Op::Ask(_) => unreachable!("serve answers this op itself"),
             Op::Send(message) => {
                 self.end_typing(|key| key.eq_ignore_ascii_case(&message.target))
                     .await;
@@ -1120,6 +1214,24 @@ fn check_choices(choices: &[String]) -> Result<()> {
         ),
     )
     .with_hint("like --choices yes,no"))
+}
+
+/// `a`, `a or b`, `a, b or c`.
+fn or_list(options: &[String]) -> String {
+    match options.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => options.join(""),
+    }
+}
+
+/// A DM louro itself sends, like an ask's question.
+fn from_louro(target: &str, text: String) -> Outgoing {
+    Outgoing {
+        target: target.into(),
+        kind: Kind::Message,
+        text,
+        reply_to: None,
+    }
 }
 
 fn typing(target: &str, state: Typing) -> Op {
@@ -2474,7 +2586,8 @@ cat"#,
         }
     }
 
-    /// A daemon that may ask luiz, logged in as luiz, and may speak in #bots.
+    /// A daemon that may ask luiz, logged in as luiz, may speak in #bots, and shows typing to
+    /// whoever DMs it.
     fn launch_asking(limits: Limits) -> Running {
         let grants = toml::from_str(
             r##"
@@ -2483,11 +2596,16 @@ cat"#,
             irc.dm.read = ["account:luiz", "maria"]
             irc.dm.send = ["account:luiz", "maria"]
             irc.react = ["account:luiz", "maria"]
+            irc.typing = ["account:luiz"]
             irc.ask = ["account:luiz"]
             "##,
         )
         .unwrap();
-        let daemon = launch_with(grants, limits);
+        let typing = toml::from_str(&format!(
+            "after_wait = \"dms\"\ntimeout = \"{TYPING_TIMEOUT_SECS}s\""
+        ))
+        .unwrap();
+        let daemon = launch_in(tempfile::tempdir().unwrap(), grants, limits, None, typing);
         daemon.irc.whois_says("luiz", Some("luiz"));
         daemon
     }
@@ -2503,6 +2621,13 @@ cat"#,
 
     fn yes_or_no(text: &str) -> Value {
         ask_request(text, &["yes", "no"], ASK_SECS)
+    }
+
+    impl Running {
+        fn sent_texts(&self) -> Vec<String> {
+            let sent = self.irc.sent.lock().unwrap();
+            sent.iter().map(|message| message.text.clone()).collect()
+        }
     }
 
     #[tokio::test]
@@ -2546,7 +2671,69 @@ cat"#,
             assert_eq!(reply["Err"]["code"], code, "{request}: {reply}");
             assert!(!reply.to_string().contains(PASSWORD));
         }
-        assert!(daemon.irc.sent.lock().unwrap().is_empty());
+        assert!(daemon.sent_texts().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_ask_times_out_and_tells_the_target_it_closed() {
+        let daemon = launch_asking(Limits::default());
+        let started = Instant::now();
+        let reply = daemon
+            .call(ask_request(
+                "run `cargo clean`?\nit frees 2 GB",
+                &["yes", "no", "later"],
+                ASK_SECS,
+            ))
+            .await;
+        assert_eq!(started.elapsed(), Duration::from_secs(ASK_SECS));
+        let id = reply["Ok"]["id"].as_str().unwrap();
+        assert_eq!(
+            reply,
+            json!({"Ok": {"id": id, "target": "luiz", "answer": null, "timed_out": true}})
+        );
+        assert_eq!(id.len(), ASK_ID_LEN);
+        assert!(id.bytes().all(|byte| ASK_ID_CHARS.contains(&byte)), "{id}");
+        assert_eq!(
+            daemon.sent_texts(),
+            [
+                format!(
+                    "[ask {id}] run `cargo clean`?\nit frees 2 GB\nreply !yes {id}, !no {id} or !later {id}"
+                ),
+                format!("(ask {id} closed)"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ask_counts_against_its_targets_send_limit() {
+        let daemon = launch_asking(one_send_per_10s());
+        assert!(daemon.call(send_request("luiz", "build done")).await["Ok"].is_object());
+        let reply = daemon.call(yes_or_no("deploy it?")).await;
+        assert_eq!(reply["Err"]["code"], "rate_limited", "{reply}");
+        assert_eq!(daemon.sent_texts(), ["build done"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_ask_ends_the_daemons_typing_to_its_target_first() {
+        let daemon = launch_asking(Limits::default());
+        daemon
+            .say(dm(from_luiz("can you clean up the build?")))
+            .await;
+        daemon.wait_and_ack(5).await;
+        daemon.call(yes_or_no("run `cargo clean`?")).await;
+        assert_eq!(
+            daemon.typing_acts().await,
+            typed(&[("luiz", "active"), ("luiz", "done")])
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ask_whose_question_never_reaches_irc_keeps_no_send_slot() {
+        let daemon = launch_asking(one_send_per_10s());
+        daemon.irc.fail_sends.store(1, Ordering::Relaxed);
+        let reply = daemon.call(yes_or_no("deploy it?")).await;
+        assert_eq!(reply["Err"]["code"], "not_connected", "{reply}");
+        assert!(daemon.call(send_request("luiz", "build done")).await["Ok"].is_object());
     }
 
     fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {
