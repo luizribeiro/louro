@@ -1,7 +1,6 @@
 use std::env;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -310,42 +309,23 @@ fn louro_stopped(err: impl Display) -> Error {
 /// `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`. The agent-facing
 /// commands take no path, so the agent can't point louro at another socket.
 pub fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
-    absolute(&chosen_socket_path(explicit)?)
+    absolute(&chosen_socket_path(explicit))
 }
 
-fn chosen_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
+fn chosen_socket_path(explicit: Option<&Path>) -> PathBuf {
     let chosen = explicit.map(Path::to_path_buf).or_else(|| {
         env::var_os("LOURO_SOCKET")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from)
     });
     if let Some(path) = chosen {
-        return Ok(path);
+        return path;
     }
     if let Some(dir) = env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
-        return Ok(PathBuf::from(dir).join("louro/louro.sock"));
+        return PathBuf::from(dir).join("louro/louro.sock");
     }
-    let tmp = env::temp_dir();
-    Ok(tmp.join(format!("louro-{}/louro.sock", current_uid(&tmp)?)))
-}
-
-/// Safe Rust has no getuid, so this reads the owner of a file it creates; `create_new` makes sure
-/// that file isn't one someone else left at this guessable name.
-fn current_uid(base_dir: &Path) -> Result<u32> {
-    let probe = base_dir.join(format!("louro-uid-probe-{}", std::process::id()));
-    let uid = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .and_then(|_| std::fs::metadata(&probe))
-        .map(|metadata| metadata.uid());
-    let _ = std::fs::remove_file(&probe);
-    uid.map_err(|err| {
-        Error::new(
-            Code::Internal,
-            format!("could not determine the user id for the socket path: {err}"),
-        )
-    })
+    let uid = rustix::process::getuid().as_raw();
+    env::temp_dir().join(format!("louro-{uid}/louro.sock"))
 }
 
 #[cfg(test)]
