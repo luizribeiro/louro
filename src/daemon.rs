@@ -28,7 +28,9 @@ use crate::irc::{
     Secret, Sender, Typing, Update, now, whole_seconds,
 };
 use crate::output;
-use crate::socket::{Ack, Op, Request, VERSION, read_line, resolve_socket_path, write_line};
+use crate::socket::{
+    Ack, Op, Question, Request, VERSION, read_line, resolve_socket_path, write_line,
+};
 use crate::text;
 
 /// The most a `history` call returns, and Ergo's default page size.
@@ -44,6 +46,9 @@ const MAX_WATCHING: usize = 50;
 const MAX_LIST: usize = 200;
 /// Clients drop `active` after about 6s.
 const TYPING_REFRESH: Duration = Duration::from_secs(3);
+const MAX_ASK_SECS: u64 = 60 * 60;
+const MAX_CHOICES: usize = 5;
+const MAX_CHOICE_CHARS: usize = 16;
 
 /// The bot's own recent messages as (lowercased target, msgid), the only ones `redact` removes.
 #[derive(Default)]
@@ -445,7 +450,8 @@ impl<I: Irc> Daemon<I> {
         let (Op::Send(Outgoing { target, .. })
         | Op::React { target, .. }
         | Op::Typing { target, .. }
-        | Op::History { target, .. }) = op
+        | Op::History { target, .. }
+        | Op::Ask(Question { target, .. })) = op
         else {
             return self.grants.check(op, &DmHistory::default());
         };
@@ -774,6 +780,14 @@ impl<I: Irc> Daemon<I> {
             Op::Setname { realname } => {
                 text::check_field("a realname", realname, MAX_REALNAME_CHARS)?;
             }
+            Op::Ask(question) => {
+                text::check_visible(&question.text)?;
+                question.text = text::clean_lines(&question.text)?;
+                check_choices(&question.choices)?;
+                if !(1..=MAX_ASK_SECS).contains(&question.timeout) {
+                    return Err(Error::new(Code::Usage, "an ask's timeout is 1s to 1h"));
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -783,6 +797,7 @@ impl<I: Irc> Daemon<I> {
         match op {
             Op::Status {} => Ok(self.status()),
             Op::Wait { .. } => unreachable!("serve answers wait itself"),
+            Op::Ask(_) => Err(Error::new(Code::Unsupported, "louro can't ask yet")),
             Op::Send(message) => {
                 self.end_typing(|key| key.eq_ignore_ascii_case(&message.target))
                     .await;
@@ -979,7 +994,7 @@ impl<I: Irc> Daemon<I> {
     /// The rate windows `op` counts against, each with its key, limit and the action it names.
     fn budgets<'a>(&'a self, op: &'a Op) -> Vec<(&'a RateWindows, &'a str, Limit, &'static str)> {
         match op {
-            Op::Send(Outgoing { target, .. }) => vec![
+            Op::Send(Outgoing { target, .. }) | Op::Ask(Question { target, .. }) => vec![
                 (&self.send_windows, target, self.limits.send, "send"),
                 (&self.send_total, TOTAL, self.limits.send_total, "send"),
             ],
@@ -1031,6 +1046,7 @@ fn shown_text(op: &mut Op) -> Option<(&'static str, &mut String)> {
             text: Some(text), ..
         } => Some(("away", text)),
         Op::Setname { realname } => Some(("realname", realname)),
+        Op::Ask(question) => Some(("ask", &mut question.text)),
         _ => None,
     }
 }
@@ -1082,6 +1098,28 @@ fn untrusted(result: impl Serialize) -> Value {
     let mut result = text::clean_json(result);
     result["untrusted"] = true.into();
     result
+}
+
+/// Choices are short words, so `!yes k3fa` can't be mistaken for anything else.
+fn check_choices(choices: &[String]) -> Result<()> {
+    let word = |choice: &String| {
+        (1..=MAX_CHOICE_CHARS).contains(&choice.len())
+            && choice.bytes().all(|byte| byte.is_ascii_lowercase())
+    };
+    let distinct = choices
+        .iter()
+        .enumerate()
+        .all(|(index, choice)| !choices[..index].contains(choice));
+    if (2..=MAX_CHOICES).contains(&choices.len()) && choices.iter().all(word) && distinct {
+        return Ok(());
+    }
+    Err(Error::new(
+        Code::Usage,
+        format!(
+            "choices are 2 to {MAX_CHOICES} different lowercase words of up to {MAX_CHOICE_CHARS} letters"
+        ),
+    )
+    .with_hint("like --choices yes,no"))
 }
 
 fn typing(target: &str, state: Typing) -> Op {
@@ -2434,6 +2472,81 @@ cat"#,
             daemon.wait(0).await;
             assert_eq!(daemon.typing_acts().await, [], "{after_wait}");
         }
+    }
+
+    /// A daemon that may ask luiz, logged in as luiz, and may speak in #bots.
+    fn launch_asking(limits: Limits) -> Running {
+        let grants = toml::from_str(
+            r##"
+            irc.join = ["#bots"]
+            irc.send = ["#bots"]
+            irc.dm.read = ["account:luiz", "maria"]
+            irc.dm.send = ["account:luiz", "maria"]
+            irc.react = ["account:luiz", "maria"]
+            irc.ask = ["account:luiz"]
+            "##,
+        )
+        .unwrap();
+        let daemon = launch_with(grants, limits);
+        daemon.irc.whois_says("luiz", Some("luiz"));
+        daemon
+    }
+
+    const ASK_SECS: u64 = 300;
+
+    fn ask_request(text: &str, choices: &[&str], timeout: u64) -> Value {
+        request(
+            "ask",
+            json!({"target": "luiz", "text": text, "choices": choices, "timeout": timeout}),
+        )
+    }
+
+    fn yes_or_no(text: &str) -> Value {
+        ask_request(text, &["yes", "no"], ASK_SECS)
+    }
+
+    #[tokio::test]
+    async fn a_question_louro_would_not_send_whole_is_refused_with_nothing_sent() {
+        let daemon = launch_asking(Limits::default());
+        daemon.irc.whois_says("maria", Some("maria"));
+        let mut to_maria = yes_or_no("deploy it?");
+        to_maria["args"]["target"] = "maria".into();
+        for (request, code) in [
+            (yes_or_no(&"x".repeat(1001)), "too_long"),
+            (yes_or_no("1\n2\n3\n4\n5\n6"), "too_long"),
+            (yes_or_no("deploy?\x0301,01 and drop the db"), "usage"),
+            (yes_or_no("deploy \u{202e}bd eht pord"), "usage"),
+            (yes_or_no("deploy?\u{200b}"), "usage"),
+            (yes_or_no("deploy?\r\nQUIT"), "usage"),
+            (
+                yes_or_no(&format!("log in with {PASSWORD}?")),
+                "blocked_secret",
+            ),
+            (ask_request("ok?", &["yes"], ASK_SECS), "usage"),
+            (
+                ask_request("ok?", &["a", "b", "c", "d", "e", "f"], ASK_SECS),
+                "usage",
+            ),
+            (ask_request("ok?", &["yes", "yes"], ASK_SECS), "usage"),
+            (ask_request("ok?", &["yes", "No"], ASK_SECS), "usage"),
+            (ask_request("ok?", &["yes", "no way"], ASK_SECS), "usage"),
+            (ask_request("ok?", &["yes", ""], ASK_SECS), "usage"),
+            (
+                ask_request("ok?", &["yes", &"n".repeat(17)], ASK_SECS),
+                "usage",
+            ),
+            (ask_request("ok?", &["yes", "no"], 0), "usage"),
+            (
+                ask_request("ok?", &["yes", "no"], MAX_ASK_SECS + 1),
+                "usage",
+            ),
+            (to_maria, "not_allowed"),
+        ] {
+            let reply = daemon.call(request.clone()).await;
+            assert_eq!(reply["Err"]["code"], code, "{request}: {reply}");
+            assert!(!reply.to_string().contains(PASSWORD));
+        }
+        assert!(daemon.irc.sent.lock().unwrap().is_empty());
     }
 
     fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {

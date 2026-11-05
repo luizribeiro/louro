@@ -419,6 +419,35 @@ fn wait_reports_not_connected_when_louro_stops_mid_wait() {
     daemon.join().unwrap();
 }
 
+#[test]
+fn ask_asks_yes_or_no_for_5m_by_default() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut request)
+            .unwrap();
+        let answer =
+            json!({"Ok": {"id": "k3fa", "target": "luiz", "answer": "yes", "timed_out": false}});
+        writeln!(&stream, "{answer}").unwrap();
+        serde_json::from_str::<serde_json::Value>(&request).unwrap()["args"].clone()
+    });
+
+    louro()
+        .env("LOURO_SOCKET", &socket)
+        .args(["ask", "luiz", "deploy it?"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""answer":"yes""#));
+    assert_eq!(
+        daemon.join().unwrap(),
+        json!({"target": "luiz", "text": "deploy it?", "choices": ["yes", "no"], "timeout": 300})
+    );
+}
+
 /// An IRC server that registers whoever connects, supports MONITOR and lets them join any channel, until the
 /// listener is dropped with the process.
 fn fake_irc_server() -> u16 {

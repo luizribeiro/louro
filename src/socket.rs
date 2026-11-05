@@ -14,7 +14,7 @@ use crate::config::absolute;
 use crate::error::{Code, Error, Result};
 use crate::irc::{HistoryQuery, Outgoing, Typing};
 
-pub const VERSION: u8 = 10;
+pub const VERSION: u8 = 11;
 
 #[derive(Deserialize, Serialize)]
 pub struct Request {
@@ -88,6 +88,8 @@ pub enum Op {
         /// `active` while composing, `paused`, or `done` once finished
         state: Typing,
     },
+    /// DM a nick a question and block until they answer or the timeout passes
+    Ask(Question),
     /// Delete a message the bot sent
     Redact {
         /// Channel or nick the message was sent to
@@ -151,6 +153,32 @@ pub enum Op {
     },
     /// Disconnect and stop the daemon
     Quit {},
+}
+
+/// A question `ask` puts to a nick, who answers with one of `choices`.
+#[derive(Deserialize, Serialize, clap::Args)]
+pub struct Question {
+    /// The nick to ask; irc.ask must grant its account
+    pub target: String,
+    /// The question, in plain text; louro never cuts it, so too long is refused
+    pub text: String,
+    /// The answers they may give: 2 to 5 lowercase words
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "yes,no",
+        value_name = "A,B,..."
+    )]
+    pub choices: Vec<String>,
+    /// How long to wait for an answer, like `90s` or `5m`, at most 1h
+    #[arg(long, default_value = "5m", value_parser = parse_seconds, value_name = "DURATION")]
+    pub timeout: u64,
+}
+
+fn parse_seconds(raw: &str) -> Result<u64, String> {
+    humantime::parse_duration(raw)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| format!("expected a duration like `90s` or `5m`, got `{raw}`"))
 }
 
 /// `none` is `u64::MAX` seconds, past any `Instant`, so the daemon sets no deadline.
@@ -322,14 +350,14 @@ mod tests {
         let cases = [
             (
                 request(Op::Status {}),
-                "{\"v\":10,\"op\":\"status\",\"args\":{}}",
+                "{\"v\":11,\"op\":\"status\",\"args\":{}}",
             ),
             (
                 request(Op::Wait {
                     timeout: 60,
                     max: NonZeroUsize::new(20).unwrap(),
                 }),
-                "{\"v\":10,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
+                "{\"v\":11,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
             ),
             (
                 request(Op::Send(Outgoing {
@@ -338,33 +366,33 @@ mod tests {
                     text: "hi there".into(),
                     reply_to: Some("4y8kq7j2c9mnz".into()),
                 })),
-                "{\"v\":10,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
+                "{\"v\":11,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
             ),
             (
                 request(Op::Names {
                     channel: "#bots".into(),
                 }),
-                "{\"v\":10,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
+                "{\"v\":11,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
             ),
             (
                 request(Op::Topic {
                     channel: "#bots".into(),
                     set: Some("louro's test channel".into()),
                 }),
-                "{\"v\":10,\"op\":\"topic\",\"args\":{\"channel\":\"#bots\",\"set\":\"louro's test channel\"}}",
+                "{\"v\":11,\"op\":\"topic\",\"args\":{\"channel\":\"#bots\",\"set\":\"louro's test channel\"}}",
             ),
             (
                 request(Op::Join {
                     channel: "#help-rust".into(),
                 }),
-                "{\"v\":10,\"op\":\"join\",\"args\":{\"channel\":\"#help-rust\"}}",
+                "{\"v\":11,\"op\":\"join\",\"args\":{\"channel\":\"#help-rust\"}}",
             ),
             (
                 request(Op::Part {
                     channel: "#help-rust".into(),
                     reason: "answered".into(),
                 }),
-                "{\"v\":10,\"op\":\"part\",\"args\":{\"channel\":\"#help-rust\",\"reason\":\"answered\"}}",
+                "{\"v\":11,\"op\":\"part\",\"args\":{\"channel\":\"#help-rust\",\"reason\":\"answered\"}}",
             ),
             (
                 request(Op::React {
@@ -373,14 +401,23 @@ mod tests {
                     reaction: "+1".into(),
                     remove: false,
                 }),
-                "{\"v\":10,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
+                "{\"v\":11,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
             ),
             (
                 request(Op::Typing {
                     target: "#bots".into(),
                     state: Typing::Active,
                 }),
-                "{\"v\":10,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
+                "{\"v\":11,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
+            ),
+            (
+                request(Op::Ask(Question {
+                    target: "luiz".into(),
+                    text: "run `rm -rf target`?".into(),
+                    choices: vec!["yes".into(), "no".into()],
+                    timeout: 300,
+                })),
+                "{\"v\":11,\"op\":\"ask\",\"args\":{\"target\":\"luiz\",\"text\":\"run `rm -rf target`?\",\"choices\":[\"yes\",\"no\"],\"timeout\":300}}",
             ),
             (
                 request(Op::Redact {
@@ -388,7 +425,7 @@ mod tests {
                     msgid: "4y8kq7j2c9mnz".into(),
                     reason: "typo".into(),
                 }),
-                "{\"v\":10,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
+                "{\"v\":11,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
             ),
             (
                 request(Op::History {
@@ -399,55 +436,55 @@ mod tests {
                         after: None,
                     },
                 }),
-                "{\"v\":10,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null}}",
+                "{\"v\":11,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null}}",
             ),
             (
                 request(Op::Whois {
                     nick: "luiz".into(),
                 }),
-                "{\"v\":10,\"op\":\"whois\",\"args\":{\"nick\":\"luiz\"}}",
+                "{\"v\":11,\"op\":\"whois\",\"args\":{\"nick\":\"luiz\"}}",
             ),
             (
                 request(Op::Whowas {
                     nick: "luiz".into(),
                 }),
-                "{\"v\":10,\"op\":\"whowas\",\"args\":{\"nick\":\"luiz\"}}",
+                "{\"v\":11,\"op\":\"whowas\",\"args\":{\"nick\":\"luiz\"}}",
             ),
             (
                 request(Op::Watch {
                     nick: "luiz".into(),
                     remove: false,
                 }),
-                "{\"v\":10,\"op\":\"watch\",\"args\":{\"nick\":\"luiz\",\"remove\":false}}",
+                "{\"v\":11,\"op\":\"watch\",\"args\":{\"nick\":\"luiz\",\"remove\":false}}",
             ),
             (
                 request(Op::Nick {
                     nick: "louro_".into(),
                 }),
-                "{\"v\":10,\"op\":\"nick\",\"args\":{\"nick\":\"louro_\"}}",
+                "{\"v\":11,\"op\":\"nick\",\"args\":{\"nick\":\"louro_\"}}",
             ),
             (
                 request(Op::Away {
                     text: Some("thinking".into()),
                     back: false,
                 }),
-                "{\"v\":10,\"op\":\"away\",\"args\":{\"text\":\"thinking\",\"back\":false}}",
+                "{\"v\":11,\"op\":\"away\",\"args\":{\"text\":\"thinking\",\"back\":false}}",
             ),
             (
                 request(Op::Setname {
                     realname: "louro, a parrot".into(),
                 }),
-                "{\"v\":10,\"op\":\"setname\",\"args\":{\"realname\":\"louro, a parrot\"}}",
+                "{\"v\":11,\"op\":\"setname\",\"args\":{\"realname\":\"louro, a parrot\"}}",
             ),
             (
                 request(Op::List {
                     pattern: Some("rust".into()),
                 }),
-                "{\"v\":10,\"op\":\"list\",\"args\":{\"pattern\":\"rust\"}}",
+                "{\"v\":11,\"op\":\"list\",\"args\":{\"pattern\":\"rust\"}}",
             ),
             (
                 request(Op::Quit {}),
-                "{\"v\":10,\"op\":\"quit\",\"args\":{}}",
+                "{\"v\":11,\"op\":\"quit\",\"args\":{}}",
             ),
             (
                 serde_json::to_string(&Ack { ack: true }).unwrap(),

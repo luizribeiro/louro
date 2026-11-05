@@ -90,6 +90,25 @@ pub fn clean_lines(text: &str) -> Result<String> {
     Ok(joined)
 }
 
+/// Refuses text with anything that could hide part of it from a reader: IRC formatting and
+/// other control characters (but newlines and tabs), bidi overrides, and invisible characters.
+pub fn check_visible(text: &str) -> Result<()> {
+    let hidden = |c: char| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c,
+                '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e007f}')
+    };
+    if text.contains(hidden) {
+        return Err(Error::new(
+            Code::Usage,
+            "the text has formatting, control or invisible characters that could hide part of it",
+        )
+        .with_hint("send plain text"));
+    }
+    Ok(())
+}
+
 /// A msgid the agent passes back to the server, like `--reply-to`: one IRC word.
 pub fn check_msgid(msgid: &str) -> Result<()> {
     let valid = !msgid.is_empty()

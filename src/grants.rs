@@ -3,7 +3,7 @@
 use crate::config::{Grants, Selector};
 use crate::error::{Code, Error, Result};
 use crate::irc::{Incoming, Outgoing, Sender};
-use crate::socket::Op;
+use crate::socket::{Op, Question};
 
 /// In `irc.dm.send`: anyone whose DM the daemon has received.
 const FIRST: &str = "$first";
@@ -83,6 +83,15 @@ impl Grants {
             Op::Whois { nick } | Op::Whowas { nick } => {
                 granted(irc.whois, "irc.whois")?;
                 expect_kind(nick, TargetKind::Nick)
+            }
+            Op::Ask(Question { target, .. }) => {
+                expect_kind(target, TargetKind::Nick)?;
+                self.check_send(target, dm)?;
+                require(
+                    irc.ask.matches_account(dm.account.as_deref()),
+                    "irc.ask",
+                    target,
+                )
             }
             Op::Redact { .. } => granted(irc.redact, "irc.redact"),
             Op::List { .. } => granted(irc.list, "irc.list"),
@@ -376,6 +385,48 @@ mod tests {
                 Code::NotAllowed,
                 "{target}"
             );
+        }
+    }
+
+    #[test]
+    fn asks_only_a_nick_whose_account_irc_ask_and_irc_dm_send_both_grant() {
+        let ask = |target: &str| {
+            Op::Ask(Question {
+                target: target.into(),
+                text: "run `rm -rf target`?".into(),
+                choices: vec!["yes".into(), "no".into()],
+                timeout: 300,
+            })
+        };
+        let logged_in = |account: Option<&str>| DmHistory {
+            first: true,
+            account: account.map(String::from),
+        };
+        let luiz = grants(
+            r#"
+            irc.dm.send = ["$first"]
+            irc.ask = ["account:luiz"]
+            "#,
+        );
+        assert!(luiz.check(&ask("lz"), &logged_in(Some("Luiz"))).is_ok());
+        for (grants, target, account, refused) in [
+            (&luiz, "luiz", None, "irc.ask does not grant luiz"),
+            (
+                &luiz,
+                "luiz",
+                Some("mallory"),
+                "irc.ask does not grant luiz",
+            ),
+            (&luiz, "#bots", Some("luiz"), "#bots is not a nick"),
+            (
+                &grants(r#"irc.ask = ["account:luiz"]"#),
+                "luiz",
+                Some("luiz"),
+                "irc.dm.send does not grant luiz",
+            ),
+        ] {
+            let error = grants.check(&ask(target), &logged_in(account)).unwrap_err();
+            assert_eq!(error.message, refused, "{target} {account:?}");
         }
     }
 
