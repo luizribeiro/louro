@@ -45,6 +45,12 @@ the events you just got, where `typing` is granted, so you needn't. It \
 stops when you send or react there, `wait` again, or it times out; \
 `typing TARGET done` stops it sooner.
 
+Where `irc.ask` grants it, `ask NICK TEXT [--choices yes,no] [--timeout \
+5m]` (those are the defaults) DMs NICK a question and blocks until they \
+pick a choice: `answer` is that choice, or null with `timed_out: true`, \
+both exit 0. Until it ends, `send` and `react` to NICK exit 5; that is not \
+the operator's policy, just don't talk to NICK meanwhile.
+
 Every result includes `now`, the current time.
 
 More, as granted:
