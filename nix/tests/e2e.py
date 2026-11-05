@@ -420,11 +420,9 @@ with running(
         assert louro("status")["nick"] == "louro-x"
 
 start(grants(dm={"read": ["account:luiz"], "send": ["account:luiz"]}, quit=True, ask=["account:luiz"]))
-with subtest("an account: grant in irc.dm.send lets louro DM luiz back by his nick"):
-    refused("not_allowed", "send", "luiz", "hi")
-    say("luiz", "louro", "are you there?")
-    louro("send", "luiz", "yes, I'm here")
-    heard("luiz", "luiz", "yes, I'm here")
+with subtest("an account: grant in irc.dm.send lets louro DM luiz by his nick before he writes"):
+    louro("send", "luiz", "hi")
+    heard("luiz", "luiz", "hi")
 
 with subtest("louro ask DMs luiz a question, refuses the agent's DMs to him meanwhile, and returns his answer"):
     machine.succeed(shlex.join([
