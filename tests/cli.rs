@@ -468,7 +468,7 @@ fn fake_irc_server() -> u16 {
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
                     let reply = match line.split_whitespace().collect::<Vec<_>>()[..] {
                         ["CAP", "LS", ..] => "CAP * LS :\r\n".to_owned(),
-                        ["CAP", "END"] => ":irc 001 louro :Welcome\r\n:irc 005 louro MONITOR=100 :are supported\r\n".to_owned(),
+                        ["CAP", "END"] => ":irc 001 louro :Welcome\r\n:irc 005 louro MONITOR=100 :are supported\r\n:irc 422 louro :MOTD File is missing\r\n".to_owned(),
                         ["JOIN", channel] => format!(":louro!louro@host JOIN {channel}\r\n"),
                         ["PING", token] => format!("PONG {token}\r\n"),
                         ["QUIT", ..] => return,
