@@ -17,6 +17,8 @@ use crate::irc::{HistoryQuery, Outgoing, Typing};
 
 pub const VERSION: u8 = 11;
 
+pub const RESTART_HINT: &str = "ask your operator to restart louro with `louro connect --replace`";
+
 #[derive(Deserialize, Serialize)]
 pub struct Request {
     pub v: u8,
@@ -220,6 +222,7 @@ pub async fn write_line(
 
 /// Kept open after `request` so `wait` can ack on the same connection.
 pub struct Connection {
+    path: PathBuf,
     socket: BufReader<UnixStream>,
 }
 
@@ -230,6 +233,7 @@ impl Connection {
             .await
             .map_err(|err| no_session(&path, err))?;
         Ok(Self {
+            path,
             socket: BufReader::new(stream),
         })
     }
@@ -242,13 +246,28 @@ impl Connection {
         write_line(&mut self.socket, &Request { v: VERSION, op })
             .await
             .map_err(louro_stopped)?;
-        read_line(&mut self.socket)
+        read_line::<Result<Value>>(&mut self.socket)
             .await
             .map_err(|err| match err.kind() {
                 io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => not_louro(),
                 _ => louro_stopped(err),
             })?
             .ok_or_else(|| louro_stopped("it closed the connection without answering"))?
+            .map_err(|err| self.name_socket_in_version_mismatch(err))
+    }
+
+    fn name_socket_in_version_mismatch(&self, err: Error) -> Error {
+        if err.code != Code::VersionMismatch {
+            return err;
+        }
+        Error::new(
+            Code::VersionMismatch,
+            format!(
+                "the louro daemon at {} speaks a different protocol version",
+                self.path.display()
+            ),
+        )
+        .with_hint(RESTART_HINT)
     }
 
     /// Tells the daemon the CLI has printed the last `wait` result, so it

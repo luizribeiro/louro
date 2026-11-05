@@ -29,7 +29,7 @@ use crate::irc::{
 };
 use crate::output;
 use crate::socket::{
-    Ack, Op, Question, Request, VERSION, read_line, resolve_socket_path, write_line,
+    Ack, Op, Question, RESTART_HINT, Request, VERSION, read_line, resolve_socket_path, write_line,
 };
 use crate::text;
 
@@ -1471,7 +1471,7 @@ fn parse_request(request: Value) -> Result<Op> {
             Code::VersionMismatch,
             "the louro client and daemon speak different protocol versions",
         )
-        .with_hint("restart the daemon with `louro quit` then `louro connect`"));
+        .with_hint(RESTART_HINT));
     }
     serde_json::from_value::<Request>(request)
         .map(|request| request.op)

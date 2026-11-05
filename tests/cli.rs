@@ -194,6 +194,30 @@ fn connect_refuses_when_louro_is_already_running_even_another_version() {
 }
 
 #[test]
+fn status_names_the_socket_of_a_daemon_speaking_another_version() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("old.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mismatch = json!({"Err": {"code": "version_mismatch", "message": "different versions",
+            "hint": "restart the daemon with `louro quit` then `louro connect`"}});
+        let _ = writeln!(stream, "{mismatch}");
+    });
+
+    louro()
+        .arg("status")
+        .env("LOURO_SOCKET", &socket)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(r#""code":"version_mismatch""#))
+        .stdout(predicate::str::contains(socket.to_str().unwrap()))
+        .stdout(predicate::str::contains("louro connect --replace"))
+        .stdout(predicate::str::contains("louro quit").not());
+    daemon.join().unwrap();
+}
+
+#[test]
 fn connect_refuses_to_prompt_without_a_terminal() {
     let dir = tempdir().unwrap();
     let config = config(dir.path(), closed_port(), r#"sasl_username = "louro""#);
