@@ -187,6 +187,9 @@ pub trait Irc: Send + Sync + 'static {
     /// The members of `channel`, sorted by nick, or `None` if the bot isn't in it.
     fn names(&self, channel: &str) -> Option<Vec<Member>>;
     fn account(&self, nick: &str) -> NickAccount;
+    /// The spelling the server compares `nick` by, from its casemapping, so `Luiz` and `luiz`
+    /// (or, under rfc1459, `lu[iz]` and `lu{iz}`) are one nick.
+    fn fold(&self, nick: &str) -> String;
     /// Sends one message (several lines become a multiline batch).
     fn send(&self, message: Outgoing) -> impl Future<Output = Result<Sent>> + Send;
     /// Carries out an op that changes something and returns nothing: join, part, setting a
@@ -575,6 +578,10 @@ impl Irc for PapoIrc {
             Some(Account::LoggedOut) => NickAccount::LoggedOut,
             _ => NickAccount::Unknown,
         }
+    }
+
+    fn fold(&self, nick: &str) -> String {
+        self.client.state().casemapping().fold(nick).into_owned()
     }
 
     async fn send(&self, message: Outgoing) -> Result<Sent> {

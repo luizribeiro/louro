@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant};
 
@@ -110,27 +110,72 @@ impl Watchlist {
     }
 }
 
-/// The ids of the questions `ask` sent and still waits on.
+/// A question `ask` sent and still waits on; `answer` takes the choice its target picks.
+struct PendingAsk {
+    /// Folded by the server's casemapping.
+    target: String,
+    id: String,
+    choices: Vec<String>,
+    answer: oneshot::Sender<String>,
+}
+
+/// The questions still waiting on an answer.
 #[derive(Default)]
 struct Asks {
-    pending: Vec<String>,
+    pending: Vec<PendingAsk>,
 }
 
 impl Asks {
-    /// Records a question under a fresh random id, unique among pending ones, and returns it.
-    fn open(&mut self) -> Result<String> {
+    /// Records a question to the folded `target` under a fresh random id, unique among pending
+    /// ones, and returns the id and where its answer will arrive.
+    fn open(
+        &mut self,
+        target: String,
+        choices: Vec<String>,
+    ) -> Result<(String, oneshot::Receiver<String>)> {
         let id = loop {
             let id = random_id()?;
-            if !self.pending.contains(&id) {
+            if !self.pending.iter().any(|ask| ask.id == id) {
                 break id;
             }
         };
-        self.pending.push(id.clone());
-        Ok(id)
+        let (answer, answered) = oneshot::channel();
+        self.pending.push(PendingAsk {
+            target,
+            id: id.clone(),
+            choices,
+            answer,
+        });
+        Ok((id, answered))
     }
 
-    fn close(&mut self, id: &str) {
-        self.pending.retain(|pending| pending != id);
+    /// Takes the ask `id` out of the pending ones; false if it is no longer there.
+    fn close(&mut self, id: &str) -> bool {
+        let before = self.pending.len();
+        self.pending.retain(|ask| ask.id != id);
+        self.pending.len() < before
+    }
+
+    /// Resolves the ask to the folded `nick` that `text`, like `!yes k3fa`, names with one of
+    /// its choices; false if it names none.
+    fn answer(&mut self, nick: &str, text: &str) -> bool {
+        let text = text.trim().to_ascii_lowercase();
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let [choice, id] = words[..] else {
+            return false;
+        };
+        let Some(choice) = choice.strip_prefix('!') else {
+            return false;
+        };
+        let Some(index) = self.pending.iter().position(|ask| {
+            ask.target == nick
+                && ask.id == id
+                && ask.choices.iter().any(|offered| offered == choice)
+        }) else {
+            return false;
+        };
+        let _ = self.pending.remove(index).answer.send(choice.to_owned());
+        true
     }
 }
 
@@ -454,9 +499,24 @@ impl<I: Irc> Daemon<I> {
         if incoming.private {
             self.record_dm_sender(&incoming.from, readable);
         }
-        if readable {
+        if !self.answers_ask(&incoming) && readable {
             self.inbox.push(incoming);
         }
+    }
+
+    /// Whether `incoming` answers a pending ask, which it then resolves. Only a live DM counts,
+    /// and only from a sender whose own account tag irc.ask grants, never by nick alone.
+    fn answers_ask(&self, incoming: &Incoming) -> bool {
+        let from = &incoming.from;
+        incoming.private
+            && incoming.origin == Origin::Live
+            && incoming.kind == Kind::Message
+            && self.grants.irc.ask.matches_account(from.account.as_deref())
+            && self
+                .asks
+                .lock()
+                .unwrap()
+                .answer(&self.irc.fold(&from.nick), &incoming.text)
     }
 
     /// Once a nick's DMs carried an account, a DM with another one (or none), even one dropped
@@ -681,20 +741,30 @@ impl<I: Irc> Daemon<I> {
         if posted.is_err() {
             self.release(&op, reserved);
         }
-        let id = posted?;
-        time::sleep(Duration::from_secs(question.timeout)).await;
-        self.close(&question.target, &id).await;
+        let (id, mut answered) = posted?;
+        let timeout = Duration::from_secs(question.timeout);
+        let answer = match time::timeout(timeout, &mut answered).await {
+            Ok(answer) => answer.ok(),
+            Err(_) if self.close(&question.target, &id).await => None,
+            Err(_) => answered.try_recv().ok(),
+        };
         Ok(json!({
             "id": id,
             "target": question.target,
-            "answer": null,
-            "timed_out": true,
+            "answer": answer,
+            "timed_out": answer.is_none(),
         }))
     }
 
-    /// Sends the question under a new id, with how to answer it, and returns the id.
-    async fn post(&self, question: &Question) -> Result<String> {
-        let id = self.asks.lock().unwrap().open()?;
+    /// Sends the question under a new id, with how to answer it, and returns the id and where
+    /// the answer will arrive.
+    async fn post(&self, question: &Question) -> Result<(String, oneshot::Receiver<String>)> {
+        let target = self.irc.fold(&question.target);
+        let (id, answered) = self
+            .asks
+            .lock()
+            .unwrap()
+            .open(target, question.choices.clone())?;
         let answers: Vec<String> = question
             .choices
             .iter()
@@ -707,15 +777,18 @@ impl<I: Irc> Daemon<I> {
             self.asks.lock().unwrap().close(&id);
             return Err(error);
         }
-        Ok(id)
+        Ok((id, answered))
     }
 
-    /// Closes the ask `id` and tells its target so.
-    async fn close(&self, target: &str, id: &str) {
-        self.asks.lock().unwrap().close(id);
+    /// Closes the ask `id` and tells its target so; false if it was answered meanwhile.
+    async fn close(&self, target: &str, id: &str) -> bool {
+        if !self.asks.lock().unwrap().close(id) {
+            return false;
+        }
         let notice = from_louro(target, format!("(ask {id} closed)"));
         // The caller gets its result whether or not the notice gets out.
         let _ = self.irc.send(notice).await;
+        true
     }
 
     fn check_shown_secret(&self, op: &mut Op) -> Result<()> {
@@ -1372,6 +1445,10 @@ mod tests {
                     },
                 ]
             })
+        }
+
+        fn fold(&self, nick: &str) -> String {
+            nick.to_ascii_lowercase()
         }
 
         fn account(&self, nick: &str) -> NickAccount {
@@ -2587,13 +2664,13 @@ cat"#,
     }
 
     /// A daemon that may ask luiz, logged in as luiz, may speak in #bots, and shows typing to
-    /// whoever DMs it.
+    /// whoever DMs it. It reads luiz's DMs by nick, so an impostor's `!yes` shows up as chat.
     fn launch_asking(limits: Limits) -> Running {
         let grants = toml::from_str(
             r##"
             irc.join = ["#bots"]
             irc.send = ["#bots"]
-            irc.dm.read = ["account:luiz", "maria"]
+            irc.dm.read = ["luiz", "maria"]
             irc.dm.send = ["account:luiz", "maria"]
             irc.react = ["account:luiz", "maria"]
             irc.typing = ["account:luiz"]
@@ -2702,6 +2779,115 @@ cat"#,
                 format!("(ask {id} closed)"),
             ]
         );
+    }
+
+    impl Running {
+        /// Starts `request`, an ask, and returns its reply to come and the id its question
+        /// went out under.
+        async fn ask(&self, request: Value) -> (JoinHandle<Value>, String) {
+            let asked = self.sent_texts().len();
+            let mut conn = self.connect().await;
+            write_line(&mut conn, &request).await.unwrap();
+            let reply = tokio::spawn(async move { read_line(&mut conn).await.unwrap().unwrap() });
+            loop {
+                if let Some(question) = self.sent_texts().get(asked) {
+                    let id = question.strip_prefix("[ask ").unwrap().split(']').next();
+                    return (reply, id.unwrap().into());
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_target_answers_with_one_of_the_choices_and_the_id() {
+        for (answer, said) in [
+            ("yes", "!yes {id}"),
+            ("no", "  !NO {id} "),
+            ("later", "!later {id}"),
+        ] {
+            let daemon = launch_asking(Limits::default());
+            let (reply, id) = daemon
+                .ask(ask_request(
+                    "drop the cache?",
+                    &["yes", "no", "later"],
+                    ASK_SECS,
+                ))
+                .await;
+            let said = said.replace("{id}", &id.to_uppercase());
+            let from_luiz_spelled_another_way = Incoming {
+                from: sender("Luiz", Some("Luiz")),
+                ..dm(from_luiz(&said))
+            };
+            daemon.say(from_luiz_spelled_another_way).await;
+            assert_eq!(
+                reply.await.unwrap(),
+                json!({"Ok": {"id": id, "target": "luiz", "answer": answer, "timed_out": false}}),
+                "{said}"
+            );
+            assert_eq!(
+                daemon.sent_texts().len(),
+                1,
+                "no closed notice after an answer"
+            );
+            let (_, waited) = daemon.wait(0).await;
+            assert_eq!(
+                texts(&waited),
+                [] as [&str; 0],
+                "an answer never reaches wait"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_live_dm_from_the_target_logged_into_an_irc_ask_account_answers() {
+        let daemon = launch_asking(Limits::default());
+        let (reply, id) = daemon.ask(yes_or_no("drop the cache?")).await;
+        let yes = format!("!yes {id}");
+        let not_answers = [
+            Incoming {
+                from: sender("luiz", Some("mallory")),
+                ..dm(from_luiz(&yes))
+            },
+            Incoming {
+                from: sender("luiz", None),
+                ..dm(from_luiz(&yes))
+            },
+            Incoming {
+                origin: Origin::History,
+                ..dm(from_luiz(&yes))
+            },
+            Incoming {
+                kind: Kind::Notice,
+                ..dm(from_luiz(&yes))
+            },
+            from_luiz(&yes),
+            dm(from_maria(&yes)),
+            dm(from_luiz(&format!("!maybe {id}"))),
+            dm(from_luiz("!yes zzzz")),
+            dm(from_luiz(&format!("!yes {id} please"))),
+            dm(from_luiz(&format!("yes {id}"))),
+        ];
+        for incoming in not_answers.clone() {
+            daemon.say(incoming).await;
+        }
+        let waited = daemon.wait_and_ack(0).await;
+        let events = waited["Ok"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), not_answers.len(), "{waited}");
+        assert!(!reply.is_finished());
+
+        daemon.say(dm(from_luiz(&yes))).await;
+        assert_eq!(reply.await.unwrap()["Ok"]["answer"], "yes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_after_the_timeout_is_ordinary_chat() {
+        let daemon = launch_asking(Limits::default());
+        let reply = daemon.call(yes_or_no("drop the cache?")).await;
+        let late = format!("!yes {}", reply["Ok"]["id"].as_str().unwrap());
+        daemon.say(dm(from_luiz(&late))).await;
+        let (_, waited) = daemon.wait(0).await;
+        assert_eq!(texts(&waited), [late.as_str()]);
     }
 
     #[tokio::test]
