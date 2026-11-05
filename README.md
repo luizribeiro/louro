@@ -76,7 +76,8 @@ shows them.
 others before it reaches IRC, say to catch pasted tokens. It gets the
 text on stdin and the context in `LOURO_*` variables, each unset when it
 doesn't apply: `LOURO_KIND` (`message`, `notice`, `action`, `topic`,
-`part`, `redact`, `react`, `unreact`, `nick`, `away` or `realname`),
+`part`, `redact`, `react`, `unreact`, `nick`, `away`, `realname` or
+`ask`),
 `LOURO_CHANNEL`, `LOURO_NICK`, `LOURO_ACCOUNT`, `LOURO_MSGID`,
 `LOURO_SELF_NICK`, `LOURO_SELF_ACCOUNT`, `LOURO_SERVER` and
 `LOURO_FILTER_VERSION=1`. Exit 0 sends its stdout (one trailing newline
@@ -98,6 +99,23 @@ bot. Notices and chat replayed after a reconnect don't count, and each
 target needs `irc.typing`. It stops when the agent sends or reacts there
 (or sets typing there itself), calls `wait` again, or after `timeout`
 (60s by default). The default is `off`.
+
+`louro ask NICK TEXT [--choices yes,no] [--timeout 5m]` (those are the
+defaults) DMs `[ask k3fa] TEXT` and `reply !yes k3fa or !no k3fa`, then
+blocks until they answer, say from a hook that asks you before an agent
+runs a tool. It prints `{"id", "target", "answer", "timed_out"}`:
+`"answer": "yes"`, or `null` with `"timed_out": true` once the timeout (at
+most 1h) passes; both exit 0. If louro stops meanwhile, it exits 4
+(`not_connected`). You answer `!yes k3fa`, or a bare `!yes` when it's the
+only pending ask to you and none closed in the last 10s; otherwise the bot
+replies "which ask?". Answers never reach `wait`.
+
+The nick must pass `irc.dm.send`, and `irc.ask` must list its
+`account:NAME`: an answer counts only from a live DM whose account tag
+matches. Since the agent could post a look-alike question for your answer
+to land on, it can't send or react to you while an ask to you is pending.
+The question goes out whole or not at all: too long is refused, and so is
+anything the filter would change.
 
 <details>
 <summary>A fuller example</summary>
@@ -123,6 +141,7 @@ irc.dm.send = ["$first"]            # whom it may DM; $first = only people whose
 # irc.watch = ["luiz"]              # nicks it may watch come, go and go away with `louro watch`
 # irc.identity = true               # let it change its nick, away status and realname
 # irc.quit = true                   # let the agent run `louro quit`
+# irc.ask = ["account:luiz"]        # whom `louro ask` may ask; account:NAME entries only
 
 [limits]
 send = "3/10s"         # per target (channel or nick); default
@@ -185,7 +204,7 @@ grants above), but it can't stop the injection itself, so:
   limit the agent's shell, allow only the agent's subcommands (`status`,
   `wait`, `send`, `names`, `history`, `react`, `typing`, `redact`,
   `topic`, `whois`, `whowas`, `list`, `join`, `part`, `watch`, `nick`,
-  `away`, `setname`, `quit`), never `connect`.
+  `away`, `setname`, `ask`, `quit`), never `connect`.
 - The agent's commands take no socket path. If the daemon listens
   elsewhere (`connect --socket`, or `socket` in `louro.toml`), set
   `LOURO_SOCKET` in the agent's environment.
