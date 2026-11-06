@@ -522,3 +522,25 @@ with subtest("a wrong SASL password fails connect and leaves nothing running"):
     error = refused("auth_failed", "connect", "--config", CONFIG)
     assert "wrong-password" not in json.dumps(error), error
     assert_stopped()
+
+start(grants(dm={"read": ["account:luiz"], "send": ["NickServ"]}))
+with subtest("a restarted louro backfills the DM luiz sent while it was down, then says it started"):
+    # Always-on keeps louro's nick and its DM history on Ergo while the daemon is down.
+    louro("send", "NickServ", "SET always-on true")
+    say("luiz", BOT["user"], "are you there?")
+    stop()
+    send_raw("luiz", f"PRIVMSG {BOT['user']} :you missed this one")
+    send_raw("luiz", "PING :after-the-missed-dm")
+    received("luiz", lambda _tags, line: " PONG " in line and line.endswith("after-the-missed-dm"))
+    log = machine.succeed(f"cat {human_file('luiz', 'log')}")
+    assert f" 401 luiz {BOT['user']} " not in log, "Ergo refused the DM to the stopped bot"
+
+    louro("connect", "--config", CONFIG)
+    events = events_until(started)
+    [missed] = chat_from("luiz", events)
+    assert missed["text"] == "you missed this one" and missed["private"], missed
+    assert missed["origin"] == "history" and missed["untrusted"], missed
+    [announced] = [event for event in events if event.get("state") == "started"]
+    assert announced["backfilled"] == 1 and "skipped" not in announced, announced
+    assert events.index(missed) < events.index(announced), events
+    stop()
