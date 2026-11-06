@@ -328,9 +328,16 @@ with running(
         assert texts(page)[-3:] == ["history one", "history two", "history three"], page
         assert all(event["origin"] == "history" and event["untrusted"] for event in page["events"])
         assert "untrusted" in page["notice"], page
+        [one] = [event for event in page["events"] if event["text"] == "history one"]
         [two] = [event for event in page["events"] if event["text"] == "history two"]
         before = louro("history", "#bots", "--before", two["msgid"], "--latest", "1")
         assert texts(before) == ["history one"], before
+        found = louro("history", "#bots", "--grep", "^history (one|three)$")
+        assert texts(found) == ["history one", "history three"] and found["complete"], found
+        after = louro("history", "#bots", "--grep", "(?i)^HISTORY", "--after", one["msgid"])
+        assert texts(after) == ["history two", "history three"] and after["complete"], after
+        assert 0 < after["scanned"] < found["scanned"], (after, found)
+        refused("usage", "history", "#bots", "--grep", "(history")
         page = louro_until(lambda page: "hello, luiz" in texts(page), "history", "luiz")
         assert texts(page)[-2:] == ["hello, bot", "hello, luiz"], page
         assert all(event["target"] == "luiz" and event["private"] for event in page["events"]), page

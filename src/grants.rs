@@ -247,6 +247,7 @@ mod tests {
                 limit: 20,
                 before: None,
                 after: None,
+                grep: None,
             },
         }
     }

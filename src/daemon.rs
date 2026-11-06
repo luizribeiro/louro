@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{env, fs, io};
 
+use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::BufReader;
@@ -35,6 +36,10 @@ use crate::text;
 
 /// The most a `history` call returns, and Ergo's default page size.
 const MAX_HISTORY: usize = 100;
+/// The most messages a `history --grep` looks through.
+const MAX_GREP_SCAN: usize = 1_000;
+const MAX_GREP_CHARS: usize = 200;
+const GREP_SIZE_LIMIT: usize = 1 << 20;
 const SENT_LOG_CAP: usize = 1_000;
 const MAX_TOPIC_CHARS: usize = 300;
 const MAX_NICK_CHARS: usize = 32;
@@ -1274,12 +1279,67 @@ impl<I: Irc> Daemon<I> {
             limit: query.limit.clamp(1, MAX_HISTORY),
             ..query.clone()
         };
-        let History { events, complete } = self.irc.history(target, query).await?;
+        if let Some(pattern) = &query.grep {
+            return self
+                .grep_history(target, &query, &grep_regex(pattern)?)
+                .await;
+        }
+        let History {
+            events, complete, ..
+        } = self.irc.history(target, query).await?;
         let events: Vec<_> = events
             .into_iter()
             .filter(|incoming| self.may_read_history(incoming))
             .collect();
         Ok(history_page(target, complete, events))
+    }
+
+    /// Pages back from `--before` until it passes `--after` or reaches the start of history
+    /// (`complete`), or has `--latest` matches or has scanned [`MAX_GREP_SCAN`] messages.
+    async fn grep_history(
+        &self,
+        target: &str,
+        query: &HistoryQuery,
+        regex: &Regex,
+    ) -> Result<Value> {
+        let mut before = query.before.clone();
+        let mut newest_first = Vec::new();
+        let mut scanned = 0;
+        let reached_start = loop {
+            let limit = MAX_HISTORY.min(MAX_GREP_SCAN - scanned);
+            let page = self
+                .irc
+                .history_back(target, before.as_deref(), query.after.as_deref(), limit)
+                .await?;
+            if page.oldest.is_none() {
+                break true;
+            }
+            before = page.oldest;
+            scanned += page.events.len();
+            newest_first.extend(
+                page.events
+                    .into_iter()
+                    .rev()
+                    .filter(|incoming| self.grep_matches(incoming, regex)),
+            );
+            if page.complete {
+                break true;
+            }
+            if newest_first.len() >= query.limit || scanned >= MAX_GREP_SCAN {
+                break false;
+            }
+        };
+        let complete = reached_start && newest_first.len() <= query.limit;
+        newest_first.truncate(query.limit);
+        newest_first.reverse();
+        let mut result = history_page(target, complete, newest_first);
+        result["scanned"] = scanned.into();
+        Ok(result)
+    }
+
+    /// Matched against the text the agent would see, so it can't find what sanitizing removes.
+    fn grep_matches(&self, incoming: &Incoming, regex: &Regex) -> bool {
+        self.may_read_history(incoming) && regex.is_match(&text::sanitize(&incoming.text).0)
     }
 
     fn may_read_history(&self, incoming: &Incoming) -> bool {
@@ -1467,6 +1527,25 @@ fn history_page(target: &str, complete: bool, events: Vec<Incoming>) -> Value {
     })
 }
 
+fn grep_regex(pattern: &str) -> Result<Regex> {
+    if pattern.chars().count() > MAX_GREP_CHARS {
+        return Err(Error::new(
+            Code::Usage,
+            format!("--grep is at most {MAX_GREP_CHARS} characters"),
+        ));
+    }
+    RegexBuilder::new(pattern)
+        .size_limit(GREP_SIZE_LIMIT)
+        .build()
+        .map_err(|error| {
+            let why = match error {
+                regex::Error::CompiledTooBig(_) => "is too big once compiled",
+                _ => "is not a valid regex",
+            };
+            Error::new(Code::Usage, format!("--grep {why}"))
+        })
+}
+
 fn typing(target: &str, state: Typing) -> Op {
     Op::Typing {
         target: target.into(),
@@ -1549,12 +1628,23 @@ mod tests {
         .unwrap()
     }
 
+    /// One `history_back` call's arguments.
+    struct PageAsked {
+        before: Option<String>,
+        after: Option<String>,
+        limit: usize,
+    }
+
     #[derive(Default)]
     struct FakeIrc {
         sent: Mutex<Vec<Outgoing>>,
         /// Each op passed to `act`, as the request that carried it.
         acts: Mutex<Vec<Value>>,
         history_limits: Mutex<Vec<usize>>,
+        /// The conversation `history_back` pages through, oldest first, each with its own msgid.
+        stored: Mutex<Vec<Incoming>>,
+        pages: Mutex<Vec<PageAsked>>,
+        reports_end: AtomicBool,
         /// By lowercased nick, the account papo's state knows each one by now.
         accounts: Mutex<HashMap<String, Option<String>>>,
         /// By lowercased nick, the account WHOIS reports for each; WHOIS on any other nick fails.
@@ -1682,6 +1772,41 @@ mod tests {
                     }),
                 ],
                 complete: true,
+                oldest: None,
+            }))
+        }
+
+        /// Like Ergo, reports the end only if `reports_end` is set; else an empty page is the
+        /// start of history.
+        fn history_back(
+            &self,
+            _target: &str,
+            before: Option<&str>,
+            after: Option<&str>,
+            limit: usize,
+        ) -> impl Future<Output = Result<History>> + Send {
+            self.pages.lock().unwrap().push(PageAsked {
+                before: before.map(Into::into),
+                after: after.map(Into::into),
+                limit,
+            });
+            let stored = self.stored.lock().unwrap();
+            let position = |msgid: &str| {
+                stored
+                    .iter()
+                    .position(|incoming| incoming.msgid.as_deref() == Some(msgid))
+            };
+            let end = before.and_then(position).unwrap_or(stored.len());
+            let start = after
+                .and_then(position)
+                .map_or(0, |index| index + 1)
+                .max(end.saturating_sub(limit))
+                .min(end);
+            let events = stored[start..end].to_vec();
+            future::ready(Ok(History {
+                complete: start == 0 && self.reports_end.load(Ordering::Relaxed),
+                oldest: events.first().and_then(|oldest| oldest.msgid.clone()),
+                events,
             }))
         }
 
@@ -3431,6 +3556,8 @@ esac"#;
         assert!(events.iter().all(|event| event["origin"] == "history"));
         assert!(events.iter().all(|event| event["untrusted"] == true));
         assert!(events.iter().all(|event| event.get("from_me").is_none()));
+        assert!(reply["Ok"].get("scanned").is_none());
+        assert!(daemon.irc.pages.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3445,6 +3572,196 @@ esac"#;
             assert_eq!(reply["Err"]["code"], "not_allowed", "{target}");
         }
         assert!(daemon.call(history_request("maria", 20)).await["Ok"].is_object());
+    }
+
+    fn msgid(index: usize) -> String {
+        format!("msg{index:04}")
+    }
+
+    impl Running {
+        /// Fills the history `history_back` pages through, oldest first, each with its own msgid.
+        fn store(&self, events: impl IntoIterator<Item = Incoming>) {
+            *self.irc.stored.lock().unwrap() = events
+                .into_iter()
+                .enumerate()
+                .map(|(index, incoming)| Incoming {
+                    msgid: Some(msgid(index)),
+                    origin: Origin::History,
+                    ..incoming
+                })
+                .collect();
+        }
+
+        fn page_limits(&self) -> Vec<usize> {
+            let pages = self.irc.pages.lock().unwrap();
+            pages.iter().map(|page| page.limit).collect()
+        }
+    }
+
+    /// `count` lines from maria in #bots, where each `every`th one mentions ergo.
+    fn chatter(count: usize, every: usize) -> impl Iterator<Item = Incoming> {
+        (0..count).map(move |index| {
+            let topic = if index % every == 0 { "ergo" } else { "lunch" };
+            from_maria(&format!("{topic} {index}"))
+        })
+    }
+
+    fn grep_request(grep: &str, limit: usize) -> Value {
+        request(
+            "history",
+            json!({"target": "#bots", "limit": limit, "grep": grep}),
+        )
+    }
+
+    /// The matches' texts, `scanned` and `complete`.
+    fn grep_summary(reply: &Value) -> (Vec<&str>, u64, bool) {
+        let result = &reply["Ok"];
+        let scanned = result["scanned"].as_u64().unwrap();
+        (texts(reply), scanned, result["complete"].as_bool().unwrap())
+    }
+
+    #[tokio::test]
+    async fn grep_pages_back_to_the_start_of_history_collecting_matches() {
+        let daemon = launch(grants());
+        daemon.store(chatter(250, 50));
+        let reply = daemon.call(grep_request("^ergo", 20)).await;
+        assert_eq!(
+            grep_summary(&reply),
+            (
+                vec!["ergo 0", "ergo 50", "ergo 100", "ergo 150", "ergo 200"],
+                250,
+                true
+            )
+        );
+        assert_eq!(reply["Ok"]["notice"], NOTICE);
+        let befores: Vec<_> = daemon
+            .irc
+            .pages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|page| page.before.clone())
+            .collect();
+        assert_eq!(
+            befores,
+            [None, Some(msgid(150)), Some(msgid(50)), Some(msgid(0))]
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_stops_at_the_end_the_server_reports() {
+        let daemon = launch(grants());
+        daemon.irc.reports_end.store(true, Ordering::Relaxed);
+        daemon.store(chatter(250, 50));
+        let reply = daemon.call(grep_request("^ergo", 20)).await;
+        let (found, scanned, complete) = grep_summary(&reply);
+        assert_eq!((found.len(), scanned, complete), (5, 250, true));
+        assert_eq!(daemon.page_limits(), [100; 3]);
+    }
+
+    #[tokio::test]
+    async fn grep_is_incomplete_when_the_last_page_has_more_matches_than_it_returns() {
+        let daemon = launch(grants());
+        daemon.irc.reports_end.store(true, Ordering::Relaxed);
+        daemon.store(chatter(50, 1));
+        let reply = daemon.call(grep_request("ergo", 3)).await;
+        assert_eq!(
+            grep_summary(&reply),
+            (vec!["ergo 47", "ergo 48", "ergo 49"], 50, false)
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_in_a_conversation_without_history_scans_nothing() {
+        let daemon = launch(grants());
+        let reply = daemon.call(grep_request("ergo", 20)).await;
+        assert_eq!(grep_summary(&reply), (vec![], 0, true));
+    }
+
+    #[tokio::test]
+    async fn grep_without_matches_returns_an_empty_complete_page() {
+        let daemon = launch(grants());
+        daemon.store(chatter(150, 1000));
+        let reply = daemon.call(grep_request("weblounge", 20)).await;
+        assert_eq!(grep_summary(&reply), (vec![], 150, true));
+    }
+
+    #[tokio::test]
+    async fn grep_stops_incomplete_after_scanning_1000_messages() {
+        let daemon = launch(grants());
+        daemon.store(chatter(1500, 1499));
+        let reply = daemon.call(grep_request("ergo", 20)).await;
+        assert_eq!(grep_summary(&reply), (vec!["ergo 1499"], 1000, false));
+        assert_eq!(daemon.page_limits(), [100; 10]);
+    }
+
+    #[tokio::test]
+    async fn grep_scans_only_between_after_and_before() {
+        let daemon = launch(grants());
+        daemon.store(chatter(300, 10));
+        let mut search = grep_request("ergo", 20);
+        search["args"]["after"] = msgid(200).into();
+        search["args"]["before"] = msgid(250).into();
+        let reply = daemon.call(search).await;
+        assert_eq!(
+            grep_summary(&reply),
+            (
+                vec!["ergo 210", "ergo 220", "ergo 230", "ergo 240"],
+                49,
+                true
+            )
+        );
+        let pages = daemon.irc.pages.lock().unwrap();
+        assert!(pages.iter().all(|page| page.after == Some(msgid(200))));
+    }
+
+    #[tokio::test]
+    async fn grep_returns_the_newest_latest_matches_oldest_first() {
+        let daemon = launch(grants());
+        daemon.store(chatter(300, 1));
+        let reply = daemon.call(grep_request("ergo", 3)).await;
+        assert_eq!(
+            grep_summary(&reply),
+            (vec!["ergo 297", "ergo 298", "ergo 299"], 100, false)
+        );
+        let reply = daemon.call(grep_request("ergo", 500)).await;
+        let found = texts(&reply);
+        assert_eq!(
+            (found.len(), found[0], found[99]),
+            (100, "ergo 200", "ergo 299")
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_matches_sanitized_text_and_never_what_the_grants_hide() {
+        let daemon = launch(grants());
+        daemon.store([
+            from_maria("louro\0: is ergo up?"),
+            Incoming {
+                target: "#ops".into(),
+                ..from_maria("louro: ergo is down")
+            },
+            dm(from_joao("louro: ergo?")),
+        ]);
+        let reply = daemon.call(grep_request("^louro: ", 20)).await;
+        assert_eq!(texts(&reply), ["louro: is ergo up?"]);
+        assert_eq!(reply["Ok"]["events"][0]["untrusted"], true);
+    }
+
+    #[tokio::test]
+    async fn a_bad_or_too_long_grep_is_usage() {
+        let daemon = launch(grants());
+        let too_long = "e".repeat(MAX_GREP_CHARS + 1);
+        for (pattern, message) in [
+            ("(ergo", "--grep is not a valid regex"),
+            (&too_long, "--grep is at most 200 characters"),
+            ("\\w{1000}{1000}", "--grep is too big once compiled"),
+        ] {
+            let reply = daemon.call(grep_request(pattern, 20)).await;
+            assert_eq!(reply["Err"]["code"], "usage", "{pattern}");
+            assert_eq!(reply["Err"]["message"], message, "{pattern}");
+        }
+        assert!(daemon.irc.pages.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

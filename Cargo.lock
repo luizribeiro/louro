@@ -488,6 +488,7 @@ dependencies = [
  "humantime",
  "papo",
  "predicates",
+ "regex",
  "rpassword",
  "rustix",
  "serde",

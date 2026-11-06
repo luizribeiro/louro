@@ -138,12 +138,18 @@ pub struct HistoryQuery {
     /// Only messages after this msgid, RFC 3339 time, or time ago like `30m`
     #[arg(long, value_name = "MSGID|TIME|AGO")]
     pub after: Option<String>,
+    /// Only messages whose text matches this regex, searching back through up to 1000
+    /// messages; case-sensitive unless it starts with `(?i)`
+    #[arg(long, value_name = "RE")]
+    pub grep: Option<String>,
 }
 
 pub struct History {
     pub events: Vec<Incoming>,
     /// The server has nothing older (or newer, for `after`) than this page.
     pub complete: bool,
+    /// The msgid (else time) of the page's oldest message, chat or not, to page back from.
+    pub oldest: Option<String>,
 }
 
 pub struct Sent {
@@ -201,6 +207,15 @@ pub trait Irc: Send + Sync + 'static {
         &self,
         target: &str,
         query: HistoryQuery,
+    ) -> impl Future<Output = Result<History>> + Send;
+    /// The newest `limit` messages in `target` before `before` (else now) and after `after`, for
+    /// paging back through history.
+    fn history_back(
+        &self,
+        target: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        limit: usize,
     ) -> impl Future<Output = Result<History>> + Send;
     fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send;
     /// Earlier users of `nick`, most recent first; empty if the server remembers none.
@@ -540,6 +555,12 @@ impl PapoIrc {
                 .filter_map(|message| chat(message, &state, target, message.is_private()))
                 .collect(),
             complete: page.end,
+            oldest: page.messages().next().and_then(|message| {
+                message
+                    .id()
+                    .map(ToString::to_string)
+                    .or_else(|| papo::time::format(message.time()))
+            }),
         })
     }
 }
@@ -684,6 +705,27 @@ impl Irc for PapoIrc {
             (Some(after), Some(before)) => history.between(after, before),
         };
         self.page(target, request.limit(query.limit)).await
+    }
+
+    async fn history_back(
+        &self,
+        target: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<History> {
+        let before = before.map(history_reference).transpose()?;
+        let after = after.map(history_reference).transpose()?;
+        let history = self.client.history(target);
+        let request = match (before, after) {
+            (None, None) => history.latest(limit),
+            (Some(before), None) => history.before(before),
+            // BETWEEN counts from its first reference, so this page is the newest in the range.
+            (before, Some(after)) => {
+                history.between(before.unwrap_or_else(|| SystemTime::now().into()), after)
+            }
+        };
+        self.page(target, request.limit(limit)).await
     }
 
     async fn whois(&self, nick: &str) -> Result<Whois> {
