@@ -563,7 +563,9 @@ fn remove_socket(path: &Path) -> io::Result<()> {
 impl<I: Irc> Daemon<I> {
     fn update(self: &Arc<Self>, update: Update) {
         match update {
-            Update::Chat(incoming) => self.ingest(incoming),
+            Update::Chat(incoming) => {
+                self.ingest(incoming);
+            }
             Update::Disconnected { cause, retry_in } => {
                 *self.last_error.lock().unwrap() = Some(Problem {
                     time: now(),
@@ -578,7 +580,7 @@ impl<I: Irc> Daemon<I> {
                     }));
                 }
             }
-            Update::Registered { reconnected: false } => self.backfill(),
+            Update::Registered { reconnected: false } => self.announce_start(),
             Update::Registered { reconnected: true } => {
                 if self.offline.swap(false, Ordering::Relaxed) {
                     self.inbox.push_connection(json!({
@@ -616,21 +618,36 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    /// Takes in the chat missed since the bookmark, at most [`MAX_BACKFILL_AGE`] of it, the way
-    /// papo's reconnect history comes in. No bookmark means a first start, so no old chat.
-    fn backfill(self: &Arc<Self>) {
+    /// Tells the agent this daemon is new, after backfilling what it missed. No bookmark means a
+    /// first start, so no old chat.
+    fn announce_start(self: &Arc<Self>) {
         let Some(seen) = self.seen.lock().unwrap().until else {
+            self.inbox.push_connection(started(0, Some("no_bookmark")));
             return;
         };
-        let until = SystemTime::now();
-        let after = seen.max(until - MAX_BACKFILL_AGE);
         let daemon = Arc::clone(self);
         tokio::spawn(async move {
-            match daemon.irc.missed(after, until).await {
-                Ok(missed) => missed.into_iter().for_each(|chat| daemon.ingest(chat)),
-                Err(err) => eprintln!("louro: can't backfill missed chat: {}", err.message),
-            }
+            let (backfilled, skipped) = daemon.backfill(seen).await;
+            daemon.inbox.push_connection(started(backfilled, skipped));
         });
+    }
+
+    /// Takes in the chat missed since `seen`, at most [`MAX_BACKFILL_AGE`] of it, the way papo's
+    /// reconnect history comes in; returns how many lines reached the inbox, or why none did.
+    async fn backfill(self: &Arc<Self>, seen: SystemTime) -> (usize, Option<&'static str>) {
+        let until = SystemTime::now();
+        let after = seen.max(until - MAX_BACKFILL_AGE);
+        match self.irc.missed(after, until).await {
+            Ok(missed) => {
+                let pushed = missed.into_iter().map(|chat| self.ingest(chat));
+                (pushed.filter(|&pushed| pushed).count(), None)
+            }
+            Err(err) if err.code == Code::Unsupported => (0, Some("unsupported")),
+            Err(err) => {
+                eprintln!("louro: can't backfill missed chat: {}", err.message);
+                (0, Some("failed"))
+            }
+        }
     }
 
     fn gave_up(&self) -> io::Error {
@@ -641,14 +658,17 @@ impl<I: Irc> Daemon<I> {
         io::Error::other(reason)
     }
 
-    fn ingest(self: &Arc<Self>, incoming: Incoming) {
+    /// Whether `incoming` reached the inbox.
+    fn ingest(self: &Arc<Self>, incoming: Incoming) -> bool {
         let readable = self.grants.may_read(&incoming);
         if incoming.private {
             self.record_dm_sender(&incoming.from, readable);
         }
-        if !self.answers_ask(&incoming) && readable {
+        let pushed = !self.answers_ask(&incoming) && readable;
+        if pushed {
             self.inbox.push(incoming);
         }
+        pushed
     }
 
     /// Whether `incoming` answers a pending ask, which it then resolves and marks received, or
@@ -1663,6 +1683,19 @@ fn rate_limited(action: &str, retry_after: u64) -> Error {
     .with_retry_after(retry_after)
 }
 
+fn started(backfilled: usize, skipped: Option<&str>) -> Value {
+    let mut event = json!({
+        "type": "connection",
+        "time": now(),
+        "state": "started",
+        "backfilled": backfilled,
+    });
+    if let Some(skipped) = skipped {
+        event["skipped"] = skipped.into();
+    }
+    event
+}
+
 fn disconnect_message(cause: &str, retry_in: Option<u64>) -> String {
     match retry_in {
         Some(seconds) => format!("{cause}; reconnecting in {seconds}s"),
@@ -1745,8 +1778,10 @@ mod tests {
         stored: Mutex<Vec<Incoming>>,
         pages: Mutex<Vec<PageAsked>>,
         reports_end: AtomicBool,
-        /// What `missed` returns, and the (after, until) of each call.
+        /// What `missed` returns, unless `missed_fails` says it fails, and the (after, until) of
+        /// each call.
         missed: Mutex<Vec<Incoming>>,
+        missed_fails: Mutex<Option<Code>>,
         missed_asked: Mutex<Vec<(SystemTime, SystemTime)>>,
         /// By lowercased nick, the account papo's state knows each one by now.
         accounts: Mutex<HashMap<String, Option<String>>>,
@@ -1919,7 +1954,10 @@ mod tests {
             until: SystemTime,
         ) -> impl Future<Output = Result<Vec<Incoming>>> + Send {
             self.missed_asked.lock().unwrap().push((after, until));
-            future::ready(Ok(self.missed.lock().unwrap().clone()))
+            future::ready(match *self.missed_fails.lock().unwrap() {
+                Some(code) => Err(Error::new(code, "CHATHISTORY failed")),
+                None => Ok(self.missed.lock().unwrap().clone()),
+            })
         }
 
         fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send {
@@ -2210,6 +2248,7 @@ mod tests {
         assert_eq!(
             states,
             [
+                (&json!("connection"), &json!("started"), &Value::Null),
                 (&json!("connection"), &json!("disconnected"), &json!(1)),
                 (&json!("connection"), &json!("reconnected"), &Value::Null),
             ]
@@ -4463,6 +4502,26 @@ esac"#;
         }
     }
 
+    /// Registers for the first time, then acks events up to the started event; returns those
+    /// before it, and it without its time.
+    async fn start_up(daemon: &Running) -> (Vec<Value>, Value) {
+        daemon
+            .update(Update::Registered { reconnected: false })
+            .await;
+        let mut events: Vec<Value> = vec![];
+        while !events.iter().any(|event| event["state"] == "started") {
+            let reply = daemon.wait_and_ack(5).await;
+            events.extend(reply["Ok"]["events"].as_array().unwrap().iter().cloned());
+        }
+        let mut started = events.pop().unwrap();
+        assert!(
+            started["time"].as_str().unwrap().ends_with('Z'),
+            "{started}"
+        );
+        started.as_object_mut().unwrap().remove("time");
+        (events, started)
+    }
+
     /// The (after, until) of the one backfill the daemon asked for.
     fn backfilled_window(daemon: &Running) -> (SystemTime, SystemTime) {
         let asked = daemon.irc.missed_asked.lock().unwrap();
@@ -4486,19 +4545,21 @@ esac"#;
                 ..from_joao("not for you")
             }),
         ];
-        daemon
-            .update(Update::Registered { reconnected: false })
-            .await;
 
-        let (_, reply) = daemon.wait(5).await;
+        let (missed, started) = start_up(&daemon).await;
+        let texts: Vec<_> = missed.iter().map(|event| &event["text"]).collect();
         assert_eq!(
-            texts(&reply),
+            texts,
             ["did the deploy finish?", "louro: it's in ergo.yaml"]
         );
-        for event in reply["Ok"]["events"].as_array().unwrap() {
+        for event in &missed {
             assert_eq!(event["origin"], "history");
             assert_eq!(event["untrusted"], true);
         }
+        assert_eq!(
+            started,
+            json!({"id": 3, "type": "connection", "state": "started", "backfilled": 2})
+        );
         let (after, until) = backfilled_window(&daemon);
         let window = until.duration_since(after).unwrap();
         assert!(window.abs_diff(Duration::from_mins(10)) < Duration::from_secs(1));
@@ -4507,28 +4568,48 @@ esac"#;
     #[tokio::test]
     async fn a_restart_backfills_at_most_a_day() {
         let daemon = launch_seen("2026-10-16T21:06:30.120Z");
-        daemon
-            .update(Update::Registered { reconnected: false })
-            .await;
-        daemon.say(dm(from_luiz("are you there?"))).await;
-        daemon.wait(5).await;
+        start_up(&daemon).await;
         let (after, until) = backfilled_window(&daemon);
         assert_eq!(until.duration_since(after).unwrap(), MAX_BACKFILL_AGE);
     }
 
     #[tokio::test]
-    async fn a_first_start_or_a_reconnect_never_backfills() {
-        for (daemon, reconnected) in [
-            (launch(grants()), false),
-            (launch_seen("2026-10-16T21:06:30.120Z"), true),
+    async fn a_start_says_why_it_backfilled_nothing() {
+        for (fails, skipped) in [
+            (Some(Code::Unsupported), "unsupported"),
+            (Some(Code::NotConnected), "failed"),
+            (None, "no_bookmark"),
         ] {
+            let daemon = if fails.is_some() {
+                launch_seen("2026-10-16T21:06:30.120Z")
+            } else {
+                launch(grants())
+            };
             *daemon.irc.missed.lock().unwrap() = vec![from_history(from_maria("louro: old"))];
-            daemon.update(Update::Registered { reconnected }).await;
-            daemon.say(dm(from_luiz("are you there?"))).await;
-            let (_, reply) = daemon.wait(5).await;
-            assert_eq!(texts(&reply), ["are you there?"]);
-            assert!(daemon.irc.missed_asked.lock().unwrap().is_empty());
+            *daemon.irc.missed_fails.lock().unwrap() = fails;
+            let (missed, started) = start_up(&daemon).await;
+            assert!(missed.is_empty(), "{missed:?}");
+            let asked = daemon.irc.missed_asked.lock().unwrap().len();
+            assert_eq!(asked, usize::from(fails.is_some()));
+            assert_eq!(
+                started,
+                json!({"id": 1, "type": "connection", "state": "started", "backfilled": 0,
+                       "skipped": skipped})
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_never_backfills() {
+        let daemon = launch_seen("2026-10-16T21:06:30.120Z");
+        *daemon.irc.missed.lock().unwrap() = vec![from_history(from_maria("louro: old"))];
+        daemon
+            .update(Update::Registered { reconnected: true })
+            .await;
+        daemon.say(dm(from_luiz("are you there?"))).await;
+        let (_, reply) = daemon.wait(5).await;
+        assert_eq!(texts(&reply), ["are you there?"]);
+        assert!(daemon.irc.missed_asked.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

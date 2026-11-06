@@ -90,10 +90,12 @@ def joined(status):
 
 
 def start(granted, limits={}):
-    """Connects with a fresh louro.toml and waits until louro is in #bots; returns connect's output."""
+    """Connects with a fresh louro.toml, waits until louro is in #bots, and reads wait past
+    louro's started event and whatever it backfilled; returns connect's output."""
     write_config(granted, limits)
     connected = louro("connect", "--config", CONFIG)
     louro_until(joined, "status")
+    events_until(started)
     return connected
 
 
@@ -140,6 +142,10 @@ def from_nick(nick, text):
 
 def connection_states(events):
     return [event["state"] for event in events if event["type"] == "connection"]
+
+
+def started(events):
+    return "started" in connection_states(events)
 
 
 def say(nick, target, text):
