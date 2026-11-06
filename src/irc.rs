@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use papo::{
     Account, Away, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events, Fallback,
-    HistoryItem, HistoryReference, ListFilter, Message, MessageId, MessageKind, Refusal,
-    RegistrationError, Sasl, Source, State, User,
+    HistoryItem, HistoryReference, HistoryRequest, ListFilter, Message, MessageId, MessageKind,
+    Refusal, RegistrationError, Sasl, Source, State, User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -529,6 +529,21 @@ fn chat_kind(kind: MessageKind) -> Option<Kind> {
     }
 }
 
+impl PapoIrc {
+    async fn page(&self, target: &str, request: HistoryRequest) -> Result<History> {
+        let page = request.await?;
+        let state = self.client.state();
+        Ok(History {
+            // Filed under the conversation asked for, which the bot's own lines are part of.
+            events: page
+                .messages()
+                .filter_map(|message| chat(message, &state, target, message.is_private()))
+                .collect(),
+            complete: page.end,
+        })
+    }
+}
+
 impl Irc for PapoIrc {
     fn status(&self) -> IrcStatus {
         let state = self.client.state();
@@ -668,16 +683,7 @@ impl Irc for PapoIrc {
             (None, Some(before)) => history.before(before),
             (Some(after), Some(before)) => history.between(after, before),
         };
-        let page = request.limit(query.limit).await?;
-        let state = self.client.state();
-        Ok(History {
-            // Filed under the conversation asked for, which the bot's own lines are part of.
-            events: page
-                .messages()
-                .filter_map(|message| chat(message, &state, target, message.is_private()))
-                .collect(),
-            complete: page.end,
-        })
+        self.page(target, request.limit(query.limit)).await
     }
 
     async fn whois(&self, nick: &str) -> Result<Whois> {

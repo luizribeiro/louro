@@ -1277,15 +1277,13 @@ impl<I: Irc> Daemon<I> {
         let History { events, complete } = self.irc.history(target, query).await?;
         let events: Vec<_> = events
             .into_iter()
-            .filter(|incoming| incoming.from_me || self.grants.may_read(incoming))
-            .map(Inbox::sanitized)
+            .filter(|incoming| self.may_read_history(incoming))
             .collect();
-        Ok(json!({
-            "target": target,
-            "complete": complete,
-            "notice": NOTICE,
-            "events": events,
-        }))
+        Ok(history_page(target, complete, events))
+    }
+
+    fn may_read_history(&self, incoming: &Incoming) -> bool {
+        incoming.from_me || self.grants.may_read(incoming)
     }
 
     async fn send(&self, message: &Outgoing) -> Result<Value> {
@@ -1457,6 +1455,16 @@ fn from_louro(target: &str, text: String) -> Outgoing {
         text,
         reply_to: None,
     }
+}
+
+fn history_page(target: &str, complete: bool, events: Vec<Incoming>) -> Value {
+    let events: Vec<_> = events.into_iter().map(Inbox::sanitized).collect();
+    json!({
+        "target": target,
+        "complete": complete,
+        "notice": NOTICE,
+        "events": events,
+    })
 }
 
 fn typing(target: &str, state: Typing) -> Op {
