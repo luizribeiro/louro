@@ -1577,13 +1577,20 @@ fn disconnect_message(cause: &str, retry_in: Option<u64>) -> String {
     }
 }
 
+const OLDER_CLI_HINT: &str = "this louro CLI is older than the daemon; run the current `louro`";
+
 fn parse_request(request: Value) -> Result<Op> {
-    if request.get("v") != Some(&Value::from(VERSION)) {
+    let v = request.get("v").and_then(Value::as_u64);
+    if v != Some(VERSION.into()) {
+        let hint = match v {
+            Some(older) if older < VERSION.into() => OLDER_CLI_HINT,
+            _ => RESTART_HINT,
+        };
         return Err(Error::new(
             Code::VersionMismatch,
             "the louro client and daemon speak different protocol versions",
         )
-        .with_hint(RESTART_HINT));
+        .with_hint(hint));
     }
     serde_json::from_value::<Request>(request)
         .map(|request| request.op)
@@ -2598,6 +2605,20 @@ cat"#,
                 .collect();
         env.sort();
         env
+    }
+
+    #[test]
+    fn a_version_mismatch_names_the_side_that_is_stale() {
+        let hint = |v: Value| {
+            let request = json!({"v": v, "op": "status", "args": {}});
+            let refused = parse_request(request).err().unwrap();
+            assert_eq!(refused.code, Code::VersionMismatch);
+            refused.hint.unwrap()
+        };
+        assert_eq!(hint(json!(VERSION - 1)), OLDER_CLI_HINT);
+        for stale_daemon in [json!(VERSION + 1), json!("12"), Value::Null] {
+            assert_eq!(hint(stale_daemon), RESTART_HINT);
+        }
     }
 
     #[test]
