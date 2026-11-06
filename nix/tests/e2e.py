@@ -481,7 +481,7 @@ with subtest("chat sent while louro was cut off arrives from history after it re
     [missed] = chat_from("luiz", events)
     assert missed["origin"] == "history" and missed["untrusted"], missed
 
-with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
+with subtest("a blocked wait rides out a louro restart"):
     machine.succeed(shlex.join([
         "systemd-run", "--unit=blocked-wait", f"--uid={BOT['user']}",
         f"--setenv=LOURO_SOCKET={SOCKET}",
@@ -491,13 +491,13 @@ with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
     ]))
     machine.wait_until_succeeds(f"ss -xH | grep -qF {SOCKET}", timeout=TIMEOUT)
     stop()
+    start(grants())
+    send_raw("luiz", "PRIVMSG #bots :back already?")
     machine.wait_until_fails("systemctl is-active -q blocked-wait", timeout=TIMEOUT)
     exit_code = machine.succeed("systemctl show -P ExecMainStatus blocked-wait").strip()
-    assert exit_code == str(EXIT_CODES["no_session"]), exit_code
-    error = json.loads(machine.succeed("cat /tmp/wait.json"))["error"]
-    assert error["code"] == "no_session" and "louro stopped" in error["message"], error
+    assert exit_code == "0", exit_code
+    assert json.loads(machine.succeed("cat /tmp/wait.json"))["events"], "no events"
 
-start(grants())
 with subtest("louro.toml's default send limit (3/10s per target) rate-limits the 4th send"):
     for n in range(3):
         louro("send", "#bots", f"quick {n}")

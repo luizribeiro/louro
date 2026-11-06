@@ -434,28 +434,59 @@ fn a_reply_that_is_not_from_louro_is_never_echoed() {
     }
 }
 
-#[test]
-fn wait_and_ask_report_no_session_when_louro_stops_while_they_block() {
-    for args in [vec!["wait"], vec!["ask", "luiz", "deploy it?"]] {
-        let dir = tempdir().unwrap();
-        let socket = dir.path().join("louro.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let daemon = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut request = String::new();
-            BufReader::new(stream).read_line(&mut request).unwrap();
-        });
+/// Reads one request line from the next connection on `listener`, then hangs up.
+fn stop_while_blocking(listener: &UnixListener) {
+    let (stream, _) = listener.accept().unwrap();
+    let mut request = String::new();
+    BufReader::new(stream).read_line(&mut request).unwrap();
+}
 
-        louro()
-            .env("LOURO_SOCKET", &socket)
-            .args(&args)
-            .assert()
-            .failure()
-            .code(3)
-            .stdout(predicate::str::contains(r#""code":"no_session""#))
-            .stdout(predicate::str::contains("louro stopped"));
-        daemon.join().unwrap();
-    }
+#[test]
+fn ask_reports_no_session_when_louro_stops_while_it_blocks() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = thread::spawn(move || stop_while_blocking(&listener));
+
+    louro()
+        .env("LOURO_SOCKET", &socket)
+        .args(["ask", "luiz", "deploy it?"])
+        .assert()
+        .failure()
+        .code(3)
+        .stdout(predicate::str::contains(r#""code":"no_session""#))
+        .stdout(predicate::str::contains("louro stopped"));
+    daemon.join().unwrap();
+}
+
+#[test]
+fn wait_rides_out_a_daemon_restart_and_acks_the_new_daemon() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("louro.sock");
+    let old = UnixListener::bind(&socket).unwrap();
+    let restart = socket.clone();
+    let daemons = thread::spawn(move || {
+        stop_while_blocking(&old);
+        drop(old);
+        fs::remove_file(&restart).unwrap();
+        fake_daemon_expecting_one_request(
+            &restart,
+            json!({"Ok": {"cursor": "k3f9.1", "timed_out": true, "more": false, "events": []}}),
+        )
+        .join()
+        .unwrap()
+    });
+
+    louro()
+        .env("LOURO_SOCKET", &socket)
+        .args(["wait", "--timeout", "none"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("k3f9.1"));
+    assert!(
+        daemons.join().unwrap(),
+        "expected the new daemon to get the ack"
+    );
 }
 
 #[test]

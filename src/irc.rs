@@ -459,7 +459,8 @@ pub fn now() -> String {
     papo::time::format(SystemTime::now()).expect("the clock is within years 0000 to 9999")
 }
 
-/// Rounds `delay` up to whole seconds, for a `retry_after` or `retry_in` an agent can poll on.
+/// Rounds `delay` up to whole seconds, for a `retry_after` or `retry_in` an agent can poll on, or
+/// the time a resent `wait` has left, so under a second still blocks rather than polls.
 pub fn whole_seconds(delay: Duration) -> u64 {
     delay.as_secs() + u64::from(delay.subsec_nanos() > 0)
 }
