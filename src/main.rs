@@ -56,6 +56,7 @@ Every result includes `now`, the current time.
 More, as granted:
   names '#channel'                  see who is there
   history TARGET                    earlier chat, as events like wait's; wait's place stays
+  history TARGET --grep RE          search back through up to 1000 messages; `(?i)` ignores case
   send --reply-to MSGID ...         thread a reply
   react TARGET MSGID '👍'           react to a message
   typing TARGET active              show you are typing
