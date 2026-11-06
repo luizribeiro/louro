@@ -6,12 +6,12 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::{env, fs, io};
 
 use regex::{Regex, RegexBuilder};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
@@ -111,6 +111,62 @@ impl Watchlist {
             )
         })
     }
+}
+
+/// The server time of the newest chat the agent acked, saved to `file` so a restarted daemon
+/// can backfill what came after.
+struct Seen {
+    file: PathBuf,
+    until: Option<SystemTime>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Bookmark {
+    until: String,
+}
+
+impl Seen {
+    /// The bookmark saved at `file`. A missing, unreadable or invalid one counts as none, since
+    /// a lost bookmark shouldn't keep the bot from starting.
+    fn load(file: PathBuf) -> Self {
+        let until = read_bookmark(&file).unwrap_or_else(|err| {
+            eprintln!("louro: ignoring the bookmark {}: {err}", file.display());
+            None
+        });
+        Self { file, until }
+    }
+
+    /// Moves the bookmark to the newest chat in `batch`, if that is later. A failed save is only
+    /// logged, since the agent already has the batch.
+    fn advance(&mut self, batch: &Batch) {
+        let Some(newest) = batch
+            .chat()
+            .filter_map(|chat| humantime::parse_rfc3339_weak(&chat.time).ok())
+            .max()
+            .filter(|newest| Some(*newest) > self.until)
+        else {
+            return;
+        };
+        self.until = Some(newest);
+        let bookmark = Bookmark {
+            until: humantime::format_rfc3339_millis(newest).to_string(),
+        };
+        if let Err(err) = write_state(&self.file, &bookmark) {
+            eprintln!(
+                "louro: can't save the bookmark {}: {err}",
+                self.file.display()
+            );
+        }
+    }
+}
+
+fn read_bookmark(file: &Path) -> std::result::Result<Option<SystemTime>, String> {
+    let Some(Bookmark { until }) = read_state(file)? else {
+        return Ok(None);
+    };
+    humantime::parse_rfc3339_weak(&until)
+        .map(Some)
+        .map_err(|err| err.to_string())
 }
 
 /// The JSON saved at `file`, or `None` if there is no file.
@@ -327,6 +383,7 @@ struct Daemon<I> {
     dm_senders: Mutex<HashMap<String, DmHistory>>,
     sent: Mutex<SentLog>,
     watching: Mutex<Watchlist>,
+    seen: Mutex<Seen>,
     last_error: Mutex<Option<Problem>>,
     /// Set from a disconnect until the next registration, so the agent hears of each outage once.
     offline: AtomicBool,
@@ -354,6 +411,7 @@ async fn run(
     filter: Option<Filter>,
     irc: impl Irc,
     mut watching: Watchlist,
+    seen: Seen,
     mut updates: mpsc::Receiver<Update>,
     listener: UnixListener,
     socket_path: &Path,
@@ -371,6 +429,7 @@ async fn run(
         dm_senders: Mutex::default(),
         sent: Mutex::default(),
         watching: Mutex::new(watching),
+        seen: Mutex::new(seen),
         last_error: Mutex::default(),
         offline: AtomicBool::new(false),
         quit: Notify::new(),
@@ -429,6 +488,7 @@ pub async fn start(
         )
     })?;
     let watching = Watchlist::load(state_dir.join("watching.json"))?;
+    let seen = Seen::load(state_dir.join("seen.json"));
     remove_socket(&socket).map_err(|err| cannot_listen(&socket, &err))?;
     let (irc, updates) = irc::connect(&server, password.clone()).await?;
     let listener = UnixListener::bind(&socket).map_err(|err| cannot_listen(&socket, &err))?;
@@ -443,8 +503,8 @@ pub async fn start(
     })));
     Ok(async move {
         run(
-            grants, limits, typing, password, filter, irc, watching, updates, listener, &socket,
-            stop,
+            grants, limits, typing, password, filter, irc, watching, seen, updates, listener,
+            &socket, stop,
         )
         .await
     })
@@ -700,9 +760,10 @@ impl<I: Irc> Daemon<I> {
             let batch = self.inbox.wait(timeout, max).await;
             let cursor = batch.cursor;
             let addressed = self.addressed(&batch);
-            write_line(conn, &Ok::<_, Error>(batch)).await?;
+            write_line(conn, &Ok::<_, Error>(&batch)).await?;
             if let Some(Ack { ack: true }) = read_line(conn).await? {
                 self.inbox.ack(cursor);
+                self.seen.lock().unwrap().advance(&batch);
                 self.start_typing(addressed).await;
             }
             return Ok(());
@@ -1909,6 +1970,7 @@ mod tests {
     ) -> Running {
         let socket = dir.path().join("louro.sock");
         let watching = Watchlist::load(dir.path().join("watching.json")).unwrap();
+        let seen = Seen::load(dir.path().join("seen.json"));
         let irc = Arc::new(FakeIrc::default());
         let (updates, receiver) = mpsc::channel(16);
         let (stop, stopped) = oneshot::channel();
@@ -1922,8 +1984,8 @@ mod tests {
             async move {
                 let listener = UnixListener::bind(&socket)?;
                 run(
-                    grants, limits, typing, password, filter, irc, watching, receiver, listener,
-                    &socket, stopped,
+                    grants, limits, typing, password, filter, irc, watching, seen, receiver,
+                    listener, &socket, stopped,
                 )
                 .await
             }
@@ -1993,6 +2055,10 @@ mod tests {
 
         fn watch_file(&self) -> PathBuf {
             self.dir.path().join("watching.json")
+        }
+
+        fn seen_file(&self) -> PathBuf {
+            self.dir.path().join("seen.json")
         }
     }
 
@@ -4267,6 +4333,82 @@ esac"#;
         fs::create_dir(daemon.watch_file()).unwrap();
         let reply = daemon.call(watch_request("luiz", false)).await;
         assert_eq!(reply["Err"]["code"], "internal");
+    }
+
+    fn at(time: &str, incoming: Incoming) -> Incoming {
+        Incoming {
+            time: time.into(),
+            ..incoming
+        }
+    }
+
+    #[tokio::test]
+    async fn an_acked_wait_saves_its_newest_chat_time_and_never_moves_it_back() {
+        let daemon = launch(grants());
+        let saved = || fs::read_to_string(daemon.seen_file()).unwrap();
+        daemon
+            .update(Update::Disconnected {
+                cause: "ping timeout".into(),
+                retry_in: Some(1),
+            })
+            .await;
+        daemon.wait_and_ack(5).await;
+        assert!(!daemon.seen_file().exists());
+
+        daemon
+            .say(at("2026-10-16T21:06:30.120Z", from_maria("louro: ping")))
+            .await;
+        daemon.say(dm(from_luiz("are you there?"))).await;
+        daemon.wait_and_ack(5).await;
+        assert_eq!(saved(), r#"{"until":"2026-10-16T21:06:30.120Z"}"#);
+
+        daemon
+            .say(Incoming {
+                origin: Origin::History,
+                ..at("2026-10-16T21:05:00.000Z", from_joao("missed this?"))
+            })
+            .await;
+        daemon.wait_and_ack(5).await;
+        daemon
+            .say(at("2026-10-16T21:09:00.000Z", from_maria("louro: still?")))
+            .await;
+        drop(daemon.wait(5).await);
+        assert_eq!(saved(), r#"{"until":"2026-10-16T21:06:30.120Z"}"#);
+
+        daemon.wait_and_ack(5).await;
+        assert_eq!(saved(), r#"{"until":"2026-10-16T21:09:00.000Z"}"#);
+    }
+
+    #[test]
+    fn a_missing_unreadable_or_invalid_bookmark_counts_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("seen.json");
+        assert_eq!(Seen::load(file.clone()).until, None);
+
+        for invalid in ["not json", r#"{"until":"yesterday"}"#, r#"["2026-10-16"]"#] {
+            fs::write(&file, invalid).unwrap();
+            assert_eq!(Seen::load(file.clone()).until, None, "{invalid}");
+        }
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert_eq!(Seen::load(file.clone()).until, None);
+
+        let valid = dir.path().join("valid.json");
+        fs::write(&valid, r#"{"until":"2026-10-16T21:06:30.120Z"}"#).unwrap();
+        assert_eq!(
+            Seen::load(valid).until,
+            humantime::parse_rfc3339("2026-10-16T21:06:30.120Z").ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bookmark_that_cant_be_saved_still_acks() {
+        let daemon = launch(grants());
+        fs::create_dir(daemon.seen_file()).unwrap();
+        daemon.say(dm(from_luiz("are you there?"))).await;
+        daemon.wait_and_ack(5).await;
+        let (_, after_ack) = daemon.wait(0).await;
+        assert_eq!(after_ack["Ok"]["timed_out"], true);
     }
 
     #[tokio::test]
