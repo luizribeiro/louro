@@ -44,8 +44,8 @@ const MAX_REALNAME_CHARS: usize = 100;
 const MAX_WATCHING: usize = 50;
 /// The most channels a `list` returns, busiest first.
 const MAX_LIST: usize = 200;
-/// Clients drop `active` after about 6s.
-const TYPING_REFRESH: Duration = Duration::from_secs(3);
+/// Clients drop `active` after about 6s, and papo drops one sent within 3s of the last.
+const TYPING_REFRESH: Duration = Duration::from_millis(2500);
 const MAX_ASK_SECS: u64 = 60 * 60;
 const MAX_CHOICES: usize = 5;
 const MAX_CHOICE_CHARS: usize = 16;
@@ -2744,15 +2744,15 @@ cat"#,
     }
 
     #[tokio::test(start_paused = true)]
-    async fn typing_after_wait_refreshes_every_3s_until_the_timeout() {
+    async fn typing_after_wait_refreshes_every_2500ms_until_the_timeout() {
         let daemon = launch_typing("dms");
         daemon.say(dm(from_luiz("hey, got a sec?"))).await;
         daemon.wait_and_ack(5).await;
-        time::sleep(Duration::from_secs(7)).await;
-        assert_eq!(daemon.typing_acts().await, typed(&[("luiz", "active"); 3]));
+        time::sleep(Duration::from_secs(8)).await;
+        assert_eq!(daemon.typing_acts().await, typed(&[("luiz", "active"); 4]));
 
         time::sleep(Duration::from_secs(TYPING_TIMEOUT_SECS)).await;
-        let mut acts = typed(&[("luiz", "active"); 4]);
+        let mut acts = typed(&[("luiz", "active"); 5]);
         acts.extend(typed(&[("luiz", "done")]));
         assert_eq!(daemon.typing_acts().await, acts);
     }
@@ -2775,7 +2775,7 @@ cat"#,
         time::sleep(Duration::from_secs(TYPING_TIMEOUT_SECS + 1)).await;
         daemon.wait(0).await;
         let acts = daemon.typing_acts().await;
-        shown.extend(typed(&[("maria", "active"); 4]));
+        shown.extend(typed(&[("maria", "active"); 5]));
         shown.extend(typed(&[("maria", "done")]));
         assert_eq!(acts[4..], shown[4..]);
     }
