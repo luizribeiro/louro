@@ -11,6 +11,7 @@ use std::{env, fs, io};
 
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
@@ -90,32 +91,43 @@ struct Watchlist {
 impl Watchlist {
     /// The list saved at `file`; none there means an empty one.
     fn load(file: PathBuf) -> Result<Self> {
-        let nicks = match fs::read_to_string(&file) {
-            Ok(text) => serde_json::from_str(&text).map_err(|err| err.to_string()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(BTreeSet::new()),
-            Err(err) => Err(err.to_string()),
-        }
-        .map_err(|err| {
-            Error::new(
-                Code::Internal,
-                format!("can't read the watch list {}: {err}", file.display()),
-            )
-            .with_hint("fix or delete it, then start louro again")
-        })?;
+        let nicks = read_state(&file)
+            .map_err(|err| {
+                Error::new(
+                    Code::Internal,
+                    format!("can't read the watch list {}: {err}", file.display()),
+                )
+                .with_hint("fix or delete it, then start louro again")
+            })?
+            .unwrap_or_default();
         Ok(Self { file, nicks })
     }
 
     fn save(&self) -> Result<()> {
-        let temp = self.file.with_extension("json.tmp");
-        fs::write(&temp, json!(self.nicks).to_string())
-            .and_then(|()| fs::rename(&temp, &self.file))
-            .map_err(|err| {
-                Error::new(
-                    Code::Internal,
-                    format!("can't save the watch list {}: {err}", self.file.display()),
-                )
-            })
+        write_state(&self.file, &self.nicks).map_err(|err| {
+            Error::new(
+                Code::Internal,
+                format!("can't save the watch list {}: {err}", self.file.display()),
+            )
+        })
     }
+}
+
+/// The JSON saved at `file`, or `None` if there is no file.
+fn read_state<T: DeserializeOwned>(file: &Path) -> std::result::Result<Option<T>, String> {
+    match fs::read_to_string(file) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|err| err.to_string()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Replaces `file` with `value` as JSON whole, so a crash never leaves half of it.
+fn write_state(file: &Path, value: &impl Serialize) -> io::Result<()> {
+    let temp = file.with_extension("json.tmp");
+    fs::write(&temp, json!(value).to_string()).and_then(|()| fs::rename(&temp, file))
 }
 
 /// A question `ask` sent and still waits on; `answer` takes the choice its target picks.
