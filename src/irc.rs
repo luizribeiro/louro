@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use papo::{
     Account, Away, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events, Fallback,
-    HistoryItem, HistoryReference, HistoryRequest, ListFilter, Message, MessageId, MessageKind,
-    Refusal, RegistrationError, Sasl, Source, State, User,
+    HistoryItem, HistoryReference, HistoryRequest, HistoryTarget, ListFilter, Message, MessageId,
+    MessageKind, Refusal, RegistrationError, Sasl, Source, State, User,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -19,6 +19,10 @@ use crate::socket::Op;
 use crate::text;
 
 const UPDATES_CAPACITY: usize = 256;
+/// The most history items [`Irc::missed`] fetches from one conversation, as papo's reconnect
+/// history does.
+pub const MAX_MISSED: usize = 1_000;
+const MISSED_PAGE: usize = 100;
 
 pub enum Update {
     Chat(Incoming),
@@ -29,7 +33,9 @@ pub enum Update {
         retry_in: Option<u64>,
     },
     /// Registration completed, first at connect and again after each reconnect.
-    Registered,
+    Registered {
+        reconnected: bool,
+    },
     /// A nick came online, went offline, or changed its away message; `away` is the message
     /// while online and away, else `None`.
     Presence {
@@ -217,6 +223,13 @@ pub trait Irc: Send + Sync + 'static {
         after: Option<&str>,
         limit: usize,
     ) -> impl Future<Output = Result<History>> + Send;
+    /// Chat in every conversation with history between `after` and `until`, oldest first and at
+    /// most [`MAX_MISSED`] per conversation, kept and shaped as papo's reconnect history is.
+    fn missed(
+        &self,
+        after: SystemTime,
+        until: SystemTime,
+    ) -> impl Future<Output = Result<Vec<Incoming>>> + Send;
     fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send;
     /// Earlier users of `nick`, most recent first; empty if the server remembers none.
     fn whowas(&self, nick: &str) -> impl Future<Output = Result<Vec<Whowas>>> + Send;
@@ -374,7 +387,9 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             .filter_map(|message| to_incoming(message, state))
             .map(Update::Chat)
             .collect(),
-        Event::Registered(_) => vec![Update::Registered],
+        Event::Registered(registered) => vec![Update::Registered {
+            reconnected: registered.reconnected,
+        }],
         Event::Invited(invited) if invited.is_self => invited
             .by
             .nick()
@@ -727,6 +742,36 @@ impl Irc for PapoIrc {
             }
         };
         self.page(target, request.limit(limit)).await
+    }
+
+    async fn missed(&self, after: SystemTime, until: SystemTime) -> Result<Vec<Incoming>> {
+        let mut missed = Vec::new();
+        for HistoryTarget { target, .. } in self.client.history_targets(after, until).await? {
+            let mut from = HistoryReference::from(after);
+            let mut fetched = 0;
+            while fetched < MAX_MISSED {
+                let page = self
+                    .client
+                    .history(target.clone())
+                    .between(from, until)
+                    .limit(MISSED_PAGE)
+                    .await?;
+                let state = self.client.state();
+                missed.extend(
+                    page.messages()
+                        .filter_map(|message| to_incoming(message, &state)),
+                );
+                fetched += page.items.len();
+                match page.messages().last() {
+                    Some(last) if !page.end && page.items.len() == MISSED_PAGE => {
+                        from = last.into();
+                    }
+                    _ => break,
+                }
+            }
+        }
+        missed.sort_by(|a, b| a.time.cmp(&b.time));
+        Ok(missed)
     }
 
     async fn whois(&self, nick: &str) -> Result<Whois> {
