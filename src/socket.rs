@@ -242,17 +242,27 @@ impl Connection {
     }
 
     pub async fn request(&mut self, op: Op) -> Result<Value> {
-        write_line(&mut self.socket, &Request { v: VERSION, op })
-            .await
-            .map_err(louro_stopped)?;
-        read_line::<Result<Value>>(&mut self.socket)
-            .await
-            .map_err(|err| match err.kind() {
-                io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => not_louro(),
-                _ => louro_stopped(err),
-            })?
-            .ok_or_else(|| louro_stopped("it closed the connection without answering"))?
-            .map_err(|err| self.name_socket_in_version_mismatch(err))
+        self.answer(op).await.map_err(louro_stopped)?
+    }
+
+    /// The reply to `op`, or why the daemon went away before replying.
+    pub async fn answer(&mut self, op: Op) -> io::Result<Result<Value>> {
+        write_line(&mut self.socket, &Request { v: VERSION, op }).await?;
+        match read_line::<Result<Value>>(&mut self.socket).await {
+            Ok(Some(reply)) => Ok(reply.map_err(|err| self.name_socket_in_version_mismatch(err))),
+            Ok(None) => Err(io::Error::other(
+                "it closed the connection without answering",
+            )),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                Ok(Err(not_louro()))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn name_socket_in_version_mismatch(&self, err: Error) -> Error {
@@ -301,7 +311,7 @@ fn not_louro() -> Error {
 }
 
 /// The daemon was reachable but went away mid-request, e.g. stopped while a `wait` blocked.
-fn louro_stopped(err: impl Display) -> Error {
+pub fn louro_stopped(err: impl Display) -> Error {
     Error::new(Code::NoSession, format!("louro stopped ({err})")).with_hint(
         "retry; if `louro status` says louro isn't running, ask your operator to start it",
     )
