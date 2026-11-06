@@ -114,7 +114,8 @@ runs a tool. It prints `{"id", "target", "answer", "timed_out"}`:
 most 1h) passes; both exit 0. If louro stops meanwhile, it exits 4
 (`not_connected`). You answer `!yes k3fa`, or a bare `!yes` when it's the
 only pending ask to you and none closed in the last 10s; otherwise the bot
-replies "which ask?". Answers never reach `wait`.
+replies "which ask?". Answers never reach `wait`; if `irc.react` lists
+you, the bot reacts 🫡 to your answer once it is recorded.
 
 The nick must pass `irc.dm.send`, and `irc.ask` must list its
 `account:NAME`: an answer counts only from a live DM whose account tag

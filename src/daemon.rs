@@ -122,6 +122,8 @@ struct PendingAsk {
     answer: oneshot::Sender<String>,
 }
 
+const RECEIVED_MARK: &str = "\u{1FAE1}";
+
 /// The questions still waiting on an answer, and when the last one to each folded target
 /// closed.
 #[derive(Default)]
@@ -552,9 +554,9 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    /// Whether `incoming` answers a pending ask, which it then resolves, or asks which one it
-    /// means. Only a live DM counts, and only from a sender whose own account tag irc.ask grants,
-    /// never by nick alone.
+    /// Whether `incoming` answers a pending ask, which it then resolves and marks received, or
+    /// asks which one it means. Only a live DM counts, and only from a sender whose own account
+    /// tag irc.ask grants, never by nick alone.
     fn answers_ask(self: &Arc<Self>, incoming: &Incoming) -> bool {
         let from = &incoming.from;
         let may_answer = incoming.private
@@ -568,7 +570,10 @@ impl<I: Irc> Daemon<I> {
         let reply = self.asks.lock().unwrap().answer(&nick, &incoming.text);
         match reply {
             Reply::Chat => false,
-            Reply::Answer => true,
+            Reply::Answer => {
+                self.mark_received(incoming);
+                true
+            }
             Reply::Which(text) => {
                 let daemon = Arc::clone(self);
                 let which = from_louro(&from.nick, text);
@@ -576,6 +581,26 @@ impl<I: Irc> Daemon<I> {
                 true
             }
         }
+    }
+
+    /// Reacts 🫡 to a recorded answer, if the msgid is known and `irc.react` grants the sender.
+    /// Like the other ask notices it skips the limits, the filter and the pending-ask refusal.
+    fn mark_received(self: &Arc<Self>, answer: &Incoming) {
+        let Some(msgid) = answer.msgid.clone() else {
+            return;
+        };
+        let react = Op::React {
+            target: answer.from.nick.clone(),
+            msgid,
+            reaction: RECEIVED_MARK.into(),
+            remove: false,
+        };
+        let daemon = Arc::clone(self);
+        tokio::spawn(async move {
+            if daemon.check_grants(&react).await.is_ok() {
+                let _ = daemon.irc.act(&react).await;
+            }
+        });
     }
 
     /// Once a nick's DMs carried an account, a DM with another one (or none), even one dropped
@@ -2644,6 +2669,25 @@ cat"#,
         }
     }
 
+    impl Running {
+        /// The reactions louro made, as (target, msgid, reaction), once they have settled.
+        async fn reacts(&self) -> Vec<(String, String, String)> {
+            time::sleep(Duration::from_millis(100)).await;
+            let acts = self.irc.acts.lock().unwrap();
+            acts.iter()
+                .filter(|act| act["op"] == "react")
+                .map(|act| {
+                    let arg = |key: &str| act["args"][key].as_str().unwrap().to_owned();
+                    (arg("target"), arg("msgid"), arg("reaction"))
+                })
+                .collect()
+        }
+    }
+
+    fn marked(target: &str) -> (String, String, String) {
+        (target.into(), "4y8kq7j2c9mnz".into(), RECEIVED_MARK.into())
+    }
+
     fn typed(acts: &[(&str, &str)]) -> Vec<(String, String)> {
         acts.iter()
             .map(|&(target, state)| (target.into(), state.into()))
@@ -2800,24 +2844,35 @@ cat"#,
 
     /// A daemon that may ask luiz, logged in as luiz, may speak in #bots, and shows typing to
     /// whoever DMs it. It reads luiz's DMs by nick, so an impostor's `!yes` shows up as chat.
+    fn asking_grants(react: &str) -> Grants {
+        toml::from_str(&format!(
+            r##"
+            irc.join = ["#bots"]
+            irc.send = ["#bots"]
+            irc.dm.read = ["luiz", "maria"]
+            irc.dm.send = ["account:luiz", "maria"]
+            irc.react = {react}
+            irc.typing = ["account:luiz"]
+            irc.ask = ["account:luiz"]
+            "##
+        ))
+        .unwrap()
+    }
+
     fn launch_asking(limits: Limits) -> Running {
         launch_asking_through(limits, None)
     }
 
     /// Like [`launch_asking`], with a filter that is a shell script running `filter`, if any.
     fn launch_asking_through(limits: Limits, filter: Option<&str>) -> Running {
-        let grants = toml::from_str(
-            r##"
-            irc.join = ["#bots"]
-            irc.send = ["#bots"]
-            irc.dm.read = ["luiz", "maria"]
-            irc.dm.send = ["account:luiz", "maria"]
-            irc.react = ["account:luiz", "maria"]
-            irc.typing = ["account:luiz"]
-            irc.ask = ["account:luiz"]
-            "##,
+        launch_asking_granting(
+            asking_grants(r#"["account:luiz", "maria"]"#),
+            limits,
+            filter,
         )
-        .unwrap();
+    }
+
+    fn launch_asking_granting(grants: Grants, limits: Limits, filter: Option<&str>) -> Running {
         let typing = toml::from_str(&format!(
             "after_wait = \"dms\"\ntimeout = \"{TYPING_TIMEOUT_SECS}s\""
         ))
@@ -2910,6 +2965,7 @@ cat"#,
             reply,
             json!({"Ok": {"id": id, "target": "luiz", "answer": null, "timed_out": true}})
         );
+        assert_eq!(daemon.reacts().await, [], "a timeout is not an answer");
         assert_eq!(id.len(), ASK_ID_LEN);
         assert!(id.bytes().all(|byte| ASK_ID_CHARS.contains(&byte)), "{id}");
         assert_eq!(
@@ -2972,6 +3028,7 @@ cat"#,
                 1,
                 "no closed notice after an answer"
             );
+            assert_eq!(daemon.reacts().await, [marked("Luiz")], "{said}");
             let (_, waited) = daemon.wait(0).await;
             assert_eq!(
                 texts(&waited),
@@ -3017,9 +3074,46 @@ cat"#,
         let events = waited["Ok"]["events"].as_array().unwrap();
         assert_eq!(events.len(), not_answers.len(), "{waited}");
         assert!(!reply.is_finished());
+        assert_eq!(daemon.reacts().await, []);
 
         daemon.say(dm(from_luiz(&yes))).await;
         assert_eq!(reply.await.unwrap()["Ok"]["answer"], "yes");
+        assert_eq!(daemon.reacts().await, [marked("luiz")]);
+    }
+
+    async fn answer_yes(daemon: &Running, answer: Incoming) {
+        let (reply, _) = daemon.ask(yes_or_no("drop the cache?")).await;
+        daemon.say(answer).await;
+        assert_eq!(reply.await.unwrap()["Ok"]["answer"], "yes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_is_not_marked_without_irc_react() {
+        let grants = asking_grants(r#"["maria"]"#);
+        let daemon = launch_asking_granting(grants, Limits::default(), None);
+        answer_yes(&daemon, dm(from_luiz("!yes"))).await;
+        assert_eq!(daemon.reacts().await, []);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_is_not_marked_without_a_msgid() {
+        let daemon = launch_asking(Limits::default());
+        let answer = Incoming {
+            msgid: None,
+            ..dm(from_luiz("!yes"))
+        };
+        answer_yes(&daemon, answer).await;
+        assert_eq!(daemon.reacts().await, []);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_is_not_marked_once_the_nick_is_another_account() {
+        let daemon = launch_asking(Limits::default());
+        let (reply, _) = daemon.ask(yes_or_no("drop the cache?")).await;
+        daemon.irc.papo_knows("luiz", Some("mallory"));
+        daemon.say(dm(from_luiz("!yes"))).await;
+        assert_eq!(reply.await.unwrap()["Ok"]["answer"], "yes");
+        assert_eq!(daemon.reacts().await, []);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3040,6 +3134,7 @@ cat"#,
         daemon.say(dm(from_luiz("!maybe"))).await;
         daemon.say(dm(from_luiz(" !No "))).await;
         assert_eq!(reply.await.unwrap()["Ok"]["answer"], "no");
+        assert_eq!(daemon.reacts().await, [marked("luiz")]);
         let waited = daemon.wait_and_ack(0).await;
         assert_eq!(
             texts(&waited),
@@ -3069,11 +3164,13 @@ cat"#,
         let (_, waited) = daemon.wait(0).await;
         assert_eq!(texts(&waited), ["!maybe"]);
         assert!(!first.is_finished() && !second.is_finished());
+        assert_eq!(daemon.reacts().await, [], "asking which is not an answer");
 
         daemon.say(dm(from_luiz(&format!("!later {two}")))).await;
         assert_eq!(second.await.unwrap()["Ok"]["answer"], "later");
         daemon.say(dm(from_luiz(&format!("!no {one}")))).await;
         assert_eq!(first.await.unwrap()["Ok"]["answer"], "no");
+        assert_eq!(daemon.reacts().await, [marked("luiz"), marked("luiz")]);
     }
 
     #[tokio::test(start_paused = true)]
