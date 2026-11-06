@@ -200,9 +200,12 @@ fn status_names_the_socket_of_a_daemon_speaking_another_version() {
     let listener = UnixListener::bind(&socket).unwrap();
     let daemon = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        BufReader::new(&stream)
+            .read_line(&mut String::new())
+            .unwrap();
         let mismatch = json!({"Err": {"code": "version_mismatch", "message": "different versions",
             "hint": "restart the daemon with `louro quit` then `louro connect`"}});
-        let _ = writeln!(stream, "{mismatch}");
+        writeln!(stream, "{mismatch}").unwrap();
     });
 
     louro()
