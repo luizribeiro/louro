@@ -96,6 +96,7 @@ Exit codes that matter:
   6  rate limited: wait retry_after seconds, or send/react less
   7  unsupported: the server lacks the feature; do without it
   8  the filter failed: tell the operator; don't retry in a loop
+  11 this louro and the daemon are different versions: follow the hint
 
 Run `louro <command> --help` for a command's flags.
 ";

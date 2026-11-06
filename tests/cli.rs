@@ -212,7 +212,7 @@ fn status_names_the_socket_of_a_daemon_speaking_another_version() {
         .arg("status")
         .env("LOURO_SOCKET", &socket)
         .assert()
-        .code(1)
+        .code(11)
         .stdout(predicate::str::contains(r#""code":"version_mismatch""#))
         .stdout(predicate::str::contains(socket.to_str().unwrap()))
         .stdout(predicate::str::contains("louro connect --replace"))

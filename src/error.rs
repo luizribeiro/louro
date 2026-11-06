@@ -28,7 +28,7 @@ pub enum Code {
 impl Code {
     pub const fn exit_code(self) -> u8 {
         match self {
-            Self::Internal | Self::VersionMismatch => 1,
+            Self::Internal => 1,
             Self::Usage | Self::TooLong => 2,
             Self::NoSession | Self::SessionExists => 3,
             Self::NotConnected => 4,
@@ -38,6 +38,7 @@ impl Code {
             Self::FilterFailed => 8,
             Self::AuthFailed | Self::ConnectFailed | Self::Tls => 9,
             Self::ServerError | Self::RequestTimeout => 10,
+            Self::VersionMismatch => 11,
         }
     }
 }
