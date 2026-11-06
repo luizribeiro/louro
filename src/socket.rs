@@ -259,6 +259,7 @@ impl Connection {
         if err.code != Code::VersionMismatch {
             return err;
         }
+        let hint = err.hint.unwrap_or_else(|| RESTART_HINT.into());
         Error::new(
             Code::VersionMismatch,
             format!(
@@ -266,7 +267,7 @@ impl Connection {
                 self.path.display()
             ),
         )
-        .with_hint(RESTART_HINT)
+        .with_hint(hint)
     }
 
     /// Tells the daemon the CLI has printed the last `wait` result, so it

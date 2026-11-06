@@ -194,30 +194,35 @@ fn connect_refuses_when_louro_is_already_running_even_another_version() {
 }
 
 #[test]
-fn status_names_the_socket_of_a_daemon_speaking_another_version() {
-    let dir = tempdir().unwrap();
-    let socket = dir.path().join("old.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    let daemon = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        BufReader::new(&stream)
-            .read_line(&mut String::new())
-            .unwrap();
-        let mismatch = json!({"Err": {"code": "version_mismatch", "message": "different versions",
-            "hint": "restart the daemon with `louro quit` then `louro connect`"}});
-        writeln!(stream, "{mismatch}").unwrap();
-    });
+fn status_names_the_socket_of_a_daemon_speaking_another_version_and_keeps_its_hint() {
+    let older_cli = "this louro CLI is older than the daemon; run the current `louro`";
+    for (daemon_hint, shown) in [
+        (json!(older_cli), older_cli),
+        (json!(null), "louro connect --replace"),
+    ] {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("louro.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let daemon = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            BufReader::new(&stream)
+                .read_line(&mut String::new())
+                .unwrap();
+            let mismatch = json!({"Err": {"code": "version_mismatch",
+                "message": "different versions", "hint": daemon_hint}});
+            writeln!(stream, "{mismatch}").unwrap();
+        });
 
-    louro()
-        .arg("status")
-        .env("LOURO_SOCKET", &socket)
-        .assert()
-        .code(11)
-        .stdout(predicate::str::contains(r#""code":"version_mismatch""#))
-        .stdout(predicate::str::contains(socket.to_str().unwrap()))
-        .stdout(predicate::str::contains("louro connect --replace"))
-        .stdout(predicate::str::contains("louro quit").not());
-    daemon.join().unwrap();
+        louro()
+            .arg("status")
+            .env("LOURO_SOCKET", &socket)
+            .assert()
+            .code(11)
+            .stdout(predicate::str::contains(r#""code":"version_mismatch""#))
+            .stdout(predicate::str::contains(socket.to_str().unwrap()))
+            .stdout(predicate::str::contains(shown));
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
