@@ -63,7 +63,9 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
 refuses to start while one runs. To restart it, say after upgrading louro,
 run `louro connect --replace`: it reads the config and password first, so a
 mistake there leaves the running louro alone, then stops the one on that
-socket (it must run as your user) and starts in its place.
+socket (it must run as your user) and starts in its place. A `louro wait`
+blocked meanwhile reconnects and carries on with the time it has left; it
+gives up (exit 3) once louro has been gone for 2 minutes.
 
 ## Config
 

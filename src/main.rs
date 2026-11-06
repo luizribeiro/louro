@@ -37,7 +37,8 @@ talking to you.
 `wait` blocks for up to 60s and then returns. A timeout is normal, not an \
 error: exit 0, `timed_out: true`, and no events. Just call `wait` again. The \
 daemon remembers where you left off, so events are never missed and never \
-replayed.
+replayed. If louro restarts meanwhile, `wait` reconnects on its own; it \
+exits 3 only once louro has been gone for 2 minutes.
 
 If `status` shows `typing.after_wait` other than `off`, louro shows typing \
 for you to anyone who DMed you (or mentioned you, with `dms+mentions`) in \
