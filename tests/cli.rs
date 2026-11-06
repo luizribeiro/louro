@@ -430,7 +430,7 @@ fn a_reply_that_is_not_from_louro_is_never_echoed() {
 }
 
 #[test]
-fn wait_and_ask_report_not_connected_when_louro_stops_while_they_block() {
+fn wait_and_ask_report_no_session_when_louro_stops_while_they_block() {
     for args in [vec!["wait"], vec!["ask", "luiz", "deploy it?"]] {
         let dir = tempdir().unwrap();
         let socket = dir.path().join("louro.sock");
@@ -446,8 +446,8 @@ fn wait_and_ask_report_not_connected_when_louro_stops_while_they_block() {
             .args(&args)
             .assert()
             .failure()
-            .code(4)
-            .stdout(predicate::str::contains(r#""code":"not_connected""#))
+            .code(3)
+            .stdout(predicate::str::contains(r#""code":"no_session""#))
             .stdout(predicate::str::contains("louro stopped"));
         daemon.join().unwrap();
     }

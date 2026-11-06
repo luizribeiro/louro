@@ -493,9 +493,9 @@ with subtest("SIGTERM stops louro, and a blocked wait says louro stopped"):
     stop()
     machine.wait_until_fails("systemctl is-active -q blocked-wait", timeout=TIMEOUT)
     exit_code = machine.succeed("systemctl show -P ExecMainStatus blocked-wait").strip()
-    assert exit_code == str(EXIT_CODES["not_connected"]), exit_code
+    assert exit_code == str(EXIT_CODES["no_session"]), exit_code
     error = json.loads(machine.succeed("cat /tmp/wait.json"))["error"]
-    assert error["code"] == "not_connected" and "louro stopped" in error["message"], error
+    assert error["code"] == "no_session" and "louro stopped" in error["message"], error
 
 start(grants())
 with subtest("louro.toml's default send limit (3/10s per target) rate-limits the 4th send"):

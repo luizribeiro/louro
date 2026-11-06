@@ -90,8 +90,8 @@ allows up to 5 lines and 1000 characters.
 Exit codes that matter:
   0  ok, including a wait timeout
   2  bad input: fix the call
-  3  louro isn't running: ask the operator to start it
-  4  disconnected: retry later
+  3  louro isn't running, or stopped mid-call: ask the operator to start it
+  4  louro is up but its IRC link is down: retry later
   5  not allowed or blocked: don't retry, the operator set this
   6  rate limited: wait retry_after seconds, or send/react less
   7  unsupported: the server lacks the feature; do without it

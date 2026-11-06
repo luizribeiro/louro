@@ -301,8 +301,9 @@ fn not_louro() -> Error {
 
 /// The daemon was reachable but went away mid-request, e.g. stopped while a `wait` blocked.
 fn louro_stopped(err: impl Display) -> Error {
-    Error::new(Code::NotConnected, format!("louro stopped ({err})"))
-        .with_hint("run `louro status`; if louro isn't running, ask your operator to start it")
+    Error::new(Code::NoSession, format!("louro stopped ({err})")).with_hint(
+        "retry; if `louro status` says louro isn't running, ask your operator to start it",
+    )
 }
 
 /// `explicit` (only `connect` has one), else `$LOURO_SOCKET`, else

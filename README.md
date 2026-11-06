@@ -111,8 +111,8 @@ defaults) DMs `[ask k3fa] TEXT` and `reply !yes k3fa or !no k3fa`, then
 blocks until they answer, say from a hook that asks you before an agent
 runs a tool. It prints `{"id", "target", "answer", "timed_out"}`:
 `"answer": "yes"`, or `null` with `"timed_out": true` once the timeout (at
-most 1h) passes; both exit 0. If louro stops meanwhile, it exits 4
-(`not_connected`). You answer `!yes k3fa`, or a bare `!yes` when it's the
+most 1h) passes; both exit 0. If louro stops meanwhile, it exits 3
+(`no_session`). You answer `!yes k3fa`, or a bare `!yes` when it's the
 only pending ask to you and none closed in the last 10s; otherwise the bot
 replies "which ask?". Answers never reach `wait`; if `irc.react` lists
 you, the bot reacts 🫡 to your answer once it is recorded.

@@ -1733,7 +1733,7 @@ mod tests {
             let remaining = self.fail_sends.load(Ordering::Relaxed);
             if remaining > 0 {
                 self.fail_sends.store(remaining - 1, Ordering::Relaxed);
-                return Err(Error::new(Code::NotConnected, "louro stopped"));
+                return Err(Error::new(Code::NotConnected, "the IRC link is down"));
             }
             let threaded = message.reply_to.is_some();
             self.sent.lock().unwrap().push(message);
