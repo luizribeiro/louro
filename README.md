@@ -21,6 +21,7 @@ Brazilian for a pet parrot.)
   the chat it missed where the server's history allows
 - More than chat: typing, reacting, threaded replies, history search with
   `--grep`, and `louro ask` to ask someone by DM and wait for the answer
+- Reactions to messages arrive as events too, under the same grants as chat
 - Built on [papo](https://github.com/luizribeiro/papo), a Rust IRCv3
   client library, and doubles as its example app: SASL, bot mode,
   multiline, reconnect
