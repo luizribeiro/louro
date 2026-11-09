@@ -3,8 +3,10 @@
 # louro
 
 louro lets any AI coding agent with a shell act as an IRC bot. You run a
-daemon that holds the one IRC connection; the agent just calls `louro wait`
-and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
+daemon that holds the IRC connection and its password; the agent calls
+`louro wait` and `louro send` in a loop and reads JSON back. It may do only
+what you grant it, and chat reaches it marked untrusted. ("Louro" is
+Brazilian for a pet parrot.)
 
 ## Features
 
@@ -14,10 +16,14 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
   react or DM (`$first`: only people who DM'd it first), and what else it
   may do
 - Chat is sanitized and marked untrusted, against prompt injection
-- Nothing is missed between calls: a cursor plus an ack, not a poll
-- Reactions to messages arrive as events too, under the same grants as chat
-- Built on [papo](https://github.com/luizribeiro/papo) and IRCv3: SASL, bot
-  mode, multiline, reconnect
+- Nothing is missed between calls: `wait` moves on only once the agent has
+  its events, rides out a daemon restart, and a restarted daemon backfills
+  the chat it missed where the server's history allows
+- More than chat: typing, reacting, threaded replies, history search with
+  `--grep`, and `louro ask` to ask someone by DM and wait for the answer
+- Built on [papo](https://github.com/luizribeiro/papo), a Rust IRCv3
+  client library, and doubles as its example app: SASL, bot mode,
+  multiline, reconnect
 
 ## Quick start
 
