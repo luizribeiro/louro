@@ -282,6 +282,29 @@ with running(
         assert reply_tag(tags) == message["msgid"], tags
         refused("not_allowed", "react", "#lounge", message["msgid"], "👍")
 
+    with subtest("reactions reach wait where chat would, from luiz but not mallory"):
+
+        def reactions(events):
+            return [
+                (event["from"]["nick"], event["target"], event["reaction"], event.get("removed", False))
+                for event in events if event["type"] == "reaction"
+            ]
+
+        [message] = say("luiz", "#bots", "louro: react to this too")
+        msgid = message["msgid"]
+        louro("react", "#bots", msgid, "👍")
+        send_raw("mallory", f"@+draft/react=👀;+reply={msgid} TAGMSG {BOT['user']}")
+        # Reaches louro after mallory's reaction, so once wait has it, that was already dropped.
+        events = say("mallory", "#bots", "i reacted in a DM")
+        send_raw("luiz", f"@+draft/react=🎉;+reply={msgid} TAGMSG #bots")
+        send_raw("luiz", f"@+draft/unreact=🎉;+reply={msgid} TAGMSG {BOT['user']}")
+        events += events_until(lambda more: len(reactions(events + more)) >= 2)
+        assert reactions(events) == [
+            ("luiz", "#bots", "🎉", False),
+            ("luiz", "luiz", "🎉", True),
+        ], events
+        assert all(event["untrusted"] for event in events if event["type"] == "reaction"), events
+
     with subtest("typing shows in #bots as a +typing tag"):
         assert louro("typing", "#bots", "active")["state"] == "active"
         heard_tag("luiz", "+typing", "active")

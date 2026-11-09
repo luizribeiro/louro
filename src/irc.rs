@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 use papo::{
     Account, Away, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events, Fallback,
     HistoryItem, HistoryReference, HistoryRequest, HistoryTarget, ListFilter, Message, MessageId,
-    MessageKind, Refusal, RegistrationError, Sasl, Source, State, User,
+    MessageKind, Refusal, RegistrationError, Sasl, Source, State, User, event,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -26,6 +26,7 @@ const MISSED_PAGE: usize = 100;
 
 pub enum Update {
     Chat(Incoming),
+    Reacted(Reacted),
     /// The connection dropped; `retry_in` (whole seconds) is `None` once papo has stopped
     /// reconnecting.
     Disconnected {
@@ -66,6 +67,20 @@ pub struct Incoming {
     /// Sent by the bot itself; only history has these.
     #[serde(skip)]
     pub from_me: bool,
+}
+
+/// Someone else's live reaction to a message in a joined channel or a DM.
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename = "reaction")]
+pub struct Reacted {
+    pub time: String,
+    pub target: String,
+    pub private: bool,
+    pub from: Sender,
+    pub msgid: String,
+    pub reaction: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
 }
 
 /// Whether chat arrived as it was sent, or from the history papo fetches after a reconnect.
@@ -387,6 +402,10 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             .filter_map(|message| to_incoming(message, state))
             .map(Update::Chat)
             .collect(),
+        Event::Reacted(reacted) => to_reacted(&reacted, state)
+            .map(Update::Reacted)
+            .into_iter()
+            .collect(),
         Event::Registered(registered) => vec![Update::Registered {
             reconnected: registered.reconnected,
         }],
@@ -484,11 +503,21 @@ fn is_threaded(replying: bool, fallbacks: &[Fallback]) -> bool {
     replying && !fallbacks.contains(&Fallback::ReplyTagDropped)
 }
 
+/// Whether `target` is a DM to the bot, or `None` if it is neither that nor a joined channel.
+fn is_private(state: &State, target: &str) -> Option<bool> {
+    let private = state.is_me(target);
+    (private || state.channel(target).is_some()).then_some(private)
+}
+
+fn is_from_me(state: &State, nick: &str, account: Option<&str>) -> bool {
+    state.is_me(nick)
+        || account
+            .zip(state.account())
+            .is_some_and(|(sender, me)| state.casemapping().eq(sender, me))
+}
+
 fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
-    let private = state.is_me(message.target());
-    if !private && state.channel(message.target()).is_none() {
-        return None;
-    }
+    let private = is_private(state, message.target())?;
     let incoming = chat(message, state, message.reply_target(), private)?;
     let origin = chat_origin(message.origin(), incoming.from_me)?;
     Some(Incoming { origin, ..incoming })
@@ -497,11 +526,7 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
 fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option<Incoming> {
     let kind = chat_kind(message.kind())?;
     let nick = message.sender.as_ref().and_then(Source::nick)?;
-    let from_me = state.is_me(nick)
-        || message
-            .account()
-            .zip(state.account())
-            .is_some_and(|(sender, me)| state.casemapping().eq(sender, me));
+    let from_me = is_from_me(state, nick, message.account());
     Some(Incoming {
         kind,
         time: papo::time::format(message.time())?,
@@ -523,6 +548,25 @@ fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option
         reply_to: message.reply_to().map(str::to_owned),
         origin: Origin::History,
         from_me,
+    })
+}
+
+fn to_reacted(reacted: &event::Reacted, state: &State) -> Option<Reacted> {
+    let nick = reacted.source.as_ref().and_then(Source::nick)?;
+    let from = known_sender(state, nick);
+    if is_from_me(state, nick, from.account.as_deref()) {
+        return None;
+    }
+    let target = reacted.target.as_ref();
+    let private = is_private(state, target)?;
+    Some(Reacted {
+        time: now(),
+        target: if private { nick } else { target }.to_owned(),
+        private,
+        from,
+        msgid: reacted.message.to_string(),
+        reaction: reacted.reaction.clone(),
+        removed: reacted.removed,
     })
 }
 

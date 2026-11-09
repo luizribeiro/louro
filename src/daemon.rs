@@ -566,6 +566,14 @@ impl<I: Irc> Daemon<I> {
             Update::Chat(incoming) => {
                 self.ingest(incoming);
             }
+            Update::Reacted(reaction) => {
+                if self
+                    .grants
+                    .may_read(&reaction.target, reaction.private, &reaction.from)
+                {
+                    self.inbox.push_untrusted(reaction);
+                }
+            }
             Update::Disconnected { cause, retry_in } => {
                 *self.last_error.lock().unwrap() = Some(Problem {
                     time: now(),
@@ -1742,7 +1750,7 @@ mod tests {
     use super::*;
     use crate::filter::fixtures::script;
     use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender};
-    use crate::irc::{IrcStatus, Kind, Member, Origin, Sender, Sent, Whois, Whowas};
+    use crate::irc::{IrcStatus, Kind, Member, Origin, Reacted, Sender, Sent, Whois, Whowas};
 
     const PASSWORD: &str = "c0rrect-h0rse-battery";
 
@@ -2303,6 +2311,47 @@ mod tests {
 
         let (_, reply) = daemon.wait(5).await;
         assert_eq!(texts(&reply), ["louro: any news?", "status report, please"]);
+    }
+
+    #[tokio::test]
+    async fn wait_gets_reactions_with_the_same_grants_and_sanitizing_as_chat() {
+        let daemon = launch(grants());
+        let reaction = |target: &str, private, nick, account, reaction: &str| Reacted {
+            time: "2026-11-09T14:02:51.104Z".into(),
+            target: target.into(),
+            private,
+            from: sender(nick, account),
+            msgid: "4y8kq7j2c9mnz".into(),
+            reaction: reaction.into(),
+            removed: false,
+        };
+        for update in [
+            reaction("#bots", false, "maria", Some("maria"), "👍\u{1b}[2J"),
+            reaction("#ops", false, "maria", Some("maria"), "👍"),
+            reaction("joao", true, "joao", None, "❤️"),
+            Reacted {
+                removed: true,
+                ..reaction("luiz", true, "luiz", Some("luiz"), "👍")
+            },
+        ] {
+            daemon.update(Update::Reacted(update)).await;
+        }
+
+        let (_, reply) = daemon.wait(5).await;
+        assert_eq!(
+            reply["Ok"]["events"],
+            json!([
+                {"id": 1, "type": "reaction", "time": "2026-11-09T14:02:51.104Z",
+                 "target": "#bots", "private": false,
+                 "from": {"nick": "maria", "account": "maria", "away": false, "bot": false},
+                 "msgid": "4y8kq7j2c9mnz", "reaction": "👍[2J", "untrusted": true},
+                {"id": 2, "type": "reaction", "time": "2026-11-09T14:02:51.104Z",
+                 "target": "luiz", "private": true,
+                 "from": {"nick": "luiz", "account": "luiz", "away": false, "bot": false},
+                 "msgid": "4y8kq7j2c9mnz", "reaction": "👍", "removed": true,
+                 "untrusted": true},
+            ])
+        );
     }
 
     #[tokio::test]
