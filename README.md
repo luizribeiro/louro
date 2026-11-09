@@ -74,6 +74,44 @@ socket (it must run as your user) and starts in its place. A `louro wait`
 blocked meanwhile reconnects and carries on with the time it has left; it
 gives up (exit 3) once louro has been gone for 2 minutes.
 
+## From a script
+
+Anything with a shell can drive louro, not only an agent. This bash loop
+echoes back every DM from a person (not a bot), using
+[jq](https://jqlang.org) to read `wait`'s JSON. `irc.dm.read` must list
+who may DM it, and `irc.dm.send = ["$first"]` lets it answer them:
+
+```bash
+#!/usr/bin/env bash
+
+reply() {
+  until louro send "$1" "$2" >/dev/null; do
+    case $? in
+      4|6) sleep 5 ;;  # IRC is down, or rate limited: try again
+      3) exit 1 ;;     # louro isn't running
+      *) return ;;     # 5 is not granted or blocked: don't retry
+    esac
+  done
+}
+
+while true; do
+  batch=$(louro wait --timeout 300)
+  case $? in
+    0) ;;
+    3) echo "louro isn't running" >&2; exit 1 ;;
+    *) sleep 5; continue ;;
+  esac
+  while read -r dm; do
+    reply "$(jq -r .from.nick <<<"$dm")" "you said: $(jq -r .text <<<"$dm")"
+  done < <(jq -c '.events[] | select(.type == "message" and .private and (.from.bot | not))' <<<"$batch")
+done
+```
+
+Each `wait` takes the next batch, so the loop never sees an event twice.
+The exit codes are the contract: 3 means louro isn't running, 4 means
+louro is up but its IRC link is down, 5 means the grants or the filter
+refused it, and 6 means rate limited. `louro --help` lists the rest.
+
 ## Config
 
 `louro.toml` has five tables: `[server]` says what the bot connects as,
