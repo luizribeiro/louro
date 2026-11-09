@@ -756,10 +756,7 @@ impl<I: Irc> Daemon<I> {
         }
     }
 
-    /// Checks `op` against the grants with what DMs from its target recorded, then for the
-    /// account that nick has now: papo's state, or else WHOIS when the record alone refuses. A
-    /// grant an earlier holder earned isn't handed on, and a restarted daemon can still DM
-    /// someone it hasn't heard from yet.
+    /// Checks `op` against the grants; for an op that names a nick, as that nick's current holder.
     async fn check_grants(&self, op: &Op) -> Result<()> {
         let (Op::Send(Outgoing { target, .. })
         | Op::React { target, .. }
@@ -769,6 +766,19 @@ impl<I: Irc> Daemon<I> {
         else {
             return self.grants.check(op, &DmHistory::default());
         };
+        self.check_as_held(target, |dm| self.grants.check(op, dm))
+            .await
+    }
+
+    /// Runs `check` with what DMs from `target` recorded, then for the account that nick has
+    /// now: papo's state, or else WHOIS when the record alone refuses. A grant an earlier holder
+    /// earned isn't handed on, and a restarted daemon can still reach someone it hasn't heard
+    /// from yet.
+    async fn check_as_held(
+        &self,
+        target: &str,
+        check: impl Fn(&DmHistory) -> Result<()>,
+    ) -> Result<()> {
         let dm = self
             .dm_senders
             .lock()
@@ -776,7 +786,7 @@ impl<I: Irc> Daemon<I> {
             .get(&target.to_ascii_lowercase())
             .cloned()
             .unwrap_or_default();
-        let record = self.grants.check(op, &dm);
+        let record = check(&dm);
         let current = match (self.irc.account(target), &record) {
             (NickAccount::LoggedIn(account), _) => Some(account),
             (NickAccount::LoggedOut, _) => None,
@@ -787,7 +797,7 @@ impl<I: Irc> Daemon<I> {
                 Err(_) => return record,
             },
         };
-        let held = self.grants.check(op, &dm.held_by(current.as_deref()));
+        let held = check(&dm.held_by(current.as_deref()));
         match (record, held) {
             (_, Ok(())) => Ok(()),
             (Err(refused), Err(_)) => Err(refused),
