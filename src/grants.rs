@@ -62,11 +62,7 @@ impl Grants {
             Op::Typing { target, .. } => self.check_also(&irc.typing, "irc.typing", target, dm),
             Op::History { target, .. } => match target_kind(target)? {
                 TargetKind::Channel => self.check_join(target),
-                TargetKind::Nick => require(
-                    irc.dm.read.matches_sender(target, dm.account.as_deref()),
-                    "irc.dm.read",
-                    target,
-                ),
+                TargetKind::Nick => self.check_dm_read(target, dm),
             },
             Op::Names { channel }
             | Op::Join { channel }
@@ -129,6 +125,12 @@ impl Grants {
             name,
             target,
         )
+    }
+
+    /// Whether DMs from `nick` may be read; `dm` is what DMs from it recorded.
+    pub fn check_dm_read(&self, nick: &str, dm: &DmHistory) -> Result<()> {
+        let granted = self.irc.dm.read.matches_sender(nick, dm.account.as_deref());
+        require(granted, "irc.dm.read", nick)
     }
 
     /// Joining a channel, or reading what it holds, like its members, needs `irc.join`.

@@ -566,6 +566,18 @@ impl<I: Irc> Daemon<I> {
             Update::Chat(incoming) => {
                 self.ingest(incoming);
             }
+            Update::Reacted(reaction) if reaction.private => {
+                let daemon = Arc::clone(self);
+                tokio::spawn(async move {
+                    let nick = &reaction.from.nick;
+                    let readable = daemon
+                        .check_as_held(nick, |dm| daemon.grants.check_dm_read(nick, dm))
+                        .await;
+                    if readable.is_ok() {
+                        daemon.inbox.push_untrusted(reaction);
+                    }
+                });
+            }
             Update::Reacted(reaction) => {
                 if self
                     .grants
@@ -4134,6 +4146,44 @@ esac"#;
                 "irc.dm.read does not grant luiz",
             ),
         ]
+    }
+
+    fn luiz_reacts_privately() -> Update {
+        Update::Reacted(Reacted {
+            time: "2026-11-09T14:02:51.104Z".into(),
+            target: "luiz".into(),
+            private: true,
+            from: sender("luiz", None),
+            msgid: "4y8kq7j2c9mnz".into(),
+            reaction: "👍".into(),
+            removed: false,
+        })
+    }
+
+    fn reactions(reply: &Value) -> usize {
+        let events = reply["Ok"]["events"].as_array().unwrap();
+        events
+            .iter()
+            .filter(|event| event["type"] == "reaction")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_dm_reaction_papo_has_no_account_for_is_read_by_the_dm_record_or_whois() {
+        let daemon = launch(dm_luiz_by_account());
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.wait_and_ack(5).await;
+        daemon.update(luiz_reacts_privately()).await;
+        assert_eq!(reactions(&daemon.wait(5).await.1), 1);
+        assert_eq!(daemon.irc.whoises(), 0);
+
+        for (whois, read) in [(Some("Luiz"), 1), (Some("mallory"), 0), (None, 0)] {
+            let daemon = launch(dm_luiz_by_account());
+            daemon.irc.whois_says("luiz", whois);
+            daemon.update(luiz_reacts_privately()).await;
+            assert_eq!(reactions(&daemon.wait(1).await.1), read, "{whois:?}");
+            assert_eq!(daemon.irc.whoises(), 1, "{whois:?}");
+        }
     }
 
     #[tokio::test]

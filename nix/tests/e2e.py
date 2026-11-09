@@ -305,6 +305,14 @@ with running(
         ], events
         assert all(event["untrusted"] for event in events if event["type"] == "reaction"), events
 
+        send_raw("luiz", "PART #bots")
+        louro_until(lambda names: "luiz" not in members(names), "names", "#bots")
+        send_raw("luiz", f"@+draft/react=🙏;+reply={msgid} TAGMSG {BOT['user']}")
+        [stranger] = reactions(events_until(reactions))
+        assert stranger == ("luiz", "luiz", "🙏", False), stranger
+        send_raw("luiz", "JOIN #bots")
+        louro_until(lambda names: "luiz" in members(names), "names", "#bots")
+
     with subtest("typing shows in #bots as a +typing tag"):
         assert louro("typing", "#bots", "active")["state"] == "active"
         heard_tag("luiz", "+typing", "active")
