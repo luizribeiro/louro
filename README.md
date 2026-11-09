@@ -15,6 +15,7 @@ and `louro send` in a loop. ("Louro" is Brazilian for a pet parrot.)
   may do
 - Chat is sanitized and marked untrusted, against prompt injection
 - Nothing is missed between calls: a cursor plus an ack, not a poll
+- Reactions to messages arrive as events too, under the same grants as chat
 - Built on [papo](https://github.com/luizribeiro/papo) and IRCv3: SASL, bot
   mode, multiline, reconnect
 

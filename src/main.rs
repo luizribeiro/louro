@@ -71,7 +71,8 @@ More, as granted:
   away TEXT, away --back            mark yourself away, or back
 
 An `invite` event means someone invited you to a channel; louro never \
-joins on its own, so just answer politely if you may.
+joins on its own, so just answer politely if you may. A `reaction` event \
+means someone reacted to the message `msgid`, or took it back if `removed`.
 
 Events of type `connection` come from louro itself: the IRC link dropped \
 (`disconnected`) or came back (`reconnected`). Chat sent while it was down \
