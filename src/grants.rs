@@ -2,7 +2,7 @@
 
 use crate::config::{Grants, Selector};
 use crate::error::{Code, Error, Result};
-use crate::irc::{Incoming, Outgoing, Sender};
+use crate::irc::{Outgoing, Sender};
 use crate::socket::{Op, Question};
 
 /// In `irc.dm.send`: anyone whose DM the daemon has received.
@@ -36,11 +36,11 @@ impl DmHistory {
 
 impl Grants {
     /// Channel chat only from `irc.join` channels, DMs only from `irc.dm.read` senders.
-    pub fn may_read(&self, incoming: &Incoming) -> bool {
-        if incoming.private {
-            self.may_hear_privately_from(&incoming.from)
+    pub fn may_read(&self, target: &str, private: bool, from: &Sender) -> bool {
+        if private {
+            self.may_hear_privately_from(from)
         } else {
-            self.irc.join.matches(&incoming.target)
+            self.irc.join.matches(target)
         }
     }
 
@@ -210,7 +210,7 @@ fn not_allowed(message: impl Into<String>) -> Error {
 mod tests {
     use super::*;
     use crate::irc::HistoryQuery;
-    use crate::irc::fixtures::{from_maria, sender};
+    use crate::irc::fixtures::sender;
 
     fn grants(toml: &str) -> Grants {
         toml::from_str(toml).unwrap()
@@ -225,15 +225,6 @@ mod tests {
             irc.dm.send = true
             "##,
         )
-    }
-
-    fn incoming(target: &str, nick: &str, private: bool) -> Incoming {
-        Incoming {
-            target: target.into(),
-            private,
-            from: sender(nick, None),
-            ..from_maria("louro: ping")
-        }
     }
 
     fn check(grants: &Grants, op: &Op) -> Result<()> {
@@ -305,8 +296,12 @@ mod tests {
             ("Luiz", "Luiz", true, true),
             ("maria", "maria", true, false),
         ] {
-            let event = incoming(target, nick, private);
-            assert_eq!(grants.may_read(&event), readable, "{target} from {nick}");
+            let from = sender(nick, None);
+            assert_eq!(
+                grants.may_read(target, private, &from),
+                readable,
+                "{target} from {nick}"
+            );
         }
     }
 

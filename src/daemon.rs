@@ -660,7 +660,9 @@ impl<I: Irc> Daemon<I> {
 
     /// Whether `incoming` reached the inbox.
     fn ingest(self: &Arc<Self>, incoming: Incoming) -> bool {
-        let readable = self.grants.may_read(&incoming);
+        let readable = self
+            .grants
+            .may_read(&incoming.target, incoming.private, &incoming.from);
         if incoming.private {
             self.record_dm_sender(&incoming.from, readable);
         }
@@ -1456,7 +1458,10 @@ impl<I: Irc> Daemon<I> {
     }
 
     fn may_read_history(&self, incoming: &Incoming) -> bool {
-        incoming.from_me || self.grants.may_read(incoming)
+        incoming.from_me
+            || self
+                .grants
+                .may_read(&incoming.target, incoming.private, &incoming.from)
     }
 
     async fn send(&self, message: &Outgoing) -> Result<Value> {
