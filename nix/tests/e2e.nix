@@ -36,6 +36,7 @@ pkgs.testers.runNixOSTest {
       environment.systemPackages = [
         packages.${pkgs.stdenv.hostPlatform.system}.louro
         (import ../demos { inherit pkgs; }).recorder
+        pkgs.jq
       ];
     };
 }

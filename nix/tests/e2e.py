@@ -300,6 +300,36 @@ with subtest("sends outside the grants or over 1000 characters, and ungranted qu
     assert louro("status")["connected"], "a refused quit leaves louro running"
     stop()
 
+AGENT_DEMO = """
+caption("louro: your coding agent as an IRC bot. This is the agent's shell.")
+run("louro wait | jq '.events[] | {from: .from.nick, text, untrusted}'")
+expect('"untrusted": true')
+run('louro send luiz "yes, main is green: 412 tests passed" | jq .sent')
+expect("true")
+caption("grants are deny-by-default: it may not DM mallory")
+run('louro send mallory "hi" | jq .error.code')
+expect('"not_allowed"')
+"""
+
+with running(dm={"read": ["account:luiz"], "send": ["$first"]}):
+    with subtest("demo: the agent waits for luiz's DM, answers him, and can't DM mallory"):
+        start_demo("agent", AGENT_DEMO)
+        machine.wait_until_succeeds(f"ss -xH | grep -qF {SOCKET}", timeout=TIMEOUT)
+        # Lets the clip show wait blocked before the DM wakes it.
+        machine.sleep(2)
+        send_raw("luiz", f"PRIVMSG {BOT['user']} :hey, is the build green?")
+        shown = finish_demo("agent")
+        heard("luiz", "luiz", "yes, main is green: 412 tests passed")
+        assert shown.count('"from": ') == 1, shown
+        for line in [
+            '"from": "luiz"',
+            '"text": "hey, is the build green?"',
+            '"untrusted": true',
+            "louro: irc.dm.send does not grant mallory",
+            '"not_allowed"',
+        ]:
+            assert line in shown, (line, shown)
+
 with running(
     limits=UNLIMITED, join=["#bots", "#help-*"], dm={"read": ["account:luiz"], "send": ["$first"]},
     react=["#bots"], typing=["#bots"], redact=True, topic=["#bots"], whois=True, list=True,
