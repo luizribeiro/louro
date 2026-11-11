@@ -38,11 +38,13 @@ in
     ];
     text = ''
       if [ $# -ne 2 ]; then
-        echo "usage: render-demo CAST OUT_DIR  (writes OUT_DIR/NAME.gif and NAME.mp4)" >&2
+        echo "usage: render-demo CAST OUT_DIR  (writes OUT_DIR/NAME.svg, NAME.gif and NAME.mp4)" >&2
         exit 2
       fi
       name=$(basename "$1" .cast)
       mkdir -p "$2"
+      TERMINAL_LOOK=${lookFile} SVG_TERM=${pkgs.svg-term}/bin/svg-term \
+        ${pkgs.writers.writePython3 "cast-to-svg" { } ./cast_to_svg.py} "$1" "$2/$name.svg"
       agg --quiet \
         ${lib.concatMapStringsSep " " (dir: "--font-dir ${dir}") fontDirs} \
         --font-family "Hack Nerd Font Mono,DejaVu Sans Mono,Noto Emoji" \

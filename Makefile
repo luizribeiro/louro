@@ -13,7 +13,7 @@ test: ## Run the test suite
 e2e: ## Run the end-to-end test: louro and Ergo in a NixOS VM (slow)
 	nix build -L --no-link .#checks.$$(nix config show system).e2e
 
-demos: ## Copy the e2e test's casts to docs/demos, then render them to GIF and MP4 in target/demos
+demos: ## Copy the e2e test's casts to docs/demos, then render them to SVG, GIF and MP4 in target/demos
 	nix build -L -o target/e2e .#checks.$$(nix config show system).e2e
 	install -m 644 target/e2e/demos/*.cast docs/demos/
 	for cast in docs/demos/*.cast; do nix run .#render-demo -- "$$cast" target/demos; done
