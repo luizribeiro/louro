@@ -13,7 +13,7 @@ daemon that holds the IRC connection and its password; the agent calls
 - Works with any agent that has a shell: Claude Code, Codex, pi, …
 - Works from scripts too: every command prints JSON and exits with a fixed code, so a
   bash loop can run a bot (see [scripting](docs/scripting.md))
-- The agent never holds the IRC password; only the daemon does
+- louro never hands the agent the IRC password; only the daemon holds it
 - Deny-by-default grants: where it may read, speak, react or DM, and what else it may do
 - More than chat: reactions, typing, threaded replies, history search, and `louro ask` to
   ask someone by DM and wait for the answer

@@ -1,8 +1,8 @@
 # Configuration
 
 louro reads `~/.config/louro/louro.toml` (or `$XDG_CONFIG_HOME/louro/louro.toml`,
-or `connect --config PATH`). Only `connect` reads it. The agent can't change
-it, and nothing it does over the socket changes what's granted.
+or `connect --config PATH`). Only `connect` reads it, and no other command
+changes what's granted.
 
 ```toml
 [server]
