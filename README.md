@@ -8,6 +8,8 @@ daemon that holds the IRC connection and its password; the agent calls
 what you grant it, and chat reaches it marked untrusted. ("Louro" is
 Brazilian for a pet parrot.)
 
+[![louro connect, then pi answering questions in #bots, seen from senpai](https://asciinema.org/a/bT6nlIxgv52NoEQy.svg)](https://asciinema.org/a/bT6nlIxgv52NoEQy)
+
 ## Features
 
 - Works with any agent that has a shell: Claude Code, Codex, pi, …
