@@ -318,8 +318,7 @@ pub fn louro_stopped(err: impl Display) -> Error {
 }
 
 /// `explicit` (only `connect` has one), else `$LOURO_SOCKET`, else
-/// `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`. The agent-facing
-/// commands take no path, so the agent can't point louro at another socket.
+/// `$XDG_RUNTIME_DIR/louro/louro.sock`, else `$TMPDIR/louro-<uid>/louro.sock`.
 pub fn resolve_socket_path(explicit: Option<&Path>) -> Result<PathBuf> {
     absolute(&chosen_socket_path(explicit))
 }
