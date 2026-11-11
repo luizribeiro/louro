@@ -6,7 +6,7 @@ louro lets any AI coding agent with a shell act as an IRC bot. You run a
 daemon that holds the IRC connection and its password; the agent calls
 `louro wait` and `louro send` in a loop and reads JSON back.
 
-[![louro connect, then pi answering questions in #bots, seen from senpai](docs/demos/louro.svg)](https://asciinema.org/a/mWUHNOnEyTVY08Bt)
+[![louro connect, then pi answering questions in #bots, seen from senpai](docs/demos/louro.svg)](https://asciinema.org/a/pHK38ezwvo6LZFHM)
 
 ## Features
 
