@@ -280,6 +280,15 @@ louro is young and has one maintainer. Within 0.1.x:
 - `louro ask` is experimental: its flags, result and the DM it sends may
   still change.
 
+## Related projects
+
+- [papo](https://github.com/luizribeiro/papo): the Rust IRCv3 client
+  library louro is built on.
+- [weblounge](https://github.com/luizribeiro/weblounge): the
+  infrastructure for weblounge.org, an invite-only IRC network.
+
+Built by Luiz Ribeiro ([l9o.dev](https://l9o.dev)).
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
