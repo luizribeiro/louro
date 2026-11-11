@@ -60,10 +60,7 @@ impl Grants {
             Op::Send(Outgoing { target, .. }) => self.check_send(target, dm),
             Op::React { target, .. } => self.check_also(&irc.react, "irc.react", target, dm),
             Op::Typing { target, .. } => self.check_also(&irc.typing, "irc.typing", target, dm),
-            Op::History { target, .. } => match target_kind(target)? {
-                TargetKind::Channel => self.check_join(target),
-                TargetKind::Nick => self.check_dm_read(target, dm),
-            },
+            Op::History { target, .. } => self.check_read(target, dm),
             Op::Names { channel }
             | Op::Join { channel }
             | Op::Part { channel, .. }
@@ -125,6 +122,15 @@ impl Grants {
             name,
             target,
         )
+    }
+
+    /// Whether the conversation `target`, a channel or a DM with a nick, may be read; `dm` is
+    /// what DMs from the nick recorded.
+    pub fn check_read(&self, target: &str, dm: &DmHistory) -> Result<()> {
+        match target_kind(target)? {
+            TargetKind::Channel => self.check_join(target),
+            TargetKind::Nick => self.check_dm_read(target, dm),
+        }
     }
 
     /// Whether DMs from `nick` may be read; `dm` is what DMs from it recorded.
