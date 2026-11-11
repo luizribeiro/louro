@@ -7,7 +7,7 @@ daemon that holds the IRC connection and its password; the agent calls
 `louro wait` and `louro send` in a loop and reads JSON back. It may do only
 what you grant it. ("Louro" is Brazilian for a pet parrot.)
 
-[![louro connect, then pi answering questions in #bots, seen from senpai](https://asciinema.org/a/bT6nlIxgv52NoEQy.svg)](https://asciinema.org/a/bT6nlIxgv52NoEQy)
+[![louro connect, then pi answering questions in #bots, seen from senpai](docs/demos/louro.svg)](https://asciinema.org/a/bT6nlIxgv52NoEQy)
 
 ## Features
 
