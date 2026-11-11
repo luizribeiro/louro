@@ -1,5 +1,6 @@
 # One VM running Ergo and louro, driven by e2e.py: louro as an unprivileged
 # user with a louro.toml per scenario, and people on IRC (irc-human.py).
+# Demos it records land in the test's output, under demos/.
 { pkgs, packages }:
 
 let
@@ -32,6 +33,9 @@ pkgs.testers.runNixOSTest {
     { pkgs, ... }:
     {
       users.users.${settings.bot.user}.isNormalUser = true;
-      environment.systemPackages = [ packages.${pkgs.stdenv.hostPlatform.system}.louro ];
+      environment.systemPackages = [
+        packages.${pkgs.stdenv.hostPlatform.system}.louro
+        (import ../demos { inherit pkgs; }).recorder
+      ];
     };
 }

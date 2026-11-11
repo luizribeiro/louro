@@ -217,6 +217,35 @@ def say_while_cut_off(channel, text):
     return without_sent(events_until(from_nick("luiz", text)))
 
 
+DEMOS = f"{HOME}/demos"
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\r")
+
+
+def start_demo(name, script):
+    """Starts recording script (nix/demos/record.py's) in the background, in the agent's shell:
+    the bot's user, with louro and jq on its PATH."""
+    write_as_bot(f"{HOME}/{name}.py", script)
+    machine.succeed(shlex.join([
+        "systemd-run", f"--unit=demo-{name}", f"--uid={BOT['user']}",
+        f"--setenv=LOURO_SOCKET={SOCKET}", "--setenv=PATH=/run/current-system/sw/bin",
+        f"--property=StandardOutput=file:/tmp/demo-{name}.out",
+        "--property=StandardError=journal",
+        "/run/current-system/sw/bin/record", "--prompt", "agent@vm:~", "--rows", "18",
+        f"{DEMOS}/{name}.cast", f"{HOME}/{name}.py",
+    ]))
+
+
+def finish_demo(name):
+    """Waits for the demo to end, copies its cast to the test's output, and returns what it
+    showed, without escapes."""
+    machine.wait_until_fails(f"systemctl is-active -q demo-{name}", timeout=TIMEOUT)
+    status = machine.succeed(f"systemctl show -P ExecMainStatus demo-{name}").strip()
+    shown = ANSI.sub("", machine.succeed(f"cat /tmp/demo-{name}.out"))
+    assert status == "0", f"demo {name}: exit {status}: {shown}"
+    machine.copy_from_machine(f"{DEMOS}/{name}.cast", "demos")
+    return shown
+
+
 start_ergo()
 start_humans()
 
