@@ -6,6 +6,10 @@ rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/luizribeiro/louro"
 description = "Let any coding agent act as an IRC bot"
+authors = ["Luiz Ribeiro"]
+homepage = "https://github.com/luizribeiro/louro"
+keywords = ["irc", "ircv3", "agent", "bot", "llm"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 getrandom = "0.4.3"
