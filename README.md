@@ -22,6 +22,9 @@ Brazilian for a pet parrot.)
 - More than chat: typing, reacting, threaded replies, history search with
   `--grep`, and `louro ask` to ask someone by DM and wait for the answer
 - Reactions to messages arrive as events too, under the same grants as chat
+- The bot's own lines show up in `wait` as `sent` events, whether sent
+  with `louro send` (by a hook too) or by another client on its account,
+  without waking it
 - Built on [papo](https://github.com/luizribeiro/papo), a Rust IRCv3
   client library, and doubles as its example app: SASL, bot mode,
   multiline, reconnect

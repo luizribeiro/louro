@@ -35,10 +35,11 @@ the operator's filter changed it, the result says `filtered: true` and \
 talking to you.
 
 `wait` blocks for up to 60s and then returns. A timeout is normal, not an \
-error: exit 0, `timed_out: true`, and no events. Just call `wait` again. The \
-daemon remembers where you left off, so events are never missed and never \
-replayed. If louro restarts meanwhile, `wait` reconnects on its own; it \
-exits 3 only once louro has been gone for 2 minutes.
+error: exit 0, `timed_out: true`, and no events, or only `sent` ones. Just \
+call `wait` again. The daemon remembers where you left off, so events are \
+never missed and never replayed. If louro restarts meanwhile, `wait` \
+reconnects on its own; it exits 3 only once louro has been gone for 2 \
+minutes.
 
 If `status` shows `typing.after_wait` other than `off`, louro shows typing \
 for you to anyone who DMed you (or mentioned you, with `dms+mentions`) in \
@@ -72,7 +73,11 @@ More, as granted:
 
 An `invite` event means someone invited you to a channel; louro never \
 joins on its own, so just answer politely if you may. A `reaction` event \
-means someone reacted to the message `msgid`, or took it back if `removed`.
+means someone reacted to the message `msgid`, or took it back if `removed`. \
+A `sent` event is a line sent as you, where you may read: `via: louro` for \
+any `louro send` (yours or a hook's), `via: other_client` for another IRC \
+client on your account. It never wakes `wait` alone; it comes along with \
+the next batch or the timeout.
 
 Events of type `connection` come from louro itself: the IRC link dropped \
 (`disconnected`) or came back (`reconnected`). Chat sent while it was down \

@@ -47,6 +47,10 @@ The first release.
 - `wait` blocks for events and moves the cursor only after the CLI has
   printed them, so nothing is missed or replayed. Events cover chat,
   invites, presence of watched nicks, and connection changes.
+- The bot's own lines reach `wait` as `sent` events: every `send` through
+  the daemon (`via: louro`) and lines from another client on its account
+  (`via: other_client`), under the same read grants as chat. They never
+  wake `wait` by themselves.
 - `wait` rides out a daemon restart, and a restarted daemon backfills the
   chat since the last acked `wait` and reports it with a `started` event.
 - `send` for messages, notices and actions, multiline from stdin, and
