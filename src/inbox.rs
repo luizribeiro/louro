@@ -20,6 +20,8 @@ pub const NOTICE: &str = "the fields of an event marked untrusted come from othe
 #[derive(Clone, Serialize)]
 pub struct Event {
     id: u64,
+    #[serde(skip)]
+    wakes: bool,
     #[serde(flatten)]
     body: Body,
 }
@@ -55,6 +57,13 @@ impl Body {
             untrusted: true,
         }
     }
+
+    fn untrusted(event: impl Serialize) -> Self {
+        Self::Untrusted {
+            event: text::clean_json(event),
+            untrusted: true,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -83,15 +92,20 @@ struct Buffer {
 }
 
 impl Buffer {
-    fn push(&mut self, body: Body) {
+    fn push(&mut self, body: Body, wakes: bool) {
         self.last_id += 1;
         if self.unread.len() == BUFFER_CAP {
             self.unread.pop_front();
         }
         self.unread.push_back(Event {
             id: self.last_id,
+            wakes,
             body,
         });
+    }
+
+    fn wakes(&self) -> bool {
+        self.unread.iter().any(|event| event.wakes)
     }
 
     fn batch(&self, max: usize) -> Batch {
@@ -128,14 +142,20 @@ impl Inbox {
     }
 
     pub fn push_untrusted(&self, event: impl Serialize) {
-        self.push_body(Body::Untrusted {
-            event: text::clean_json(event),
-            untrusted: true,
-        });
+        self.push_body(Body::untrusted(event));
+    }
+
+    /// Like [`Self::push_untrusted`], but it never ends a `wait` on its own: it comes along in
+    /// the next batch something else, or the timeout, ends.
+    pub fn push_quiet(&self, event: impl Serialize) {
+        self.buffer
+            .lock()
+            .unwrap()
+            .push(Body::untrusted(event), false);
     }
 
     fn push_body(&self, body: Body) {
-        self.buffer.lock().unwrap().push(body);
+        self.buffer.lock().unwrap().push(body, true);
         self.arrived.notify_waiters();
     }
 
@@ -145,21 +165,24 @@ impl Inbox {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
-            let batch = self.buffer.lock().unwrap().batch(max.get());
-            if !batch.events.is_empty() {
-                return batch;
+            if self.buffer.lock().unwrap().wakes() {
+                return self.batch(max);
             }
             if let Some(deadline) = deadline {
                 if time::timeout_at(deadline, arrived).await.is_err() {
                     return Batch {
                         timed_out: true,
-                        ..batch
+                        ..self.batch(max)
                     };
                 }
             } else {
                 arrived.await;
             }
         }
+    }
+
+    fn batch(&self, max: NonZeroUsize) -> Batch {
+        self.buffer.lock().unwrap().batch(max.get())
     }
 
     pub fn ack(&self, cursor: u64) {
@@ -174,8 +197,10 @@ impl Inbox {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::irc::fixtures::{from_joao, from_maria, sender};
+    use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender, sent_to_luiz};
     use crate::text::MAX_TEXT_CHARS;
 
     fn max(n: usize) -> NonZeroUsize {
@@ -237,6 +262,52 @@ mod tests {
         let rest = inbox.wait(0, max(2)).await;
         assert_eq!(ids(&rest), [3]);
         assert!(!rest.more);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_event_alone_comes_back_only_at_the_timeout() {
+        let inbox = Inbox::default();
+        inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
+
+        let started = Instant::now();
+        let batch = inbox.wait(60, max(20)).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert!(batch.timed_out);
+        assert_eq!(ids(&batch), [1]);
+        assert_eq!(batch.cursor, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_event_comes_along_with_the_next_one_that_wakes_wait() {
+        let inbox = Arc::new(Inbox::default());
+        inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
+        let waiting = tokio::spawn({
+            let inbox = Arc::clone(&inbox);
+            async move { inbox.wait(60, max(20)).await }
+        });
+        time::sleep(Duration::from_secs(5)).await;
+        inbox.push_quiet(sent_to_luiz("the changelog is up too"));
+        inbox.push(dm(from_luiz("nice, which commit?")));
+
+        let batch = waiting.await.unwrap();
+        assert!(!batch.timed_out);
+        assert_eq!(ids(&batch), [1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn an_event_past_max_still_wakes_wait_for_the_quiet_ones_before_it() {
+        let inbox = Inbox::default();
+        inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
+        inbox.push_quiet(sent_to_luiz("the changelog is up too"));
+        inbox.push(dm(from_luiz("nice, which commit?")));
+
+        let first = inbox.wait(60, max(2)).await;
+        assert!(!first.timed_out);
+        assert_eq!(ids(&first), [1, 2]);
+        assert!(first.more);
+
+        inbox.ack(first.cursor);
+        assert_eq!(ids(&inbox.wait(60, max(2)).await), [3]);
     }
 
     #[tokio::test]

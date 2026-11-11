@@ -83,6 +83,26 @@ pub struct Reacted {
     pub removed: bool,
 }
 
+/// A line the bot itself sent.
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename = "sent")]
+pub struct OwnLine {
+    pub time: String,
+    pub target: String,
+    pub private: bool,
+    pub kind: Kind,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msgid: Option<String>,
+    pub via: Via,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Via {
+    Louro,
+}
+
 /// Whether chat arrived as it was sent, or from the history papo fetches after a reconnect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -885,7 +905,7 @@ impl From<papo::Error> for Error {
 #[cfg(test)]
 /// Chat from the people the unit tests use.
 pub mod fixtures {
-    use super::{Incoming, Kind, Origin, Sender};
+    use super::{Incoming, Kind, Origin, OwnLine, Sender, Via};
 
     pub fn sender(nick: &str, account: Option<&str>) -> Sender {
         Sender {
@@ -934,6 +954,18 @@ pub mod fixtures {
             private: true,
             target: incoming.from.nick.clone(),
             ..incoming
+        }
+    }
+
+    pub fn sent_to_luiz(text: &str) -> OwnLine {
+        OwnLine {
+            time: "2026-11-11T09:12:40.517Z".into(),
+            target: "luiz".into(),
+            private: true,
+            kind: Kind::Message,
+            text: text.into(),
+            msgid: Some("c2m8w1u0pq7rs".into()),
+            via: Via::Louro,
         }
     }
 }

@@ -27,7 +27,7 @@ use crate::grants::{self, DmHistory};
 use crate::inbox::{Batch, Inbox, NOTICE};
 use crate::irc::{
     self, History, HistoryQuery, Incoming, Irc, Kind, Listed, NickAccount, Origin, Outgoing,
-    Secret, Sender, Typing, Update, now, whole_seconds,
+    OwnLine, Secret, Sender, Typing, Update, Via, now, whole_seconds,
 };
 use crate::output;
 use crate::socket::{
@@ -1233,8 +1233,12 @@ impl<I: Irc> Daemon<I> {
             Op::Status {} => Ok(self.status()),
             Op::Wait { .. } | Op::Ask(_) => unreachable!("serve answers this op itself"),
             Op::Send(message) => {
-                let _turn = self.speak_to(&message.target).await?;
-                self.send(message).await
+                let (result, line) = {
+                    let _turn = self.speak_to(&message.target).await?;
+                    self.send(message).await?
+                };
+                self.show_own(line).await;
+                Ok(result)
             }
             Op::Names { channel } => self.names(channel),
             Op::Topic { channel, set: None } => Ok(untrusted(
@@ -1494,19 +1498,40 @@ impl<I: Irc> Daemon<I> {
                 .may_read(&incoming.target, incoming.private, &incoming.from)
     }
 
-    async fn send(&self, message: &Outgoing) -> Result<Value> {
+    async fn send(&self, message: &Outgoing) -> Result<(Value, OwnLine)> {
         let sent = self.irc.send(message.clone()).await?;
         let target = &message.target;
         let lines = message.text.lines().count();
         let mut result = json!({"sent": true, "target": target, "lines": lines});
-        if let Some(msgid) = sent.msgid {
+        if let Some(msgid) = &sent.msgid {
             self.sent.lock().unwrap().record(target, msgid.clone());
-            result["msgid"] = msgid.into();
+            result["msgid"] = msgid.as_str().into();
         }
         if message.reply_to.is_some() {
             result["threaded"] = sent.threaded.into();
         }
-        Ok(result)
+        let line = OwnLine {
+            time: now(),
+            target: target.clone(),
+            private: !grants::is_channel(target),
+            kind: message.kind,
+            text: message.text.clone(),
+            msgid: sent.msgid,
+            via: Via::Louro,
+        };
+        Ok((result, line))
+    }
+
+    /// Lets `wait` show the bot's own `line` where this daemon may read its conversation, which
+    /// for a DM is the recipient's: the sender is always the bot.
+    async fn show_own(&self, line: OwnLine) {
+        let target = &line.target;
+        let readable = self
+            .check_as_held(target, |dm| self.grants.check_read(target, dm))
+            .await;
+        if readable.is_ok() {
+            self.inbox.push_quiet(line);
+        }
     }
 
     /// The rate windows `op` counts against, each with its key, limit and the action it names.
@@ -2376,6 +2401,130 @@ mod tests {
         );
     }
 
+    fn dm_grants() -> Grants {
+        toml::from_str(
+            r##"
+            irc.join = ["#bots"]
+            irc.send = ["#bots"]
+            irc.dm.read = ["account:luiz"]
+            irc.dm.send = ["luiz", "maria"]
+            "##,
+        )
+        .unwrap()
+    }
+
+    /// The `sent` events in `reply`, without their `time`, which is when louro sent them.
+    fn sent_events(reply: &Value) -> Vec<Value> {
+        let events = reply["Ok"]["events"].as_array().unwrap().iter();
+        events
+            .filter(|event| event["type"] == "sent")
+            .map(|event| {
+                let mut event = event.clone();
+                assert!(event["time"].is_string(), "{event}");
+                event.as_object_mut().unwrap().remove("time");
+                event
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_send_comes_back_in_the_next_wait_without_waking_it() {
+        let daemon = launch(dm_grants());
+        daemon
+            .irc
+            .accounts
+            .lock()
+            .unwrap()
+            .insert("luiz".into(), Some("luiz".into()));
+        daemon
+            .call(send_request("luiz", "deployed louro 0.1.0\u{1b}[2J"))
+            .await;
+
+        let reply = daemon.wait_and_ack(1).await;
+        assert_eq!(reply["Ok"]["timed_out"], true);
+        assert_eq!(
+            sent_events(&reply),
+            [
+                json!({"id": 1, "type": "sent", "target": "luiz", "private": true,
+                    "kind": "message", "text": "deployed louro 0.1.0[2J",
+                    "msgid": "c2m8w1u0pq7rs", "via": "louro", "untrusted": true})
+            ]
+        );
+        assert!(!daemon.seen_file().exists());
+    }
+
+    #[tokio::test]
+    async fn a_send_comes_along_when_a_dm_wakes_wait() {
+        let daemon = launch(dm_grants());
+        daemon
+            .irc
+            .accounts
+            .lock()
+            .unwrap()
+            .insert("luiz".into(), Some("luiz".into()));
+        let (reply, ()) = tokio::join!(
+            async {
+                let mut conn = daemon.connect().await;
+                write_line(&mut conn, &wait_request(30)).await.unwrap();
+                read_line::<Value>(&mut conn).await.unwrap().unwrap()
+            },
+            async {
+                daemon
+                    .call(send_request("luiz", "deployed louro 0.1.0"))
+                    .await;
+                daemon.say(dm(from_luiz("nice, which commit?"))).await;
+            }
+        );
+        assert_eq!(reply["Ok"]["timed_out"], false);
+        let events = reply["Ok"]["events"].as_array().unwrap();
+        let shown: Vec<_> = events
+            .iter()
+            .map(|event| (&event["type"], &event["text"]))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (&json!("sent"), &json!("deployed louro 0.1.0")),
+                (&json!("message"), &json!("nice, which commit?")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_shows_only_where_this_daemon_may_read_the_conversation() {
+        let daemon = launch(dm_grants());
+        daemon
+            .irc
+            .accounts
+            .lock()
+            .unwrap()
+            .insert("maria".into(), Some("maria".into()));
+        daemon
+            .irc
+            .whois_accounts
+            .lock()
+            .unwrap()
+            .insert("luiz".into(), Some("luiz".into()));
+        daemon
+            .call(send_request("maria", "the release is out"))
+            .await;
+        daemon.call(send_request("luiz", "told maria")).await;
+        daemon
+            .call(send_request("#bots", "louro 0.1.0 is out"))
+            .await;
+
+        let reply = daemon.wait_and_ack(0).await;
+        let shown: Vec<_> = sent_events(&reply)
+            .into_iter()
+            .map(|event| (event["target"].clone(), event["private"].clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            [(json!("luiz"), json!(true)), (json!("#bots"), json!(false))]
+        );
+        assert_eq!(daemon.irc.sent.lock().unwrap().len(), 3);
+    }
+
     #[tokio::test]
     async fn wait_gets_invites_only_from_dm_read_senders() {
         let daemon = launch(toml::from_str(r#"irc.dm.read = ["account:luiz"]"#).unwrap());
@@ -2549,6 +2698,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sent_event_shows_the_filters_rewrite() {
+        let daemon = launch_filtered(
+            grants(),
+            Limits::default(),
+            "sed 's/ghp_[A-Za-z0-9]*/[redacted]/g'",
+        );
+        daemon
+            .call(send_request("#bots", &format!("use {TOKEN}")))
+            .await;
+
+        let reply = daemon.wait_and_ack(0).await;
+        assert_eq!(sent_events(&reply)[0]["text"], "use [redacted]");
+    }
+
+    #[tokio::test]
     async fn a_block_never_reaches_irc_or_uses_up_the_rate_limit() {
         let daemon = launch_filtered(
             grants(),
@@ -2567,6 +2731,7 @@ mod tests {
             );
         }
         assert!(daemon.irc.sent.lock().unwrap().is_empty());
+        assert!(sent_events(&daemon.wait_and_ack(0).await).is_empty());
     }
 
     #[tokio::test]
@@ -3075,6 +3240,17 @@ cat"#,
         acts.iter()
             .map(|&(target, state)| (target.into(), state.into()))
             .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sent_event_never_starts_typing() {
+        let daemon = launch_typing("dms+mentions");
+        daemon
+            .call(send_request("#bots", "louro: note to self, tag 0.1.0"))
+            .await;
+        let reply = daemon.wait_and_ack(0).await;
+        assert_eq!(sent_events(&reply).len(), 1);
+        assert_eq!(daemon.typing_acts().await, []);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4052,7 +4228,11 @@ esac"#;
             daemon.say(hijacked).await;
             daemon.say(from_maria("louro: anyone home?")).await;
             let reply = daemon.wait_and_ack(5).await;
-            assert_eq!(texts(&reply), ["louro: anyone home?"], "{impostor:?}");
+            assert_eq!(
+                texts(&reply),
+                ["sure", "louro: anyone home?"],
+                "{impostor:?}"
+            );
 
             for request in [send_request("luiz", "sure"), history_request("luiz", 20)] {
                 let reply = daemon.call(request).await;
