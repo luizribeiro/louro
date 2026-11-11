@@ -140,6 +140,10 @@
           inherit louro;
         };
 
+        apps.render-demo = flake-utils.lib.mkApp {
+          drv = (import ./nix/demos { inherit pkgs; }).render;
+        };
+
         checks = {
           inherit louro;
           pre-commit = runHooks offlineHooks;

@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help check test e2e module fmt lint hooks precommit clean
+.PHONY: help check test e2e demos module fmt lint hooks precommit clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -12,6 +12,11 @@ test: ## Run the test suite
 
 e2e: ## Run the end-to-end test: louro and Ergo in a NixOS VM (slow)
 	nix build -L --no-link .#checks.$$(nix config show system).e2e
+
+demos: ## Copy the e2e test's casts to docs/demos, then render them to GIF and MP4 in target/demos
+	nix build -L -o target/e2e .#checks.$$(nix config show system).e2e
+	install -m 644 target/e2e/demos/*.cast docs/demos/
+	for cast in docs/demos/*.cast; do nix run .#render-demo -- "$$cast" target/demos; done
 
 module: ## Run the NixOS module's VM test: services.louro with Ergo (slow)
 	nix build -L --no-link .#checks.$$(nix config show system).module
