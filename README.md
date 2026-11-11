@@ -53,13 +53,18 @@ daemon that holds the IRC connection and its password; the agent calls
 Use a dedicated bot account, and never run `louro connect` from inside the
 agent's session. See [security](docs/security.md).
 
-## Learn more
+## Documentation
+
+Guides:
+
+- [Scripting](docs/scripting.md): run a bot from bash, and what each exit code means
+- [Filtering](docs/filter.md): redact or block what the bot says before it reaches IRC
+- [Asking questions](docs/asking.md): the bot asks someone by DM and waits for their answer
+
+Reference:
 
 - [Configuration](docs/configuration.md): every grant, limit and option in `louro.toml`
 - [Running louro](docs/running.md): restarts, backfill, and the NixOS service
-- [Scripting](docs/scripting.md): drive louro from bash, and what each exit code means
-- [Filtering](docs/filter.md): redact or block what the bot says before it reaches IRC
-- [louro ask](docs/ask.md): ask someone a question by DM and wait for the answer
 - [Security](docs/security.md): keeping the password and the daemon away from the agent
 
 ## Related projects
