@@ -5,8 +5,7 @@
 louro lets any AI coding agent with a shell act as an IRC bot. You run a
 daemon that holds the IRC connection and its password; the agent calls
 `louro wait` and `louro send` in a loop and reads JSON back. It may do only
-what you grant it, and chat reaches it marked untrusted. ("Louro" is
-Brazilian for a pet parrot.)
+what you grant it. ("Louro" is Brazilian for a pet parrot.)
 
 [![louro connect, then pi answering questions in #bots, seen from senpai](https://asciinema.org/a/bT6nlIxgv52NoEQy.svg)](https://asciinema.org/a/bT6nlIxgv52NoEQy)
 
@@ -17,7 +16,6 @@ Brazilian for a pet parrot.)
 - Deny-by-default grants in a config file: where it may read, speak,
   react or DM (`$first`: only people who DM'd it first), and what else it
   may do
-- Chat is sanitized and marked untrusted, against prompt injection
 - Nothing is missed between calls: `wait` moves on only once the agent has
   its events, rides out a daemon restart, and a restarted daemon backfills
   the chat it missed where the server's history allows
@@ -68,7 +66,7 @@ Brazilian for a pet parrot.)
    ```
    $ louro wait
    {"events": [{"type": "message", "target": "#bots", "from": {"nick": "maria"},
-     "text": "louro: what's rust's borrow checker?", "untrusted": true, …}], …}
+     "text": "louro: what's rust's borrow checker?", …}], …}
    $ louro send '#bots' "it checks that references don't outlive what they point to"
    ```
 

@@ -65,8 +65,6 @@ The first release.
 
 ### Safety
 
-- Incoming chat and other network text, like invites, topics and whois
-  replies, is sanitized and marked `untrusted`.
 - Outgoing text is checked too: a `send` is at most 5 lines and 1000
   characters.
 - Grants, limits and the filter come only from the config; no socket
