@@ -566,6 +566,10 @@ impl<I: Irc> Daemon<I> {
             Update::Chat(incoming) => {
                 self.ingest(incoming);
             }
+            Update::Sent(line) => {
+                let daemon = Arc::clone(self);
+                tokio::spawn(async move { daemon.show_own(line).await });
+            }
             Update::Reacted(reaction) if reaction.private => {
                 let daemon = Arc::clone(self);
                 tokio::spawn(async move {
@@ -1796,7 +1800,7 @@ mod tests {
 
     use super::*;
     use crate::filter::fixtures::script;
-    use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender};
+    use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender, sent_to_luiz};
     use crate::irc::{IrcStatus, Kind, Member, Origin, Reacted, Sender, Sent, Whois, Whowas};
 
     const PASSWORD: &str = "c0rrect-h0rse-battery";
@@ -2523,6 +2527,50 @@ mod tests {
             [(json!("luiz"), json!(true)), (json!("#bots"), json!(false))]
         );
         assert_eq!(daemon.irc.sent.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn another_clients_lines_show_only_where_this_daemon_may_read() {
+        let daemon = launch(dm_grants());
+        daemon
+            .irc
+            .accounts
+            .lock()
+            .unwrap()
+            .insert("maria".into(), Some("maria".into()));
+        daemon
+            .irc
+            .whois_accounts
+            .lock()
+            .unwrap()
+            .insert("luiz".into(), Some("luiz".into()));
+        let other_client = |target: &str, text: &str| OwnLine {
+            target: target.into(),
+            private: !grants::is_channel(target),
+            via: Via::OtherClient,
+            ..sent_to_luiz(text)
+        };
+        for line in [
+            other_client("maria", "the release is out"),
+            other_client("#ops", "deploying now"),
+            other_client("luiz", "told maria\u{7}"),
+            other_client("#bots", "louro 0.1.0 is out"),
+        ] {
+            daemon.update(Update::Sent(line)).await;
+        }
+
+        let reply = daemon.wait_and_ack(1).await;
+        assert_eq!(
+            sent_events(&reply),
+            [
+                json!({"id": 1, "type": "sent", "target": "luiz", "private": true,
+                       "kind": "message", "text": "told maria", "msgid": "c2m8w1u0pq7rs",
+                       "via": "other_client", "untrusted": true}),
+                json!({"id": 2, "type": "sent", "target": "#bots", "private": false,
+                       "kind": "message", "text": "louro 0.1.0 is out",
+                       "msgid": "c2m8w1u0pq7rs", "via": "other_client", "untrusted": true}),
+            ]
+        );
     }
 
     #[tokio::test]

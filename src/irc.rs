@@ -26,6 +26,8 @@ const MISSED_PAGE: usize = 100;
 
 pub enum Update {
     Chat(Incoming),
+    /// A line another client on the bot's account sent.
+    Sent(OwnLine),
     Reacted(Reacted),
     /// The connection dropped; `retry_in` (whole seconds) is `None` once papo has stopped
     /// reconnecting.
@@ -101,6 +103,7 @@ pub struct OwnLine {
 #[serde(rename_all = "snake_case")]
 pub enum Via {
     Louro,
+    OtherClient,
 }
 
 /// Whether chat arrived as it was sent, or from the history papo fetches after a reconnect.
@@ -411,6 +414,12 @@ async fn forward(client: Client, mut events: Events, updates: mpsc::Sender<Updat
 
 fn to_updates(event: Event, state: &State) -> Vec<Update> {
     match event {
+        Event::Message(message) if message.origin() == papo::Origin::OtherSession => {
+            to_own_line(&message, state)
+                .map(Update::Sent)
+                .into_iter()
+                .collect()
+        }
         Event::Message(message) => to_incoming(&message, state)
             .map(Update::Chat)
             .into_iter()
@@ -568,6 +577,24 @@ fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option
         reply_to: message.reply_to().map(str::to_owned),
         origin: Origin::History,
         from_me,
+    })
+}
+
+/// Another client's line to a nick or a joined channel.
+fn to_own_line(message: &Message, state: &State) -> Option<OwnLine> {
+    let target = message.target();
+    let private = message.is_private();
+    if !private && state.channel(target).is_none() {
+        return None;
+    }
+    Some(OwnLine {
+        time: papo::time::format(message.time())?,
+        target: target.to_owned(),
+        private,
+        kind: chat_kind(message.kind())?,
+        text: message.text().to_owned(),
+        msgid: message.id().map(ToString::to_string),
+        via: Via::OtherClient,
     })
 }
 
