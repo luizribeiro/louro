@@ -62,16 +62,6 @@ agent's session. See [security](docs/security.md).
 - [louro ask](docs/ask.md): ask someone a question by DM and wait for the answer
 - [Security](docs/security.md): keeping the password and the daemon away from the agent
 
-## Status
-
-louro is young and has one maintainer. Within 0.1.x:
-
-- Command results and errors keep their JSON shapes, error codes and exit codes. New fields
-  and new codes may appear; existing ones keep their meaning and exit code.
-- Existing `louro.toml` files keep working; new fields are only added.
-- The socket protocol between the CLI and the daemon is internal: upgrade both together.
-- `louro ask` is experimental.
-
 ## Related projects
 
 - [papo](https://github.com/luizribeiro/papo): the Rust IRCv3 client library louro is
