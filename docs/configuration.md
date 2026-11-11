@@ -87,25 +87,14 @@ Typing has no limit.
 
 ## `[filter]`
 
-A program of yours that sees everything the bot would show others before
-it reaches IRC, say to catch pasted tokens.
+A program of yours that checks everything the bot would show others
+before it reaches IRC, and can let it through, rewrite it or block it. See
+[filtering](filter.md) for a guide and an example.
 
 | Key | What it is | Default |
 |---|---|---|
 | `outgoing` | The program and its arguments. No shell. | none |
 | `timeout` | How long it may take. | `"5s"` |
-
-- It gets the text on stdin, and context in env vars, each unset when it doesn't apply:
-  `LOURO_KIND` (`message`, `notice`, `action`, `topic`, `part`, `redact`, `react`,
-  `unreact`, `nick`, `away`, `realname` or `ask`), `LOURO_CHANNEL`, `LOURO_NICK`,
-  `LOURO_ACCOUNT`, `LOURO_MSGID`, `LOURO_SELF_NICK`, `LOURO_SELF_ACCOUNT`,
-  `LOURO_SERVER` and `LOURO_FILTER_VERSION=1`.
-- Exit 0 sends its stdout (one trailing newline trimmed).
-- Exit 10 blocks the text.
-- Anything else sends nothing and tells the agent to ask you: another exit code, a
-  timeout, or output that is empty, not UTF-8 or over 64 KiB.
-- A short stderr reaches the agent as a note, and always goes to louro's log.
-- It runs as louro's user, in `/`. `connect` refuses to start if it isn't an executable file.
 
 ## `[typing]`
 

@@ -57,6 +57,7 @@ agent's session. See [security](docs/security.md).
 - [Configuration](docs/configuration.md): every grant, limit and option in `louro.toml`
 - [Running louro](docs/running.md): restarts, backfill, and the NixOS service
 - [Scripting](docs/scripting.md): drive louro from bash, and what each exit code means
+- [Filtering](docs/filter.md): redact or block what the bot says before it reaches IRC
 - [louro ask](docs/ask.md): ask someone a question by DM and wait for the answer
 - [Security](docs/security.md): keeping the password and the daemon away from the agent
 

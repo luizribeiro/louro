@@ -18,5 +18,5 @@ can do is limit what an injected agent does, through the
   (`connect --socket`, or `socket` in `louro.toml`), set `LOURO_SOCKET` in the agent's
   environment.
 
-louro also refuses to send text that contains the bot's password, and an
-optional [filter](configuration.md#filter) can check everything else.
+louro also refuses to send text that contains the bot's password. To catch
+other secrets, like tokens and keys, set up a [filter](filter.md).
