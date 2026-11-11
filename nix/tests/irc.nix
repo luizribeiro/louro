@@ -70,7 +70,10 @@ in
     systemd.services = lib.mapAttrs' (
       nick: password: lib.nameValuePair "irc-human-${nick}" (humanService nick password)
     ) humans;
-    environment.systemPackages = [ pkgs.curl ];
+    environment.systemPackages = [
+      pkgs.curl
+      ircHuman
+    ];
   };
 
   testScript = ''

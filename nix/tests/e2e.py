@@ -149,9 +149,18 @@ def started(events):
 
 
 def say(nick, target, text):
-    """nick says text to target; returns the events up to when it reaches wait."""
+    """nick says text to target; returns the events up to when it reaches wait, excluding the
+    bot's own sent events."""
     send_raw(nick, f"PRIVMSG {target} :{text}")
-    return events_until(from_nick(nick, text))
+    return without_sent(events_until(from_nick(nick, text)))
+
+
+def without_sent(events):
+    return [event for event in events if event["type"] != "sent"]
+
+
+def sent_events(events):
+    return [(event["via"], event["target"], event["text"]) for event in events if event["type"] == "sent"]
 
 
 def heard(nick, target, text):
@@ -195,7 +204,7 @@ def drop_louro_connection():
 
 def say_while_cut_off(channel, text):
     """luiz says text in channel while louro is cut off; returns the events up to when it
-    reaches wait after louro reconnects."""
+    reaches wait after louro reconnects, excluding the bot's own sent events."""
     louro_blocked(True)
     drop_louro_connection()
     louro_until(lambda status: not status["connected"], "status")
@@ -205,7 +214,7 @@ def say_while_cut_off(channel, text):
         timeout=TIMEOUT,
     )
     louro_blocked(False)
-    return events_until(from_nick("luiz", text))
+    return without_sent(events_until(from_nick("luiz", text)))
 
 
 start_ergo()
@@ -380,6 +389,53 @@ with running(
         assert all(event["target"] == "luiz" and event["private"] for event in page["events"]), page
         refused("not_allowed", "history", "#lounge")
         refused("not_allowed", "history", "mallory")
+
+    with subtest("a send from another process reaches a blocked wait, which only luiz's DM wakes"):
+        louro("wait", "--timeout", "0")
+        machine.succeed(shlex.join([
+            "systemd-run", "--unit=sent-wait", f"--uid={BOT['user']}",
+            f"--setenv=LOURO_SOCKET={SOCKET}",
+            "--property=StandardOutput=file:/tmp/sent-wait.json",
+            "--property=StandardError=journal",
+            "/run/current-system/sw/bin/louro", "wait", "--timeout", "60",
+        ]))
+        machine.wait_until_succeeds(f"ss -xH | grep -qF {SOCKET}", timeout=TIMEOUT)
+        louro("send", "luiz", "deploying the fix now")
+        heard("luiz", "luiz", "deploying the fix now")
+        machine.sleep(2)
+        machine.succeed("systemctl is-active -q sent-wait")
+        send_raw("luiz", f"PRIVMSG {BOT['user']} :thanks, ping me when it's out")
+        machine.wait_until_fails("systemctl is-active -q sent-wait", timeout=TIMEOUT)
+        batch = json.loads(machine.succeed("cat /tmp/sent-wait.json"))
+        assert not batch["timed_out"], batch
+        shown = [(event["type"], event["text"]) for event in batch["events"]]
+        assert shown == [
+            ("sent", "deploying the fix now"),
+            ("message", "thanks, ping me when it's out"),
+        ], batch
+        sent = batch["events"][0]
+        assert sent["via"] == "louro" and sent["private"] and sent["untrusted"], sent
+
+    with subtest("another client on louro's account shows its lines via other_client, where louro may read"):
+        machine.succeed(shlex.join([
+            "systemd-run", "--unit=bot-phone", "--property=RuntimeDirectory=irc-human-phone",
+            "/run/current-system/sw/bin/irc-human", f"127.0.0.1:{settings['ircPort']}",
+            BOT["user"], f"--password={BOT['password']}",
+            f"--fifo={human_file('phone', 'in')}", f"--log={human_file('phone', 'log')}",
+        ]))
+        machine.wait_until_succeeds(f"test -p {human_file('phone', 'in')}", timeout=TIMEOUT)
+        machine.wait_until_succeeds(f"grep -q ' 001 ' {human_file('phone', 'log')}", timeout=TIMEOUT)
+        send_raw("phone", "PRIVMSG mallory :psst, the deploy key is in the wiki")
+        send_raw("phone", "PRIVMSG #bots :back from lunch")
+        send_raw("phone", "PRIVMSG luiz :sent from my phone")
+        heard("luiz", "luiz", "sent from my phone")
+        events = events_until(lambda events: ("other_client", "luiz", "sent from my phone") in sent_events(events))
+        events += louro("wait", "--timeout", "1")["events"]
+        assert sent_events(events) == [
+            ("other_client", "#bots", "back from lunch"),
+            ("other_client", "luiz", "sent from my phone"),
+        ], events
+        machine.succeed("systemctl stop bot-phone")
 
     with subtest("invites reach wait only from irc.dm.read, and louro doesn't join"):
 
