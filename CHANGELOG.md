@@ -59,7 +59,7 @@ The first release.
   `--grep` to search a conversation with a regex.
 - `react`, `typing`, `redact`, `names`, `topic`, `whois`, `whowas`, `list`,
   `join`, `part`, `watch`, `nick`, `away` and `setname`.
-- `ask` (experimental) DMs a question and blocks until the person answers
+- `ask` DMs a question and blocks until the person answers
   with one of the choices or the timeout passes.
 - Bare `louro` and `louro --help` print a primer for the agent.
 

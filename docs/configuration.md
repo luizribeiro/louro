@@ -68,7 +68,7 @@ A grant is `true`, `false`, or a list of names:
 | `irc.watch` | watch these nicks come, go and go away | list |
 | `irc.identity` | change its nick, away status and realname | bool |
 | `irc.quit` | stop the daemon with `louro quit` | bool |
-| `irc.ask` | `louro ask` these people; `account:NAME` only (see [ask](ask.md)) | list |
+| `irc.ask` | `louro ask` these people; `account:NAME` only (see [asking questions](asking.md)) | list |
 
 `louro status` shows what's granted.
 

@@ -1,8 +1,9 @@
-# louro ask
+# Asking questions
 
-`louro ask` DMs someone a question and blocks until they answer. It's made
-for hooks, say to ask you before an agent runs a tool. It's experimental:
-its flags, result and the DM it sends may still change.
+`louro ask` has the bot DM someone a question and blocks until they answer
+with one of the choices. A hook can use it to ask you before an agent runs a
+tool, a script to ask "deploy now?", or an agent to ask which branch you
+meant.
 
 ```
 louro ask NICK TEXT [--choices yes,no] [--timeout 5m]
