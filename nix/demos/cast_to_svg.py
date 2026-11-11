@@ -4,7 +4,7 @@ from snowglobe's nix/demos/cast_to_svg.py.
 Usage: cast-to-svg CAST SVG
 
 Uses the theme in the cast's header. Like the asciinema player, pads the
-terminal and keeps pauses to at most 3s. Holds the last frame for 5s before
+terminal and keeps pauses to at most 2s. Holds the last frame for 5s before
 looping. Prefers the fonts of the terminal look file at $TERMINAL_LOOK for
 viewers who have them. Runs svg-term from $SVG_TERM, or from PATH.
 """
@@ -16,7 +16,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-MAX_PAUSE = 3.0
+MAX_PAUSE = 2.0
 # The SVGs loop, so the result needs time on screen before the next run
 END_HOLD = 5.0
 # The asciinema player's 0.75em border, at svg-term's 16.7px font

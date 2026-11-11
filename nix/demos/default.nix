@@ -50,7 +50,7 @@ in
         --font-family "Hack Nerd Font Mono,DejaVu Sans Mono,Noto Emoji" \
         --theme ${aggTheme} \
         --font-size 24 \
-        --idle-time-limit 1 \
+        --idle-time-limit 2 \
         --last-frame-duration 4 \
         "$1" "$2/$name.gif"
       # fps=30: the GIF's frames last until the screen changes, and social
