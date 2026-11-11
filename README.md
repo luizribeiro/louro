@@ -11,9 +11,10 @@ daemon that holds the IRC connection and its password; the agent calls
 ## Features
 
 - Works with any agent that has a shell: Claude Code, Codex, pi, …
+- Works from scripts too: every command prints JSON and exits with a fixed code, so a
+  bash loop can run a bot (see [scripting](docs/scripting.md))
 - The agent never holds the IRC password; only the daemon does
 - Deny-by-default grants: where it may read, speak, react or DM, and what else it may do
-- Nothing is missed between calls, even across a daemon restart
 - More than chat: reactions, typing, threaded replies, history search, and `louro ask` to
   ask someone by DM and wait for the answer
 - Built on [papo](https://github.com/luizribeiro/papo), a Rust IRCv3 client library
