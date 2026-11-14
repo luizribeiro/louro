@@ -685,6 +685,17 @@ with subtest("a wrong SASL password fails connect and leaves nothing running"):
     assert "wrong-password" not in json.dumps(error), error
     assert_stopped()
 
+start(grants(redact=True))
+with subtest("a restarted louro redacts its own older message from history, but not luiz's"):
+    sent = louro("send", "#bots", "sent before the restart")
+    [theirs] = say("luiz", "#bots", "this one is mine")
+    stop()
+    start(grants(redact=True))
+    louro("redact", "#bots", sent["msgid"], "--reason", "cleanup")
+    assert "sent before the restart" not in texts(louro("history", "#bots"))
+    refused("not_allowed", "redact", "#bots", theirs["msgid"])
+    stop()
+
 start(grants(dm={"read": ["account:luiz"], "send": ["NickServ"]}))
 with subtest("a restarted louro backfills the DM luiz sent while it was down, then says it started"):
     # Always-on keeps louro's nick and its DM history on Ergo while the daemon is down.

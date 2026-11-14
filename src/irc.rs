@@ -282,6 +282,12 @@ pub trait Irc: Send + Sync + 'static {
         after: SystemTime,
         until: SystemTime,
     ) -> impl Future<Output = Result<Vec<Incoming>>> + Send;
+    /// Whether the server's history has `msgid` in `target` as a line from the bot's account.
+    fn sent_from_my_account(
+        &self,
+        target: &str,
+        msgid: &str,
+    ) -> impl Future<Output = Result<bool>> + Send;
     fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send;
     /// Earlier users of `nick`, most recent first; empty if the server remembers none.
     fn whowas(&self, nick: &str) -> impl Future<Output = Result<Vec<Whowas>>> + Send;
@@ -557,10 +563,13 @@ fn is_private(state: &State, target: &str) -> Option<bool> {
 }
 
 fn is_from_me(state: &State, nick: &str, account: Option<&str>) -> bool {
-    state.is_me(nick)
-        || account
-            .zip(state.account())
-            .is_some_and(|(sender, me)| state.casemapping().eq(sender, me))
+    state.is_me(nick) || is_my_account(state, account)
+}
+
+fn is_my_account(state: &State, account: Option<&str>) -> bool {
+    account
+        .zip(state.account())
+        .is_some_and(|(sender, me)| state.casemapping().eq(sender, me))
 }
 
 fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
@@ -908,6 +917,14 @@ impl Irc for PapoIrc {
         }
         missed.sort_by(|a, b| a.time.cmp(&b.time));
         Ok(missed)
+    }
+
+    async fn sent_from_my_account(&self, target: &str, msgid: &str) -> Result<bool> {
+        let page = self.client.history(target).around(msgid).limit(3).await?;
+        let state = self.client.state();
+        Ok(page.messages().any(|message| {
+            message.id().is_some_and(|id| id == msgid) && is_my_account(&state, message.account())
+        }))
     }
 
     async fn whois(&self, nick: &str) -> Result<Whois> {

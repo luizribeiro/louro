@@ -61,6 +61,9 @@ The first release.
   `--grep` to search a conversation with a regex.
 - `react`, `typing`, `redact`, `names`, `topic`, `whois`, `whowas`, `list`,
   `join`, `part`, `watch`, `nick`, `away` and `setname`.
+- `redact` deletes only the bot's own messages: one it sent since it
+  started, or an older one the server's history has from its account, where
+  the agent may read.
 - `ask` DMs a question and blocks until the person answers
   with one of the choices or the timeout passes.
 - Bare `louro` and `louro --help` print a primer for the agent.

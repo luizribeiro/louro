@@ -989,7 +989,31 @@ impl<I: Irc> Daemon<I> {
         self.check_shown_secret(op)?;
         self.check_grants(op).await?;
         self.prepare(op)?;
+        self.check_redacting_own(op).await?;
         self.reserve(op)
+    }
+
+    /// louro redacts only the bot's own messages: one it sent since it started, or one the
+    /// server's history, where the agent may read, has from the bot's account.
+    async fn check_redacting_own(&self, op: &Op) -> Result<()> {
+        let Op::Redact { target, msgid, .. } = op else {
+            return Ok(());
+        };
+        if self.sent.lock().unwrap().contains(target, msgid) {
+            return Ok(());
+        }
+        let readable = self
+            .check_as_held(target, |dm| self.grants.check_read(target, dm))
+            .await
+            .is_ok();
+        if readable && self.irc.sent_from_my_account(target, msgid).await? {
+            return Ok(());
+        }
+        Err(Error::new(
+            Code::NotAllowed,
+            format!("{msgid} in {target} is not a message louro sent"),
+        )
+        .with_hint("louro redacts only its own messages: ones it sent since it started, or ones the server's history has from its account"))
     }
 
     /// Sends `op`'s question and waits for its target's answer or the timeout, whichever is
@@ -1216,20 +1240,9 @@ impl<I: Irc> Daemon<I> {
                 text::check_field("a reaction", reaction, text::MAX_REACTION_CHARS)?;
                 self.refuse_while_asking(target)?;
             }
-            Op::Redact {
-                target,
-                msgid,
-                reason,
-            } => {
+            Op::Redact { msgid, reason, .. } => {
                 text::check_msgid(msgid)?;
                 text::check_one_line(reason)?;
-                if !self.sent.lock().unwrap().contains(target, msgid) {
-                    return Err(Error::new(
-                        Code::NotAllowed,
-                        format!("{msgid} in {target} is not a message louro sent"),
-                    )
-                    .with_hint("louro redacts only its own messages, sent since it started"));
-                }
             }
             Op::Nick { nick } => text::check_field("a nick", nick, MAX_NICK_CHARS)?,
             Op::Away {
@@ -1882,6 +1895,10 @@ mod tests {
         /// By lowercased nick, the account WHOIS reports for each; WHOIS on any other nick fails.
         whois_accounts: Mutex<HashMap<String, Option<String>>>,
         whoises: AtomicUsize,
+        /// The (lowercased target, msgid) of older lines the server's history has from the bot's
+        /// account, and how many times that history was asked.
+        own_history: Mutex<Vec<(String, String)>>,
+        own_lookups: AtomicUsize,
         /// Sends get no msgid, as from a server without echo-message.
         without_msgid: AtomicBool,
         /// How many of the next sends fail with `not_connected`, as while IRC is down.
@@ -2052,6 +2069,17 @@ mod tests {
                 Some(code) => Err(Error::new(code, "CHATHISTORY failed")),
                 None => Ok(self.missed.lock().unwrap().clone()),
             })
+        }
+
+        fn sent_from_my_account(
+            &self,
+            target: &str,
+            msgid: &str,
+        ) -> impl Future<Output = Result<bool>> + Send {
+            self.own_lookups.fetch_add(1, Ordering::Relaxed);
+            let own = self.own_history.lock().unwrap();
+            let found = own.contains(&(target.to_ascii_lowercase(), msgid.into()));
+            future::ready(Ok(found))
         }
 
         fn whois(&self, nick: &str) -> impl Future<Output = Result<Whois>> + Send {
@@ -4070,6 +4098,25 @@ esac"#;
         let reply = daemon.call(redact.clone()).await;
         assert_eq!(reply["Ok"]["msgid"], msgid);
         assert_eq!(*daemon.irc.acts.lock().unwrap(), [redact]);
+    }
+
+    #[tokio::test]
+    async fn redact_finds_the_bots_older_message_in_history_where_the_agent_may_read() {
+        let daemon = launch(grants());
+        let older = "8y6ytq7xkj44cjnumyus8e2wds";
+        daemon.irc.own_history.lock().unwrap().extend([
+            ("#bots".into(), older.into()),
+            ("#ops".into(), older.into()),
+        ]);
+
+        let reply = daemon.call(redact_request("#bots", older, "")).await;
+        assert_eq!(reply["Ok"]["msgid"], older);
+        for (target, msgid) in [("#bots", "4y8kq7j2c9mnz"), ("#ops", older)] {
+            let reply = daemon.call(redact_request(target, msgid, "")).await;
+            assert_eq!(reply["Err"]["code"], "not_allowed", "{target} {msgid}");
+        }
+        assert_eq!(daemon.irc.acts.lock().unwrap().len(), 1);
+        assert_eq!(daemon.irc.own_lookups.load(Ordering::Relaxed), 2);
     }
 
     #[test]
