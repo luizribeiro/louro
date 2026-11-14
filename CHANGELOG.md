@@ -35,7 +35,8 @@ The first release.
   needed; `$first` allows DMs only to people who DMed the bot first.
   `irc.ask` takes `account:NAME` entries only.
 - `[limits]` caps sends per target, sends in total and reactions per
-  target.
+  target, and how many characters of each incoming message the agent sees
+  (`incoming_text`, 1000 by default; the rest is cut and marked `truncated`).
 - `[filter]` runs an operator program on every text before it reaches IRC,
   to change or block it.
 - `[typing]` shows typing to whoever a `wait` batch addressed, until the
