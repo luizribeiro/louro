@@ -1,4 +1,4 @@
-//! Hygiene for chat text: sanitizing and capping inbound text, cleaning outbound text, and
+//! Hygiene for chat text: sanitizing and cutting inbound text, cleaning outbound text, and
 //! blocking the bot's password from being sent.
 
 use serde::Serialize;
@@ -14,14 +14,14 @@ pub const MAX_REACTION_CHARS: usize = 32;
 /// Kept out of sends so the agent can't be steered into CTCP requests like DCC.
 const CTCP_DELIMITER: char = '\x01';
 
-/// Strips control characters (keeping newlines) and caps length by character count; the bool
+/// Strips control characters (keeping newlines) and caps length at `max` characters; the bool
 /// says whether the text was cut.
-pub fn sanitize(text: &str) -> (String, bool) {
+pub fn sanitize(text: &str, max: usize) -> (String, bool) {
     let mut clean: String = text
         .chars()
         .filter(|&c| c == '\n' || !c.is_control())
         .collect();
-    match clean.char_indices().nth(MAX_TEXT_CHARS) {
+    match clean.char_indices().nth(max) {
         Some((cut, _)) => {
             clean.truncate(cut);
             (clean, true)
@@ -32,7 +32,7 @@ pub fn sanitize(text: &str) -> (String, bool) {
 
 /// The filter's note to the agent, cleaned like a send but cut to fit rather than refused.
 pub fn clean_note(text: &str) -> String {
-    let (clean, _) = sanitize(text);
+    let (clean, _) = sanitize(text, MAX_TEXT_CHARS);
     let lines: Vec<&str> = clean
         .lines()
         .map(str::trim_end)
@@ -44,7 +44,7 @@ pub fn clean_note(text: &str) -> String {
 
 /// Text from the network, like a nick or topic, sanitized; a cut is not worth flagging there.
 pub fn clean(text: &str) -> String {
-    sanitize(text).0
+    sanitize(text, MAX_TEXT_CHARS).0
 }
 
 /// `value` as JSON with every string in it cleaned, for results that carry network text.

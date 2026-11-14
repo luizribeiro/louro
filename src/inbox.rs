@@ -48,8 +48,8 @@ enum Body {
 }
 
 impl Body {
-    fn chat(mut incoming: Incoming) -> Self {
-        let (text, truncated) = sanitize(&incoming.text);
+    fn chat(mut incoming: Incoming, max_text: usize) -> Self {
+        let (text, truncated) = sanitize(&incoming.text, max_text);
         incoming.text = text;
         Self::Chat {
             incoming,
@@ -126,15 +126,24 @@ impl Buffer {
 }
 
 /// The unread events and the one cursor, which moves only on ack.
-#[derive(Default)]
 pub struct Inbox {
     buffer: Mutex<Buffer>,
     arrived: Notify,
+    max_text: usize,
 }
 
 impl Inbox {
+    /// Chat text is cut to `max_text` characters.
+    pub fn new(max_text: usize) -> Self {
+        Self {
+            buffer: Mutex::default(),
+            arrived: Notify::new(),
+            max_text,
+        }
+    }
+
     pub fn push(&self, incoming: Incoming) {
-        self.push_body(Body::chat(incoming));
+        self.push_body(Body::chat(incoming, self.max_text));
     }
 
     pub fn push_connection(&self, connection: Value) {
@@ -190,8 +199,13 @@ impl Inbox {
     }
 
     /// Chat that never enters the inbox, like `history`, sanitized and marked as `wait`'s is.
-    pub fn sanitized(incoming: Incoming) -> impl Serialize {
-        Body::chat(incoming)
+    pub fn sanitized(&self, incoming: Incoming) -> impl Serialize {
+        Body::chat(incoming, self.max_text)
+    }
+
+    /// The text the agent would see of `text`.
+    pub fn visible(&self, text: &str) -> String {
+        sanitize(text, self.max_text).0
     }
 }
 
@@ -213,14 +227,14 @@ mod tests {
 
     #[test]
     fn keeps_unicode_and_cuts_long_text_by_characters() {
-        assert_eq!(sanitize("olá, joão! 🦜").0, "olá, joão! 🦜");
+        assert_eq!(sanitize("olá, joão! 🦜", MAX_TEXT_CHARS).0, "olá, joão! 🦜");
 
         let exactly = "ã".repeat(MAX_TEXT_CHARS);
-        let event = serde_json::to_value(Body::chat(from_maria(&exactly))).unwrap();
+        let event = serde_json::to_value(Body::chat(from_maria(&exactly), MAX_TEXT_CHARS)).unwrap();
         assert_eq!(event["text"], exactly);
         assert!(event.get("truncated").is_none());
 
-        let flood = Body::chat(from_maria(&format!("{exactly}and more")));
+        let flood = Body::chat(from_maria(&format!("{exactly}and more")), MAX_TEXT_CHARS);
         let flood = serde_json::to_value(flood).unwrap();
         assert_eq!(flood["text"], exactly);
         assert_eq!(flood["truncated"], true);
@@ -228,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_invite_is_sanitized_and_untrusted() {
-        let inbox = Inbox::default();
+        let inbox = Inbox::new(MAX_TEXT_CHARS);
         inbox.push_untrusted(serde_json::json!({
             "type": "invite",
             "time": "2026-10-16T21:05:00Z",
@@ -248,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_limits_a_batch_and_more_says_others_are_queued() {
-        let inbox = Inbox::default();
+        let inbox = Inbox::new(MAX_TEXT_CHARS);
         inbox.push(from_maria("louro: does ergo support chathistory for DMs?"));
         inbox.push(from_joao("it does, it's a config option"));
         inbox.push(from_maria("louro: which one?"));
@@ -266,7 +280,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_quiet_event_alone_comes_back_only_at_the_timeout() {
-        let inbox = Inbox::default();
+        let inbox = Inbox::new(MAX_TEXT_CHARS);
         inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
 
         let started = Instant::now();
@@ -279,7 +293,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_quiet_event_comes_along_with_the_next_one_that_wakes_wait() {
-        let inbox = Arc::new(Inbox::default());
+        let inbox = Arc::new(Inbox::new(MAX_TEXT_CHARS));
         inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
         let waiting = tokio::spawn({
             let inbox = Arc::clone(&inbox);
@@ -296,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_event_past_max_still_wakes_wait_for_the_quiet_ones_before_it() {
-        let inbox = Inbox::default();
+        let inbox = Inbox::new(MAX_TEXT_CHARS);
         inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
         inbox.push_quiet(sent_to_luiz("the changelog is up too"));
         inbox.push(dm(from_luiz("nice, which commit?")));
@@ -312,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_flood_drops_the_oldest_unread_events() {
-        let inbox = Inbox::default();
+        let inbox = Inbox::new(MAX_TEXT_CHARS);
         for n in 0..BUFFER_CAP + 5 {
             inbox.push(from_joao(&format!("spam {n}")));
         }

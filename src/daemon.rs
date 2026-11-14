@@ -420,6 +420,7 @@ async fn run(
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let saved = std::mem::take(&mut watching.nicks);
+    let inbox = Inbox::new(limits.incoming_text.get());
     let daemon = Arc::new(Daemon {
         grants,
         limits,
@@ -427,7 +428,7 @@ async fn run(
         password,
         filter,
         irc,
-        inbox: Inbox::default(),
+        inbox,
         dm_senders: Mutex::default(),
         sent: Mutex::default(),
         watching: Mutex::new(watching),
@@ -1444,7 +1445,7 @@ impl<I: Irc> Daemon<I> {
             .into_iter()
             .filter(|incoming| self.may_read_history(incoming))
             .collect();
-        Ok(history_page(target, complete, events))
+        Ok(history_page(&self.inbox, target, complete, events))
     }
 
     /// Pages back from `--before` until it passes `--after` or reaches the start of history
@@ -1485,14 +1486,14 @@ impl<I: Irc> Daemon<I> {
         let complete = reached_start && newest_first.len() <= query.limit;
         newest_first.truncate(query.limit);
         newest_first.reverse();
-        let mut result = history_page(target, complete, newest_first);
+        let mut result = history_page(&self.inbox, target, complete, newest_first);
         result["scanned"] = scanned.into();
         Ok(result)
     }
 
     /// Matched against the text the agent would see, so it can't find what sanitizing removes.
     fn grep_matches(&self, incoming: &Incoming, regex: &Regex) -> bool {
-        self.may_read_history(incoming) && regex.is_match(&text::sanitize(&incoming.text).0)
+        self.may_read_history(incoming) && regex.is_match(&self.inbox.visible(&incoming.text))
     }
 
     fn may_read_history(&self, incoming: &Incoming) -> bool {
@@ -1694,8 +1695,11 @@ fn from_louro(target: &str, text: String) -> Outgoing {
     }
 }
 
-fn history_page(target: &str, complete: bool, events: Vec<Incoming>) -> Value {
-    let events: Vec<_> = events.into_iter().map(Inbox::sanitized).collect();
+fn history_page(inbox: &Inbox, target: &str, complete: bool, events: Vec<Incoming>) -> Value {
+    let events: Vec<_> = events
+        .into_iter()
+        .map(|incoming| inbox.sanitized(incoming))
+        .collect();
     json!({
         "target": target,
         "complete": complete,
@@ -1790,6 +1794,7 @@ fn parse_request(request: Value) -> Result<Op> {
 #[cfg(test)]
 mod tests {
     use std::future;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
@@ -2253,7 +2258,7 @@ mod tests {
                     "quit": false,
                     "ask": false
                 }},
-                "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s"},
+                "limits": {"send": "3/10s", "send_total": "10/60s", "react": "10/60s", "incoming_text": 1000},
                 "filter": false,
                 "typing": {"after_wait": "off", "timeout": "1m"},
                 "watching": [],
@@ -4150,6 +4155,31 @@ esac"#;
         let daemon = launch(grants());
         let reply = daemon.call(grep_request("ergo", 20)).await;
         assert_eq!(grep_summary(&reply), (vec![], 0, true));
+    }
+
+    #[tokio::test]
+    async fn wait_and_history_cut_chat_at_the_configured_incoming_text_limit() {
+        let filler = "so the plan is ".repeat(100);
+        let transcript = format!("louro: {filler}weblounge {filler}ergo {filler}");
+        let cut: String = transcript.chars().take(3000).collect();
+        let daemon = launch_with(
+            grants(),
+            Limits {
+                incoming_text: NonZeroUsize::new(3000).unwrap(),
+                ..Limits::default()
+            },
+        );
+        daemon.say(from_maria(&transcript)).await;
+        daemon.store([from_maria(&transcript)]);
+
+        let (_, live) = daemon.wait(5).await;
+        let found = daemon.call(grep_request("weblounge", 20)).await;
+        for reply in [&live, &found] {
+            assert_eq!(texts(reply), [cut.as_str()]);
+            assert_eq!(reply["Ok"]["events"][0]["truncated"], true);
+        }
+        let past_the_cut = daemon.call(grep_request("ergo", 20)).await;
+        assert!(texts(&past_the_cut).is_empty());
     }
 
     #[tokio::test]

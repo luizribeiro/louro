@@ -5,6 +5,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -12,6 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{Code, Error, Result};
+use crate::text::MAX_TEXT_CHARS;
 
 const EXAMPLE: &str = "a minimal louro.toml:
 [server]
@@ -188,6 +190,8 @@ pub struct Limits {
     pub send_total: Limit,
     /// Per target; `typing` has no limit.
     pub react: Limit,
+    /// Characters of each incoming message the agent sees; the rest is cut and flagged.
+    pub incoming_text: NonZeroUsize,
 }
 
 impl Default for Limits {
@@ -205,6 +209,7 @@ impl Default for Limits {
                 count: 10,
                 seconds: 60,
             },
+            incoming_text: NonZeroUsize::new(MAX_TEXT_CHARS).unwrap(),
         }
     }
 }
@@ -526,6 +531,7 @@ mod tests {
                 seconds: 60
             }
         );
+        assert_eq!(limits.incoming_text.get(), 1000);
     }
 
     #[test]
