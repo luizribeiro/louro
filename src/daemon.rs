@@ -571,25 +571,21 @@ impl<I: Irc> Daemon<I> {
                 let daemon = Arc::clone(self);
                 tokio::spawn(async move { daemon.show_own(line).await });
             }
-            Update::Reacted(reaction) if reaction.private => {
-                let daemon = Arc::clone(self);
-                tokio::spawn(async move {
-                    let nick = &reaction.from.nick;
-                    let readable = daemon
-                        .check_as_held(nick, |dm| daemon.grants.check_dm_read(nick, dm))
-                        .await;
-                    if readable.is_ok() {
-                        daemon.inbox.push_untrusted(reaction);
-                    }
-                });
-            }
             Update::Reacted(reaction) => {
-                if self
-                    .grants
-                    .may_read(&reaction.target, reaction.private, &reaction.from)
-                {
-                    self.inbox.push_untrusted(reaction);
-                }
+                let (target, private, from) = (
+                    reaction.target.clone(),
+                    reaction.private,
+                    reaction.from.clone(),
+                );
+                self.push_if_readable(&target, private, from, reaction);
+            }
+            Update::Redacted(redaction) => {
+                let (target, private, from) = (
+                    redaction.target.clone(),
+                    redaction.private,
+                    redaction.from.clone(),
+                );
+                self.push_if_readable(&target, private, from, redaction);
             }
             Update::Disconnected { cause, retry_in } => {
                 *self.last_error.lock().unwrap() = Some(Problem {
@@ -771,6 +767,33 @@ impl<I: Irc> Daemon<I> {
             }
             Entry::Vacant(_) => {}
         }
+    }
+
+    /// Hands the agent `event`, something `from` did in `target`, if it may read there; a DM
+    /// sender is checked as the nick's current holder.
+    fn push_if_readable(
+        self: &Arc<Self>,
+        target: &str,
+        private: bool,
+        from: Sender,
+        event: impl Serialize + Send + 'static,
+    ) {
+        if !private {
+            if self.grants.may_read(target, private, &from) {
+                self.inbox.push_untrusted(event);
+            }
+            return;
+        }
+        let daemon = Arc::clone(self);
+        tokio::spawn(async move {
+            let nick = &from.nick;
+            let readable = daemon
+                .check_as_held(nick, |dm| daemon.grants.check_dm_read(nick, dm))
+                .await;
+            if readable.is_ok() {
+                daemon.inbox.push_untrusted(event);
+            }
+        });
     }
 
     /// Checks `op` against the grants; for an op that names a nick, as that nick's current holder.
@@ -1806,7 +1829,9 @@ mod tests {
     use super::*;
     use crate::filter::fixtures::script;
     use crate::irc::fixtures::{dm, from_joao, from_luiz, from_maria, sender, sent_to_luiz};
-    use crate::irc::{IrcStatus, Kind, Member, Origin, Reacted, Sender, Sent, Whois, Whowas};
+    use crate::irc::{
+        IrcStatus, Kind, Member, Origin, Reacted, Redaction, Sender, Sent, Whois, Whowas,
+    };
 
     const PASSWORD: &str = "c0rrect-h0rse-battery";
 
@@ -2406,6 +2431,49 @@ mod tests {
                  "from": {"nick": "luiz", "account": "luiz", "away": false, "bot": false},
                  "msgid": "4y8kq7j2c9mnz", "reaction": "👍", "removed": true,
                  "untrusted": true},
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_gets_redactions_with_the_same_grants_and_sanitizing_as_chat() {
+        let daemon = launch(grants());
+        let redaction = |target: &str, private, nick, account, reason: Option<&str>| Redaction {
+            time: "2026-11-14T10:41:07.512Z".into(),
+            target: target.into(),
+            private,
+            from: sender(nick, account),
+            msgid: "8y6ytq7xkj44cjnumyus8e2wds".into(),
+            reason: reason.map(Into::into),
+        };
+        for update in [
+            redaction(
+                "#bots",
+                false,
+                "maria",
+                Some("maria"),
+                Some("typo\u{1b}[2J"),
+            ),
+            redaction("#ops", false, "maria", Some("maria"), None),
+            redaction("joao", true, "joao", None, None),
+            redaction("luiz", true, "luiz", Some("luiz"), None),
+        ] {
+            daemon.update(Update::Redacted(update)).await;
+        }
+
+        let (_, reply) = daemon.wait(5).await;
+        assert_eq!(
+            reply["Ok"]["events"],
+            json!([
+                {"id": 1, "type": "redaction", "time": "2026-11-14T10:41:07.512Z",
+                 "target": "#bots", "private": false,
+                 "from": {"nick": "maria", "account": "maria", "away": false, "bot": false},
+                 "msgid": "8y6ytq7xkj44cjnumyus8e2wds", "reason": "typo[2J",
+                 "untrusted": true},
+                {"id": 2, "type": "redaction", "time": "2026-11-14T10:41:07.512Z",
+                 "target": "luiz", "private": true,
+                 "from": {"nick": "luiz", "account": "luiz", "away": false, "bot": false},
+                 "msgid": "8y6ytq7xkj44cjnumyus8e2wds", "untrusted": true},
             ])
         );
     }

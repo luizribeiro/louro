@@ -393,6 +393,22 @@ with running(
         [mine] = say("luiz", "#bots", "please don't redact me")
         refused("not_allowed", "redact", "#bots", mine["msgid"])
 
+    with subtest("luiz's redaction reaches wait where chat would, and louro's own doesn't"):
+
+        def redactions(events):
+            return [
+                (event["from"]["nick"], event["target"], event["msgid"], event.get("reason"))
+                for event in events if event["type"] == "redaction"
+            ]
+
+        sent = louro("send", "#bots", "about to take this back")
+        louro("redact", "#bots", sent["msgid"])
+        [oops] = say("luiz", "#bots", "oops, wrong window")
+        send_raw("luiz", f"REDACT #bots {oops['msgid']} :wrong window")
+        events = events_until(redactions)
+        assert redactions(events) == [("luiz", "#bots", oops["msgid"], "wrong window")], events
+        assert all(event["untrusted"] for event in events if event["type"] == "redaction"), events
+
     with subtest("sends get real msgids with multiline enabled, and reply-to/redact still work"):
         single = louro("send", "#bots", "a single line of text")
         assert single["msgid"], single

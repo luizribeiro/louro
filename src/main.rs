@@ -74,6 +74,7 @@ More, as granted:
 An `invite` event means someone invited you to a channel; louro never \
 joins on its own, so just answer politely if you may. A `reaction` event \
 means someone reacted to the message `msgid`, or took it back if `removed`. \
+A `redaction` event means someone deleted the message `msgid`. \
 A `sent` event is a line sent as you, where you may read: `via: louro` for \
 any `louro send` (yours or a hook's), `via: other_client` for another IRC \
 client on your account. It never wakes `wait` alone; it comes along with \

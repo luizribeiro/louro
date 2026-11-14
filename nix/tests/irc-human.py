@@ -37,6 +37,7 @@ def main():
             sock.sendall(line.encode() + b"\r\n")
 
     send("CAP REQ :message-tags")
+    send("CAP REQ :draft/message-redaction")
     if args.password:
         plain = f"{args.nick}\0{args.nick}\0{args.password}"
         send("CAP REQ :sasl")

@@ -29,6 +29,7 @@ pub enum Update {
     /// A line another client on the bot's account sent.
     Sent(OwnLine),
     Reacted(Reacted),
+    Redacted(Redaction),
     /// The connection dropped; `retry_in` (whole seconds) is `None` once papo has stopped
     /// reconnecting.
     Disconnected {
@@ -83,6 +84,19 @@ pub struct Reacted {
     pub reaction: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub removed: bool,
+}
+
+/// Someone else deleting a message in a joined channel or a DM.
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename = "redaction")]
+pub struct Redaction {
+    pub time: String,
+    pub target: String,
+    pub private: bool,
+    pub from: Sender,
+    pub msgid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A line the bot itself sent.
@@ -435,6 +449,10 @@ fn to_updates(event: Event, state: &State) -> Vec<Update> {
             .map(Update::Reacted)
             .into_iter()
             .collect(),
+        Event::Redacted(redacted) => to_redaction(&redacted, state)
+            .map(Update::Redacted)
+            .into_iter()
+            .collect(),
         Event::Registered(registered) => vec![Update::Registered {
             reconnected: registered.reconnected,
         }],
@@ -599,22 +617,49 @@ fn to_own_line(message: &Message, state: &State) -> Option<OwnLine> {
 }
 
 fn to_reacted(reacted: &event::Reacted, state: &State) -> Option<Reacted> {
-    let nick = reacted.source.as_ref().and_then(Source::nick)?;
-    let from = known_sender(state, nick);
-    if is_from_me(state, nick, from.account.as_deref()) {
-        return None;
-    }
-    let target = reacted.target.as_ref();
-    let private = is_private(state, target)?;
+    let (target, private, from) = others_act(reacted.source.as_ref(), &reacted.target, state)?;
     Some(Reacted {
         time: now(),
-        target: if private { nick } else { target }.to_owned(),
+        target,
         private,
         from,
         msgid: reacted.message.to_string(),
         reaction: reacted.reaction.clone(),
         removed: reacted.removed,
     })
+}
+
+fn to_redaction(redacted: &event::Redacted, state: &State) -> Option<Redaction> {
+    let (target, private, from) = others_act(redacted.source.as_ref(), &redacted.target, state)?;
+    Some(Redaction {
+        time: now(),
+        target,
+        private,
+        from,
+        msgid: redacted.message.to_string(),
+        reason: redacted.reason.clone(),
+    })
+}
+
+/// Where someone other than the bot acted on a message, and who: the conversation (their nick
+/// for a DM), whether it's private, and the sender.
+fn others_act(
+    source: Option<&Source>,
+    target: &papo::Target,
+    state: &State,
+) -> Option<(String, bool, Sender)> {
+    let nick = source.and_then(Source::nick)?;
+    let from = known_sender(state, nick);
+    if is_from_me(state, nick, from.account.as_deref()) {
+        return None;
+    }
+    let target = target.as_ref();
+    let private = is_private(state, target)?;
+    Some((
+        if private { nick } else { target }.to_owned(),
+        private,
+        from,
+    ))
 }
 
 fn history_reference(raw: &str) -> Result<HistoryReference> {
