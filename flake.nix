@@ -101,8 +101,15 @@
           end-of-file-fixer.enable = true;
           trim-trailing-whitespace.enable = true;
           shellcheck.enable = true;
-          actionlint.enable = true;
-          yamllint.enable = true;
+          # dist generates release.yml and checks in CI that it is unedited.
+          actionlint = {
+            enable = true;
+            excludes = [ "^\\.github/workflows/release\\.yml$" ];
+          };
+          yamllint = {
+            enable = true;
+            excludes = [ "^\\.github/workflows/release\\.yml$" ];
+          };
         };
         cargoHooks = {
           rustfmt = cargoHook {
