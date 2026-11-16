@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-16
+
 The first release.
 
 ### Daemon and connection
@@ -93,5 +95,10 @@ The first release.
   credential.
 - On macOS the flake signs louro with the hardened runtime, so another
   process of the same user can't read the password from its memory.
+- Prebuilt Linux binaries (x86_64 and aarch64, glibc 2.35 or newer) and a
+  shell installer on each GitHub release.
+- A Homebrew formula in `luizribeiro/tap` that builds from source and, on
+  macOS, signs louro with the hardened runtime too.
 
-[Unreleased]: https://github.com/luizribeiro/louro/commits/main
+[Unreleased]: https://github.com/luizribeiro/louro/compare/v0.1.0...main
+[0.1.0]: https://github.com/luizribeiro/louro/releases/tag/v0.1.0
