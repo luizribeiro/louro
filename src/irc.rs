@@ -580,6 +580,9 @@ fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
 }
 
 fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option<Incoming> {
+    if is_status_only(message) {
+        return None;
+    }
     let kind = chat_kind(message.kind())?;
     let nick = message.sender.as_ref().and_then(Source::nick)?;
     let from_me = is_from_me(state, nick, message.account());
@@ -607,11 +610,17 @@ fn chat(message: &Message, state: &State, target: &str, private: bool) -> Option
     })
 }
 
+/// A line to `@#chan` or `+#chan`. papo hands it over as plain `#chan` chat, so an answer would
+/// reach the whole channel.
+fn is_status_only(message: &Message) -> bool {
+    message.status.is_some()
+}
+
 /// Another client's line to a nick or a joined channel.
 fn to_own_line(message: &Message, state: &State) -> Option<OwnLine> {
     let target = message.target();
     let private = message.is_private();
-    if !private && state.channel(target).is_none() {
+    if is_status_only(message) || (!private && state.channel(target).is_none()) {
         return None;
     }
     Some(OwnLine {

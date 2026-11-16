@@ -74,6 +74,9 @@ The first release.
   characters.
 - Grants, limits and the filter come only from the config; no socket
   request changes them.
+- Lines sent only to a channel's ops or voiced members (`@#chan`, `+#chan`)
+  don't reach the agent, live or in history, so its answer can't land in
+  the whole channel.
 
 ### Output
 

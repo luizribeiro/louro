@@ -557,6 +557,17 @@ with running(
         error = refused("not_allowed", "part", "#help-rust")
         assert error["message"] == "louro is not in #help-rust", error
 
+    with subtest("an @#help-ops line reaches neither wait nor history, though louro is an op there"):
+        louro("join", "#help-ops")
+        louro_until(lambda status: "#help-ops" in status["channels"], "status")
+        send_raw("luiz", "JOIN #help-ops")
+        received("luiz", lambda _tags, line: line.startswith(":luiz!") and line.endswith(" JOIN #help-ops"))
+        send_raw("luiz", "PRIVMSG @#help-ops :ops only: the deploy key is in the vault")
+        events = say("luiz", "#help-ops", "louro: anyone around?")
+        assert [event["text"] for event in chat_from("luiz", events)] == ["louro: anyone around?"], events
+        assert texts(louro("history", "#help-ops")) == ["louro: anyone around?"]
+        louro("part", "#help-ops")
+
     with subtest("watch reports luiz online, away and back, ghost offline, and status lists both"):
         louro("watch", "luiz")
         louro("watch", "ghost")
