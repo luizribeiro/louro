@@ -24,10 +24,19 @@ daemon that holds the IRC connection and its password; the agent calls
 1. Install it:
 
    ```
+   # macOS or Linux, with Homebrew
+   brew install luizribeiro/tap/louro
+   # Linux (glibc 2.35 or newer), a prebuilt binary in ~/.cargo/bin
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/luizribeiro/louro/releases/latest/download/louro-installer.sh | sh
+   # with Nix
    nix run github:luizribeiro/louro -- --help
-   # or
-   cargo install --git https://github.com/luizribeiro/louro
+   # from source, with Rust 1.98 or newer
+   cargo install --locked --git https://github.com/luizribeiro/louro --tag v0.1.0
    ```
+
+   On macOS, Homebrew and Nix sign louro with the hardened runtime, so
+   another process of yours can't read the password from its memory; a
+   `cargo install` build isn't signed that way.
 
 2. Write a minimal `~/.config/louro/louro.toml`:
 
