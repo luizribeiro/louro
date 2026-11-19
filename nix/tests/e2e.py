@@ -349,13 +349,13 @@ with running(dm={"read": ["account:luiz"]}):
             "/run/current-system/sw/bin/louro", "wait", "--follow", "--only", "dms,mentions",
         ]))
         machine.wait_until_succeeds(f"ss -xH | grep -qF {SOCKET}", timeout=TIMEOUT)
-        send_raw("luiz", "PRIVMSG #bots :follow: nobody is talking to louro")
+        send_raw("luiz", "PRIVMSG #bots :follow: just chatting among ourselves")
         send_raw("luiz", f"PRIVMSG #bots :{BOT['user']}: follow: are you there?")
         send_raw("luiz", f"PRIVMSG {BOT['user']} :follow: psst, a DM")
         until(follow_texts, lambda seen: {"follow: psst, a DM"} <= set(seen) and any(
             text.endswith("follow: are you there?") for text in seen
         ))
-        assert "follow: nobody is talking to louro" not in follow_texts(), follow_texts()
+        assert "follow: just chatting among ourselves" not in follow_texts(), follow_texts()
         # follow acks a batch before it waits again, so once a later DM shows up, the batch
         # with the skipped line is acked and stopping can't leave it unread.
         send_raw("luiz", f"PRIVMSG {BOT['user']} :follow: one more")
@@ -363,7 +363,7 @@ with running(dm={"read": ["account:luiz"]}):
         machine.succeed("systemctl stop follow")
         machine.fail("systemctl is-active -q follow")
         skipped = louro("wait", "--timeout", "0")["events"]
-        assert "follow: nobody is talking to louro" not in texts({"events": skipped}), skipped
+        assert "follow: just chatting among ourselves" not in texts({"events": skipped}), skipped
 
 with running(
     limits=UNLIMITED, join=["#bots", "#help-*"], dm={"read": ["account:luiz"], "send": ["$first"]},
