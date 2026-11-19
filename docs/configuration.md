@@ -82,7 +82,7 @@ how much of each message the agent reads. A rate limit is
 |---|---|---|
 | `send` | messages per target (channel or nick) | `"3/10s"` |
 | `send_total` | messages across all targets | `"10/1m"` |
-| `react` | reactions per target | `"10/1m"` |
+| `react` | reactions and redactions per target | `"10/1m"` |
 | `incoming_text` | characters of each incoming message `wait` and `history` show; the rest is cut and marked `truncated` | `1000` |
 
 Typing has no limit.

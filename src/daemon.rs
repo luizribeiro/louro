@@ -998,8 +998,12 @@ impl<I: Irc> Daemon<I> {
         self.check_shown_secret(op)?;
         self.check_grants(op).await?;
         self.prepare(op)?;
-        self.check_redacting_own(op).await?;
-        self.reserve(op)
+        let reserved = self.reserve(op)?;
+        if let Err(refused) = self.check_redacting_own(op).await {
+            self.release(op, reserved);
+            return Err(refused);
+        }
+        Ok(reserved)
     }
 
     /// louro redacts only the bot's own messages: one it sent since it started, or one the
@@ -1593,6 +1597,9 @@ impl<I: Irc> Daemon<I> {
             ],
             Op::React { target, .. } => {
                 vec![(&self.react_windows, target, self.limits.react, "react")]
+            }
+            Op::Redact { target, .. } => {
+                vec![(&self.react_windows, target, self.limits.react, "redact")]
             }
             _ => vec![],
         }
@@ -4209,6 +4216,54 @@ esac"#;
         let (answered, _) = daemon.ask(ask_request("deploy?", &["yes", "no"], 5)).await;
         daemon.say(dm(from_luiz("!yes"))).await;
         assert_eq!(answered.await.unwrap()["Ok"]["answer"], "yes");
+    }
+
+    fn one_react_per_10s() -> Limits {
+        Limits {
+            react: Limit::Window {
+                count: 1,
+                seconds: 10,
+            },
+            ..Limits::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn redacts_over_the_react_limit_are_refused_before_any_history_lookup() {
+        let daemon = launch_with(grants(), one_react_per_10s());
+        let older = "8y6ytq7xkj44cjnumyus8e2wds";
+        daemon
+            .irc
+            .own_history
+            .lock()
+            .unwrap()
+            .push(("#bots".into(), older.into()));
+        assert!(daemon.call(redact_request("#bots", older, "")).await["Ok"].is_object());
+        assert_eq!(daemon.irc.own_lookups.load(Ordering::Relaxed), 1);
+
+        let refused = daemon.call(redact_request("#bots", older, "")).await;
+        assert_eq!(refused["Err"]["code"], "rate_limited", "{refused}");
+        assert!(refused["Err"]["retry_after"].as_u64().unwrap() > 0);
+        assert_eq!(daemon.irc.own_lookups.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_redact_refused_as_not_the_bots_gives_its_slot_back() {
+        let daemon = launch_with(grants(), one_react_per_10s());
+        let foreign = daemon
+            .call(redact_request("#bots", "4y8kq7j2c9mnz", ""))
+            .await;
+        assert_eq!(foreign["Err"]["code"], "not_allowed", "{foreign}");
+
+        let older = "8y6ytq7xkj44cjnumyus8e2wds";
+        daemon
+            .irc
+            .own_history
+            .lock()
+            .unwrap()
+            .push(("#bots".into(), older.into()));
+        let reply = daemon.call(redact_request("#bots", older, "")).await;
+        assert!(reply["Ok"].is_object(), "{reply}");
     }
 
     fn redact_request(target: &str, msgid: &str, reason: &str) -> Value {
