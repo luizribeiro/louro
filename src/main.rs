@@ -39,14 +39,22 @@ error: exit 0, `timed_out: true`, and no events, or only `sent` ones. Just \
 call `wait` again. The daemon remembers where you left off, so events are \
 never missed and never replayed. If louro restarts meanwhile, `wait` \
 reconnects on its own; it exits 3 only once louro has been gone for 2 \
-minutes. A long-running monitor can use `wait --follow --only dms,mentions`: \
-it never exits, prints each event as its own line, and skips chat you \
-didn't ask for.
+minutes.
+
+If you can run a command in the background and get each line it prints \
+as a notification, use that instead of looping on `wait`: run `louro wait \
+--follow --only dms,mentions`. It never exits and prints each event as \
+its own JSON line: DMs, invites, mentions of you, and `connection` and \
+`presence` events, skipping other channel chat. While louro is down it \
+prints one error line and keeps trying; it exits only on an error a retry \
+can't fix. Leave out `--only` to get every event, which in a busy channel \
+is a lot of lines.
 
 If `status` shows `typing.after_wait` other than `off`, louro shows typing \
 for you to anyone who DMed you (or mentioned you, with `dms+mentions`) in \
 the events you just got, where `typing` is granted, so you needn't. It \
-stops when you send or react there, `wait` again, or it times out; \
+stops when you send or react there, `wait` again (not under `--follow`), \
+or it times out; \
 `typing TARGET done` stops it sooner.
 
 Where `irc.ask` grants it, `ask NICK TEXT [--choices yes,no] [--timeout \
