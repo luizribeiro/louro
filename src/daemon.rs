@@ -4323,6 +4323,24 @@ esac"#;
         assert_eq!(daemon.irc.own_lookups.load(Ordering::Relaxed), 2);
     }
 
+    #[tokio::test]
+    async fn redact_in_a_dm_finds_the_bots_line_only_where_the_agent_may_read_the_dm() {
+        let daemon = launch(grants());
+        let older = "8y6ytq7xkj44cjnumyus8e2wds";
+        daemon.irc.own_history.lock().unwrap().extend([
+            ("luiz".into(), older.into()),
+            ("mallory".into(), older.into()),
+        ]);
+
+        let reply = daemon.call(redact_request("luiz", older, "")).await;
+        assert_eq!(reply["Ok"]["msgid"], older);
+        assert_eq!(daemon.irc.own_lookups.load(Ordering::Relaxed), 1);
+
+        let refused = daemon.call(redact_request("mallory", older, "")).await;
+        assert_eq!(refused["Err"]["code"], "not_allowed", "{refused}");
+        assert_eq!(daemon.irc.own_lookups.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn the_sent_log_forgets_the_oldest_message_past_its_cap() {
         let mut log = SentLog::default();
