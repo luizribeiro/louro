@@ -6,6 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Agent commands
+
+- `louro wait --only dms,mentions,sent` skips the other events for good,
+  so a busy channel doesn't wake the agent. Connection and presence events
+  always come through.
+
 ## [0.1.0] - 2026-11-16
 
 The first release.

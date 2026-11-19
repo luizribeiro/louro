@@ -10,7 +10,7 @@ use tokio::time::{self, Instant};
 use crate::error::{Code, Result};
 use crate::irc::whole_seconds;
 use crate::output;
-use crate::socket::{self, Connection, Op};
+use crate::socket::{self, Connection, Only, Op};
 
 pub mod connect;
 mod send;
@@ -29,7 +29,9 @@ pub async fn dispatch(command: Command) -> ExitCode {
     match command {
         Command::Send(args) => args.run().await,
         Command::Connect(args) => args.run().await,
-        Command::Request(Op::Wait { timeout, max }) => wait(timeout, max).await,
+        Command::Request(Op::Wait {
+            timeout, max, only, ..
+        }) => wait(timeout, max, only).await,
         Command::Request(op) => output::emit(socket::request(op).await),
     }
 }
@@ -42,8 +44,8 @@ const MAX_RETRY: Duration = Duration::from_secs(5);
 const GIVE_UP: Duration = Duration::from_secs(120);
 
 /// Acks only after printing, so the daemon never drops events the agent didn't see.
-async fn wait(timeout: u64, max: NonZeroUsize) -> ExitCode {
-    match wait_through_restarts(None, timeout, max).await {
+async fn wait(timeout: u64, max: NonZeroUsize, only: Vec<Only>) -> ExitCode {
+    match wait_through_restarts(None, timeout, max, &only).await {
         Ok((mut connection, batch)) => {
             let exit_code = output::emit(Ok(batch));
             let _ = connection.ack().await;
@@ -58,6 +60,7 @@ async fn wait_through_restarts(
     socket: Option<&Path>,
     timeout: u64,
     max: NonZeroUsize,
+    only: &[Only],
 ) -> Result<(Connection, Value)> {
     let deadline = Instant::now().checked_add(Duration::from_secs(timeout));
     let time_left = || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
@@ -66,7 +69,15 @@ async fn wait_through_restarts(
     loop {
         let timeout = time_left().map_or(u64::MAX, whole_seconds);
         let gone = match Connection::connect(socket).await {
-            Ok(mut connection) => match connection.answer(Op::Wait { timeout, max }).await {
+            Ok(mut connection) => match connection
+                .answer(Op::Wait {
+                    timeout,
+                    max,
+                    only: only.to_vec(),
+                    follow: false,
+                })
+                .await
+            {
                 Ok(reply) => return reply.map(|batch| (connection, batch)),
                 Err(stopped) => {
                     gone_since = Instant::now();
@@ -142,7 +153,7 @@ mod tests {
                 (first, second, ack)
             });
 
-            let (mut connection, batch) = wait_through_restarts(Some(&path), timeout, TWENTY)
+            let (mut connection, batch) = wait_through_restarts(Some(&path), timeout, TWENTY, &[])
                 .await
                 .unwrap();
             assert_eq!(batch["timed_out"], false);
@@ -157,10 +168,11 @@ mod tests {
     async fn a_wait_gives_up_after_two_minutes_without_a_daemon() {
         let dir = tempdir().unwrap();
         let started = Instant::now();
-        let gone = wait_through_restarts(Some(&dir.path().join("louro.sock")), u64::MAX, TWENTY)
-            .await
-            .err()
-            .unwrap();
+        let gone =
+            wait_through_restarts(Some(&dir.path().join("louro.sock")), u64::MAX, TWENTY, &[])
+                .await
+                .err()
+                .unwrap();
         assert_eq!(gone.code, Code::NoSession);
         assert!((GIVE_UP..GIVE_UP + MAX_RETRY).contains(&started.elapsed()));
     }
@@ -169,7 +181,7 @@ mod tests {
     async fn a_wait_without_a_daemon_ends_at_its_own_timeout() {
         let dir = tempdir().unwrap();
         let started = Instant::now();
-        let gone = wait_through_restarts(Some(&dir.path().join("louro.sock")), 4, TWENTY)
+        let gone = wait_through_restarts(Some(&dir.path().join("louro.sock")), 4, TWENTY, &[])
             .await
             .err()
             .unwrap();
@@ -193,7 +205,7 @@ mod tests {
                 let (mut stream, _) = accept_wait(&listener).await;
                 reply(&mut stream, line).await;
             });
-            let refused = wait_through_restarts(Some(&path), u64::MAX, TWENTY)
+            let refused = wait_through_restarts(Some(&path), u64::MAX, TWENTY, &[])
                 .await
                 .err()
                 .unwrap();

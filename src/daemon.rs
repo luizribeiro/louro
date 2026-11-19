@@ -855,9 +855,17 @@ impl<I: Irc> Daemon<I> {
             Ok(None) => return Ok(()),
             Err(_) => Err(Error::new(Code::Usage, "the request is not a JSON line")),
         };
-        if let Ok(Op::Wait { timeout, max }) = op {
-            self.end_typing(|_| true).await;
-            let batch = self.inbox.wait(timeout, max).await;
+        if let Ok(Op::Wait {
+            timeout,
+            max,
+            only,
+            follow,
+        }) = op
+        {
+            if !follow {
+                self.end_typing(|_| true).await;
+            }
+            let batch = self.inbox.wait(timeout, max, &only).await;
             let cursor = batch.cursor;
             let addressed = self.addressed(&batch);
             write_line(conn, &Ok::<_, Error>(&batch)).await?;
@@ -2217,12 +2225,23 @@ mod tests {
         }
 
         async fn wait(&self, timeout_secs: u64) -> (BufReader<UnixStream>, Value) {
+            self.wait_for(wait_request(timeout_secs)).await
+        }
+
+        async fn wait_for(&self, request: Value) -> (BufReader<UnixStream>, Value) {
             let mut conn = self.connect().await;
-            write_line(&mut conn, &wait_request(timeout_secs))
-                .await
-                .unwrap();
+            write_line(&mut conn, &request).await.unwrap();
             let reply = read_line(&mut conn).await.unwrap().unwrap();
             (conn, reply)
+        }
+
+        /// Polls for at most `max` events that pass `only`, and acks them.
+        async fn poll_only_and_ack(&self, only: &[&str], max: usize) -> Value {
+            let request = request("wait", json!({"timeout": 0, "max": max, "only": only}));
+            let (mut conn, reply) = self.wait_for(request).await;
+            write_line(&mut conn, &Ack { ack: true }).await.unwrap();
+            assert_eq!(read_line::<Value>(&mut conn).await.unwrap(), None);
+            reply
         }
 
         /// Waits for events and acks them, so the next wait gets only newer ones.
@@ -2261,7 +2280,10 @@ mod tests {
     }
 
     fn wait_request(timeout_secs: u64) -> Value {
-        request("wait", json!({"timeout": timeout_secs, "max": 20}))
+        request(
+            "wait",
+            json!({"timeout": timeout_secs, "max": 20, "only": []}),
+        )
     }
 
     fn send_request(target: &str, text: &str) -> Value {
@@ -2743,6 +2765,132 @@ mod tests {
         let (_, after_ack) = daemon.wait(0).await;
         assert_eq!(after_ack["Ok"]["timed_out"], true);
         assert_eq!(after_ack["Ok"]["cursor"], 2);
+    }
+
+    /// What each event says: its text, or for a connection event its state.
+    fn gist(reply: &Value) -> Vec<&str> {
+        reply["Ok"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                event["text"]
+                    .as_str()
+                    .or_else(|| event["state"].as_str())
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn only_lets_through_what_it_lists_and_always_connection_events() {
+        let daemon = launch(grants());
+        daemon
+            .update(Update::Disconnected {
+                cause: "ping timeout".into(),
+                retry_in: Some(1),
+            })
+            .await;
+        daemon.say(from_joao("anyone tried the new ergo?")).await;
+        daemon
+            .say(from_maria("louro: does ergo do chathistory?"))
+            .await;
+        daemon.call(send_request("#bots", "louro: noted")).await;
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+
+        let reply = daemon.poll_only_and_ack(&["dms", "mentions"], 20).await;
+        assert_eq!(
+            gist(&reply),
+            [
+                "disconnected",
+                "louro: does ergo do chathistory?",
+                "hey, got a sec?"
+            ]
+        );
+
+        daemon.say(from_joao("it does")).await;
+        let reply = daemon.poll_only_and_ack(&["sent"], 20).await;
+        assert!(gist(&reply).is_empty());
+        assert_eq!(reply["Ok"]["cursor"], 6);
+    }
+
+    #[tokio::test]
+    async fn only_sent_lets_the_bots_own_lines_through() {
+        let daemon = launch(grants());
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.call(send_request("#bots", "louro: noted")).await;
+
+        let reply = daemon.poll_only_and_ack(&["sent"], 20).await;
+        assert_eq!(gist(&reply), ["louro: noted"]);
+    }
+
+    #[tokio::test]
+    async fn events_only_left_out_do_not_come_back_on_the_next_wait() {
+        let daemon = launch(grants());
+        daemon.say(from_joao("anyone tried the new ergo?")).await;
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.say(from_joao("it does")).await;
+
+        let reply = daemon.poll_only_and_ack(&["dms"], 20).await;
+        assert_eq!(gist(&reply), ["hey, got a sec?"]);
+        assert_eq!(reply["Ok"]["cursor"], 3);
+
+        let everything = daemon.wait_and_ack(0).await;
+        assert!(gist(&everything).is_empty());
+        assert_eq!(everything["Ok"]["cursor"], 3);
+    }
+
+    #[tokio::test]
+    async fn max_counts_only_the_events_that_pass() {
+        let daemon = launch(grants());
+        for line in ["one", "two", "three"] {
+            daemon.say(from_joao(line)).await;
+        }
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.say(from_joao("four")).await;
+        daemon.say(dm(from_luiz("it's about ergo"))).await;
+
+        let first = daemon.poll_only_and_ack(&["dms"], 1).await;
+        assert_eq!(gist(&first), ["hey, got a sec?"]);
+        assert_eq!(first["Ok"]["more"], true);
+
+        let second = daemon.poll_only_and_ack(&["dms"], 1).await;
+        assert_eq!(gist(&second), ["it's about ergo"]);
+        assert_eq!(second["Ok"]["more"], false);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn typing_after_an_only_wait_follows_what_it_delivered() {
+        let daemon = launch_typing("dms+mentions");
+        daemon
+            .say(from_maria("louro: does ergo do chathistory?"))
+            .await;
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+
+        daemon.poll_only_and_ack(&["dms"], 20).await;
+        assert_eq!(daemon.typing_acts().await, typed(&[("luiz", "active")]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_follow_wait_leaves_typing_on_and_a_plain_wait_ends_it() {
+        let daemon = launch_typing("dms");
+        daemon.say(dm(from_luiz("hey, got a sec?"))).await;
+        daemon.wait_and_ack(5).await;
+        let typing_on = typed(&[("luiz", "active")]);
+        assert_eq!(daemon.typing_acts().await, typing_on);
+
+        let follow = request(
+            "wait",
+            json!({"timeout": 0, "max": 20, "only": [], "follow": true}),
+        );
+        daemon.wait_for(follow).await;
+        assert_eq!(daemon.typing_acts().await, typing_on);
+
+        daemon.wait(0).await;
+        assert_eq!(
+            daemon.typing_acts().await,
+            typed(&[("luiz", "active"), ("luiz", "done")])
+        );
     }
 
     #[tokio::test]

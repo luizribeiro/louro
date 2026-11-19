@@ -14,7 +14,7 @@ use crate::config::absolute;
 use crate::error::{Code, Error, Result};
 use crate::irc::{HistoryQuery, Outgoing, Typing};
 
-pub const VERSION: u8 = 17;
+pub const VERSION: u8 = 18;
 
 pub const RESTART_HINT: &str = "ask your operator to restart louro with `louro connect --replace`";
 
@@ -23,6 +23,15 @@ pub struct Request {
     pub v: u8,
     #[serde(flatten)]
     pub op: Op,
+}
+
+/// A kind of event `wait --only` lets through.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Only {
+    Dms,
+    Mentions,
+    Sent,
 }
 
 /// A request to the daemon; the commands that only forward one parse straight into it.
@@ -42,6 +51,18 @@ pub enum Op {
         /// Maximum number of events to return
         #[arg(long, default_value = "20", value_name = "N")]
         max: NonZeroUsize,
+        /// Only these kinds of events, comma-separated: `dms` (anything in a DM, and invites),
+        /// `mentions` (channel chat that mentions the bot), `sent` (the bot's own lines).
+        /// Connection and presence events always come through; events left out are skipped for
+        /// good
+        #[arg(long, value_delimiter = ',', value_name = "LIST")]
+        only: Vec<Only>,
+        /// Never exit: print each event as its own JSON line as it arrives, for a long-running
+        /// monitor. Rides out daemon restarts, printing one error line when louro goes away;
+        /// any other error ends it
+        #[arg(long, conflicts_with_all = ["timeout", "max"])]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        follow: bool,
     },
     #[command(skip)]
     Send(Outgoing),
@@ -365,14 +386,25 @@ mod tests {
         let cases = [
             (
                 request(Op::Status {}),
-                "{\"v\":17,\"op\":\"status\",\"args\":{}}",
+                "{\"v\":18,\"op\":\"status\",\"args\":{}}",
             ),
             (
                 request(Op::Wait {
                     timeout: 60,
                     max: NonZeroUsize::new(20).unwrap(),
+                    only: vec![Only::Dms, Only::Mentions],
+                    follow: false,
                 }),
-                "{\"v\":17,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20}}",
+                "{\"v\":18,\"op\":\"wait\",\"args\":{\"timeout\":60,\"max\":20,\"only\":[\"dms\",\"mentions\"]}}",
+            ),
+            (
+                request(Op::Wait {
+                    timeout: u64::MAX,
+                    max: NonZeroUsize::new(20).unwrap(),
+                    only: vec![],
+                    follow: true,
+                }),
+                "{\"v\":18,\"op\":\"wait\",\"args\":{\"timeout\":18446744073709551615,\"max\":20,\"only\":[],\"follow\":true}}",
             ),
             (
                 request(Op::Send(Outgoing {
@@ -381,33 +413,33 @@ mod tests {
                     text: "hi there".into(),
                     reply_to: Some("4y8kq7j2c9mnz".into()),
                 })),
-                "{\"v\":17,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
+                "{\"v\":18,\"op\":\"send\",\"args\":{\"target\":\"#bots\",\"kind\":\"message\",\"text\":\"hi there\",\"reply_to\":\"4y8kq7j2c9mnz\"}}",
             ),
             (
                 request(Op::Names {
                     channel: "#bots".into(),
                 }),
-                "{\"v\":17,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
+                "{\"v\":18,\"op\":\"names\",\"args\":{\"channel\":\"#bots\"}}",
             ),
             (
                 request(Op::Topic {
                     channel: "#bots".into(),
                     set: Some("louro's test channel".into()),
                 }),
-                "{\"v\":17,\"op\":\"topic\",\"args\":{\"channel\":\"#bots\",\"set\":\"louro's test channel\"}}",
+                "{\"v\":18,\"op\":\"topic\",\"args\":{\"channel\":\"#bots\",\"set\":\"louro's test channel\"}}",
             ),
             (
                 request(Op::Join {
                     channel: "#help-rust".into(),
                 }),
-                "{\"v\":17,\"op\":\"join\",\"args\":{\"channel\":\"#help-rust\"}}",
+                "{\"v\":18,\"op\":\"join\",\"args\":{\"channel\":\"#help-rust\"}}",
             ),
             (
                 request(Op::Part {
                     channel: "#help-rust".into(),
                     reason: "answered".into(),
                 }),
-                "{\"v\":17,\"op\":\"part\",\"args\":{\"channel\":\"#help-rust\",\"reason\":\"answered\"}}",
+                "{\"v\":18,\"op\":\"part\",\"args\":{\"channel\":\"#help-rust\",\"reason\":\"answered\"}}",
             ),
             (
                 request(Op::React {
@@ -416,14 +448,14 @@ mod tests {
                     reaction: "+1".into(),
                     remove: false,
                 }),
-                "{\"v\":17,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
+                "{\"v\":18,\"op\":\"react\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reaction\":\"+1\",\"remove\":false}}",
             ),
             (
                 request(Op::Typing {
                     target: "#bots".into(),
                     state: Typing::Active,
                 }),
-                "{\"v\":17,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
+                "{\"v\":18,\"op\":\"typing\",\"args\":{\"target\":\"#bots\",\"state\":\"active\"}}",
             ),
             (
                 request(Op::Ask(Question {
@@ -432,7 +464,7 @@ mod tests {
                     choices: vec!["yes".into(), "no".into()],
                     timeout: 300,
                 })),
-                "{\"v\":17,\"op\":\"ask\",\"args\":{\"target\":\"luiz\",\"text\":\"run `rm -rf target`?\",\"choices\":[\"yes\",\"no\"],\"timeout\":300}}",
+                "{\"v\":18,\"op\":\"ask\",\"args\":{\"target\":\"luiz\",\"text\":\"run `rm -rf target`?\",\"choices\":[\"yes\",\"no\"],\"timeout\":300}}",
             ),
             (
                 request(Op::Redact {
@@ -440,7 +472,7 @@ mod tests {
                     msgid: "4y8kq7j2c9mnz".into(),
                     reason: "typo".into(),
                 }),
-                "{\"v\":17,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
+                "{\"v\":18,\"op\":\"redact\",\"args\":{\"target\":\"#bots\",\"msgid\":\"4y8kq7j2c9mnz\",\"reason\":\"typo\"}}",
             ),
             (
                 request(Op::History {
@@ -452,55 +484,55 @@ mod tests {
                         grep: Some("(?i)ergo".into()),
                     },
                 }),
-                "{\"v\":17,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null,\"grep\":\"(?i)ergo\"}}",
+                "{\"v\":18,\"op\":\"history\",\"args\":{\"target\":\"#bots\",\"limit\":20,\"before\":\"4y8kq7j2c9mnz\",\"after\":null,\"grep\":\"(?i)ergo\"}}",
             ),
             (
                 request(Op::Whois {
                     nick: "luiz".into(),
                 }),
-                "{\"v\":17,\"op\":\"whois\",\"args\":{\"nick\":\"luiz\"}}",
+                "{\"v\":18,\"op\":\"whois\",\"args\":{\"nick\":\"luiz\"}}",
             ),
             (
                 request(Op::Whowas {
                     nick: "luiz".into(),
                 }),
-                "{\"v\":17,\"op\":\"whowas\",\"args\":{\"nick\":\"luiz\"}}",
+                "{\"v\":18,\"op\":\"whowas\",\"args\":{\"nick\":\"luiz\"}}",
             ),
             (
                 request(Op::Watch {
                     nick: "luiz".into(),
                     remove: false,
                 }),
-                "{\"v\":17,\"op\":\"watch\",\"args\":{\"nick\":\"luiz\",\"remove\":false}}",
+                "{\"v\":18,\"op\":\"watch\",\"args\":{\"nick\":\"luiz\",\"remove\":false}}",
             ),
             (
                 request(Op::Nick {
                     nick: "louro_".into(),
                 }),
-                "{\"v\":17,\"op\":\"nick\",\"args\":{\"nick\":\"louro_\"}}",
+                "{\"v\":18,\"op\":\"nick\",\"args\":{\"nick\":\"louro_\"}}",
             ),
             (
                 request(Op::Away {
                     text: Some("thinking".into()),
                     back: false,
                 }),
-                "{\"v\":17,\"op\":\"away\",\"args\":{\"text\":\"thinking\",\"back\":false}}",
+                "{\"v\":18,\"op\":\"away\",\"args\":{\"text\":\"thinking\",\"back\":false}}",
             ),
             (
                 request(Op::Setname {
                     realname: "louro, a parrot".into(),
                 }),
-                "{\"v\":17,\"op\":\"setname\",\"args\":{\"realname\":\"louro, a parrot\"}}",
+                "{\"v\":18,\"op\":\"setname\",\"args\":{\"realname\":\"louro, a parrot\"}}",
             ),
             (
                 request(Op::List {
                     pattern: Some("rust".into()),
                 }),
-                "{\"v\":17,\"op\":\"list\",\"args\":{\"pattern\":\"rust\"}}",
+                "{\"v\":18,\"op\":\"list\",\"args\":{\"pattern\":\"rust\"}}",
             ),
             (
                 request(Op::Quit {}),
-                "{\"v\":17,\"op\":\"quit\",\"args\":{}}",
+                "{\"v\":18,\"op\":\"quit\",\"args\":{}}",
             ),
             (
                 serde_json::to_string(&Ack { ack: true }).unwrap(),

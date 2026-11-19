@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 use tokio::time::{self, Instant};
 
 use crate::irc::Incoming;
+use crate::socket::Only;
 use crate::text::{self, sanitize};
 
 const BUFFER_CAP: usize = 10_000;
@@ -55,6 +56,26 @@ impl Body {
             incoming,
             truncated,
             untrusted: true,
+        }
+    }
+
+    /// Whether `wait --only` lets this through. Connection and presence events always pass, so a
+    /// dropped link never looks like silence.
+    fn passes(&self, only: &[Only]) -> bool {
+        let wants = |kind| only.contains(&kind);
+        if only.is_empty() {
+            return true;
+        }
+        match self {
+            Self::Chat { incoming, .. } if incoming.private => wants(Only::Dms),
+            Self::Chat { incoming, .. } => incoming.mentions_me && wants(Only::Mentions),
+            Self::Connection(_) => true,
+            Self::Untrusted { event, .. } => match event["type"].as_str() {
+                Some("presence") => true,
+                Some("sent") => wants(Only::Sent),
+                Some("invite") => wants(Only::Dms),
+                _ => event["private"] == true && wants(Only::Dms),
+            },
         }
     }
 
@@ -104,16 +125,33 @@ impl Buffer {
         });
     }
 
-    fn wakes(&self) -> bool {
-        self.unread.iter().any(|event| event.wakes)
+    fn wakes(&self, only: &[Only]) -> bool {
+        self.unread
+            .iter()
+            .any(|event| event.wakes && event.body.passes(only))
     }
 
-    fn batch(&self, max: usize) -> Batch {
-        let events: Vec<Event> = self.unread.iter().take(max).cloned().collect();
+    /// The first `max` unread events that pass `only`. The cursor also moves past the ones left
+    /// out, so acking skips them for good.
+    fn batch(&self, max: usize, only: &[Only]) -> Batch {
+        let mut events = vec![];
+        let mut cursor = self.cursor;
+        let mut more = false;
+        for event in &self.unread {
+            if !event.body.passes(only) {
+                cursor = event.id;
+            } else if events.len() == max {
+                more = true;
+                break;
+            } else {
+                cursor = event.id;
+                events.push(event.clone());
+            }
+        }
         Batch {
-            cursor: events.last().map_or(self.cursor, |event| event.id),
+            cursor,
             timed_out: false,
-            more: self.unread.len() > events.len(),
+            more,
             notice: NOTICE,
             events,
         }
@@ -168,20 +206,20 @@ impl Inbox {
         self.arrived.notify_waiters();
     }
 
-    pub async fn wait(&self, timeout: u64, max: NonZeroUsize) -> Batch {
+    pub async fn wait(&self, timeout: u64, max: NonZeroUsize, only: &[Only]) -> Batch {
         let deadline = Instant::now().checked_add(Duration::from_secs(timeout));
         loop {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
-            if self.buffer.lock().unwrap().wakes() {
-                return self.batch(max);
+            if self.buffer.lock().unwrap().wakes(only) {
+                return self.batch(max, only);
             }
             if let Some(deadline) = deadline {
                 if time::timeout_at(deadline, arrived).await.is_err() {
                     return Batch {
                         timed_out: true,
-                        ..self.batch(max)
+                        ..self.batch(max, only)
                     };
                 }
             } else {
@@ -190,8 +228,8 @@ impl Inbox {
         }
     }
 
-    fn batch(&self, max: NonZeroUsize) -> Batch {
-        self.buffer.lock().unwrap().batch(max.get())
+    fn batch(&self, max: NonZeroUsize, only: &[Only]) -> Batch {
+        self.buffer.lock().unwrap().batch(max.get(), only)
     }
 
     pub fn ack(&self, cursor: u64) {
@@ -249,7 +287,7 @@ mod tests {
             "from": sender("luiz", Some("lu\u{7}iz")),
             "channel": "#lounge\u{1b}[2J",
         }));
-        let batch = serde_json::to_value(inbox.wait(0, max(20)).await).unwrap();
+        let batch = serde_json::to_value(inbox.wait(0, max(20), &[]).await).unwrap();
         assert_eq!(
             batch["events"],
             serde_json::json!([
@@ -261,19 +299,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_places_each_kind_of_event() {
+        let inbox = Inbox::new(MAX_TEXT_CHARS);
+        let event = |kind: &str, private: bool| serde_json::json!({"type": kind, "time": "2026-10-16T21:05:00Z", "private": private});
+        inbox.push_untrusted(event("reaction", false));
+        inbox.push_untrusted(event("reaction", true));
+        inbox.push_untrusted(event("redaction", true));
+        inbox.push_untrusted(event("invite", false));
+        inbox.push_untrusted(event("presence", false));
+        inbox.push_quiet(event("sent", true));
+        inbox.push_connection(serde_json::json!({"type": "connection"}));
+
+        let ids_for = async |only: &[Only]| ids(&inbox.wait(0, max(20), only).await);
+        assert_eq!(ids_for(&[]).await, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(ids_for(&[Only::Dms]).await, [2, 3, 4, 5, 7]);
+        assert_eq!(ids_for(&[Only::Mentions]).await, [5, 7]);
+        assert_eq!(ids_for(&[Only::Sent]).await, [5, 6, 7]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_event_that_fails_only_does_not_wake_wait_and_the_cursor_moves_past_it() {
+        let inbox = Arc::new(Inbox::new(MAX_TEXT_CHARS));
+        let waiting = tokio::spawn({
+            let inbox = Arc::clone(&inbox);
+            async move { inbox.wait(60, max(20), &[Only::Dms]).await }
+        });
+        time::sleep(Duration::from_secs(5)).await;
+        inbox.push(from_joao("it does"));
+        inbox.push(from_maria("louro: which one?"));
+
+        let started = Instant::now();
+        let batch = waiting.await.unwrap();
+        assert!(batch.timed_out);
+        assert_eq!(started.elapsed(), Duration::from_secs(55));
+        assert!(ids(&batch).is_empty());
+        assert_eq!(batch.cursor, 2);
+    }
+
+    #[tokio::test]
     async fn max_limits_a_batch_and_more_says_others_are_queued() {
         let inbox = Inbox::new(MAX_TEXT_CHARS);
         inbox.push(from_maria("louro: does ergo support chathistory for DMs?"));
         inbox.push(from_joao("it does, it's a config option"));
         inbox.push(from_maria("louro: which one?"));
 
-        let first = inbox.wait(0, max(2)).await;
+        let first = inbox.wait(0, max(2), &[]).await;
         assert_eq!(ids(&first), [1, 2]);
         assert!(first.more);
         assert_eq!(first.cursor, 2);
 
         inbox.ack(first.cursor);
-        let rest = inbox.wait(0, max(2)).await;
+        let rest = inbox.wait(0, max(2), &[]).await;
         assert_eq!(ids(&rest), [3]);
         assert!(!rest.more);
     }
@@ -284,7 +360,7 @@ mod tests {
         inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
 
         let started = Instant::now();
-        let batch = inbox.wait(60, max(20)).await;
+        let batch = inbox.wait(60, max(20), &[]).await;
         assert_eq!(started.elapsed(), Duration::from_secs(60));
         assert!(batch.timed_out);
         assert_eq!(ids(&batch), [1]);
@@ -297,7 +373,7 @@ mod tests {
         inbox.push_quiet(sent_to_luiz("deployed louro 0.1.0 to weblounge"));
         let waiting = tokio::spawn({
             let inbox = Arc::clone(&inbox);
-            async move { inbox.wait(60, max(20)).await }
+            async move { inbox.wait(60, max(20), &[]).await }
         });
         time::sleep(Duration::from_secs(5)).await;
         inbox.push_quiet(sent_to_luiz("the changelog is up too"));
@@ -315,13 +391,13 @@ mod tests {
         inbox.push_quiet(sent_to_luiz("the changelog is up too"));
         inbox.push(dm(from_luiz("nice, which commit?")));
 
-        let first = inbox.wait(60, max(2)).await;
+        let first = inbox.wait(60, max(2), &[]).await;
         assert!(!first.timed_out);
         assert_eq!(ids(&first), [1, 2]);
         assert!(first.more);
 
         inbox.ack(first.cursor);
-        assert_eq!(ids(&inbox.wait(60, max(2)).await), [3]);
+        assert_eq!(ids(&inbox.wait(60, max(2), &[]).await), [3]);
     }
 
     #[tokio::test]
@@ -330,7 +406,7 @@ mod tests {
         for n in 0..BUFFER_CAP + 5 {
             inbox.push(from_joao(&format!("spam {n}")));
         }
-        let batch = inbox.wait(0, max(1)).await;
+        let batch = inbox.wait(0, max(1), &[]).await;
         assert_eq!(ids(&batch), [6]);
         assert!(batch.more);
     }
