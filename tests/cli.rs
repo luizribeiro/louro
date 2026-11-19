@@ -34,6 +34,19 @@ fn a_bad_flag_is_a_json_usage_error_with_exit_code_two() {
 }
 
 #[test]
+fn follow_cannot_be_combined_with_a_timeout_or_a_batch_size() {
+    for flags in [["--timeout", "5"], ["--max", "5"]] {
+        louro()
+            .args(["wait", "--follow"])
+            .args(flags)
+            .assert()
+            .failure()
+            .code(2)
+            .stdout(predicate::str::contains(r#""code":"usage""#));
+    }
+}
+
+#[test]
 fn agent_commands_take_no_socket_path() {
     for command in ["status", "wait", "quit"] {
         louro()

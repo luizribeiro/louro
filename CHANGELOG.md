@@ -11,6 +11,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `louro wait --only dms,mentions,sent` skips the other events for good,
   so a busy channel doesn't wake the agent. Connection and presence events
   always come through.
+- `louro wait --follow` never exits: it prints each event as its own JSON
+  line and rides out daemon restarts, for a Claude Code Monitor or any
+  other long-running reader. An outage prints one error line.
 
 ## [0.1.0] - 2026-11-16
 

@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::ExitCode;
@@ -10,7 +11,7 @@ use tokio::time::{self, Instant};
 use crate::error::{Code, Error, Result};
 use crate::irc::whole_seconds;
 use crate::output;
-use crate::socket::{self, Connection, Only, Op};
+use crate::socket::{self, Connection, DEFAULT_MAX, Only, Op};
 
 pub mod connect;
 mod send;
@@ -29,6 +30,9 @@ pub async fn dispatch(command: Command) -> ExitCode {
     match command {
         Command::Send(args) => args.run().await,
         Command::Connect(args) => args.run().await,
+        Command::Request(Op::Wait {
+            only, follow: true, ..
+        }) => follow(None, &only, &mut io::stdout()).await,
         Command::Request(Op::Wait {
             timeout, max, only, ..
         }) => wait(timeout, max, only).await,
@@ -114,8 +118,57 @@ async fn wait_through_restarts(
     }
 }
 
+/// Prints each event as its own line, acking a batch only after it is printed. Ends when stdout
+/// closes, which leaves the unacked events with the daemon, or on an error a retry can't fix.
+async fn follow(socket: Option<&Path>, only: &[Only], out: &mut impl Write) -> ExitCode {
+    follow_events(socket, only, out)
+        .await
+        .unwrap_or(ExitCode::SUCCESS)
+}
+
+async fn follow_events(
+    socket: Option<&Path>,
+    only: &[Only],
+    out: &mut impl Write,
+) -> io::Result<ExitCode> {
+    let mut pause = FIRST_RETRY;
+    let mut reported = false;
+    loop {
+        let gone = match try_wait(socket, u64::MAX, DEFAULT_MAX, only).await {
+            Tried::Answered(Ok((mut connection, batch))) => {
+                for event in batch["events"].as_array().into_iter().flatten() {
+                    writeln!(out, "{event}")?;
+                }
+                out.flush()?;
+                let _ = connection.ack().await;
+                (pause, reported) = (FIRST_RETRY, false);
+                continue;
+            }
+            Tried::Answered(Err(error)) => {
+                output::report(out, &error)?;
+                return Ok(ExitCode::from(error.code.exit_code()));
+            }
+            Tried::Absent(gone) => gone,
+            Tried::Stopped(gone) => {
+                (pause, reported) = (FIRST_RETRY, false);
+                gone
+            }
+        };
+        if !reported {
+            output::report(out, &gone)?;
+            out.flush()?;
+            reported = true;
+        }
+        time::sleep(pause).await;
+        pause = (pause * 2).min(MAX_RETRY);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::{Arc, Mutex};
+
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -125,13 +178,18 @@ mod tests {
 
     const TWENTY: NonZeroUsize = NonZeroUsize::new(20).unwrap();
 
-    /// Accepts one connection on `listener`, returning it and its wait request's timeout.
-    async fn accept_wait(listener: &UnixListener) -> (BufReader<UnixStream>, Value) {
+    /// Accepts one connection on `listener`, returning it and its request.
+    async fn accept_request(listener: &UnixListener) -> (BufReader<UnixStream>, Value) {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = BufReader::new(stream);
         let mut request = String::new();
         stream.read_line(&mut request).await.unwrap();
-        let request: Value = serde_json::from_str(&request).unwrap();
+        (stream, serde_json::from_str(&request).unwrap())
+    }
+
+    /// Like [`accept_request`], returning only its wait request's timeout.
+    async fn accept_wait(listener: &UnixListener) -> (BufReader<UnixStream>, Value) {
+        let (stream, request) = accept_request(listener).await;
         (stream, request["args"]["timeout"].clone())
     }
 
@@ -229,5 +287,173 @@ mod tests {
             assert!(refused.message.contains(refusal), "{refused}");
             daemon.await.unwrap();
         }
+    }
+
+    /// A stdout that daemons write "ack" into too, to show what came first.
+    #[derive(Clone, Default)]
+    struct Transcript(Arc<Mutex<String>>);
+
+    impl Transcript {
+        fn note(&self, line: &str) {
+            let mut text = self.0.lock().unwrap();
+            text.push_str(line);
+            text.push('\n');
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().lines().map(String::from).collect()
+        }
+    }
+
+    impl Write for Transcript {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(buf));
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn message(id: u64, text: &str) -> Value {
+        json!({"id": id, "type": "message", "text": text, "untrusted": true})
+    }
+
+    /// Serves one batch of `events` to the next wait on `listener`, and notes the ack.
+    async fn serve_batch(
+        listener: &UnixListener,
+        events: &[Value],
+        transcript: &Transcript,
+    ) -> Value {
+        let (mut stream, request) = accept_request(listener).await;
+        let batch =
+            json!({"Ok": {"events": events, "timed_out": false, "notice": "n", "now": "t"}});
+        reply(&mut stream, batch).await;
+        let mut ack = String::new();
+        stream.read_line(&mut ack).await.unwrap();
+        assert_eq!(ack.trim(), r#"{"ack":true}"#);
+        transcript.note("ack");
+        request
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follow_prints_each_event_as_a_line_and_acks_each_batch_after_printing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("louro.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let transcript = Transcript::default();
+        let first = [message(1, "louro: ping"), message(2, "hey, got a sec?")];
+        let second = [message(3, "it's about ergo")];
+
+        let daemon = async {
+            let request = serve_batch(&listener, &first, &transcript).await;
+            assert_eq!(request["args"]["timeout"], json!(u64::MAX));
+            assert_eq!(request["args"]["only"], json!(["dms", "mentions"]));
+            serve_batch(&listener, &second, &transcript).await;
+        };
+        let only = [Only::Dms, Only::Mentions];
+        let mut out = transcript.clone();
+        tokio::select! {
+            _ = follow(Some(&path), &only, &mut out) => panic!("follow ended"),
+            () = daemon => {}
+        }
+
+        let line = |event: &Value| event.to_string();
+        assert_eq!(
+            transcript.lines(),
+            [
+                line(&first[0]),
+                line(&first[1]),
+                "ack".into(),
+                line(&second[0]),
+                "ack".into()
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follow_reports_an_outage_once_and_carries_on_with_the_next_daemon() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("louro.sock");
+        let transcript = Transcript::default();
+        let events = [message(1, "louro: ping")];
+
+        let daemon = async {
+            time::sleep(Duration::from_secs(300)).await;
+            let listener = UnixListener::bind(&path).unwrap();
+            serve_batch(&listener, &events, &transcript).await;
+        };
+        let mut out = transcript.clone();
+        tokio::select! {
+            _ = follow(Some(&path), &[], &mut out) => panic!("follow ended"),
+            () = daemon => {}
+        }
+
+        let lines = transcript.lines();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        let outage: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(outage["error"]["code"], "no_session");
+        assert_eq!(lines[1..], [events[0].to_string(), "ack".into()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follow_ends_with_the_error_code_when_a_retry_cannot_help() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("louro.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let daemon = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            let mismatch =
+                json!({"Err": {"code": "version_mismatch", "message": "different versions"}});
+            reply(&mut stream, mismatch).await;
+        });
+
+        let mut out = Transcript::default();
+        let code = follow(Some(&path), &[], &mut out).await;
+        daemon.await.unwrap();
+
+        assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(11)));
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(r#""code":"version_mismatch""#),
+            "{lines:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn follow_reports_again_when_a_daemon_dies_after_taking_the_wait() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("louro.sock");
+        let transcript = Transcript::default();
+        let events = [message(1, "louro: ping")];
+
+        let daemons = async {
+            time::sleep(Duration::from_secs(10)).await;
+            let first = UnixListener::bind(&path).unwrap();
+            drop(accept_request(&first).await);
+            drop(first);
+            fs::remove_file(&path).unwrap();
+            time::sleep(Duration::from_secs(30)).await;
+            let second = UnixListener::bind(&path).unwrap();
+            serve_batch(&second, &events, &transcript).await;
+        };
+        let mut out = transcript.clone();
+        tokio::select! {
+            _ = follow(Some(&path), &[], &mut out) => panic!("follow ended"),
+            () = daemons => {}
+        }
+
+        let lines = transcript.lines();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        for outage in &lines[..2] {
+            let outage: Value = serde_json::from_str(outage).unwrap();
+            assert_eq!(outage["error"]["code"], "no_session");
+        }
+        assert_eq!(lines[2..], [events[0].to_string(), "ack".into()]);
     }
 }
