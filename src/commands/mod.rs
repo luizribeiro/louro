@@ -7,7 +7,7 @@ use clap::Subcommand;
 use serde_json::Value;
 use tokio::time::{self, Instant};
 
-use crate::error::{Code, Result};
+use crate::error::{Code, Error, Result};
 use crate::irc::whole_seconds;
 use crate::output;
 use crate::socket::{self, Connection, Only, Op};
@@ -55,6 +55,34 @@ async fn wait(timeout: u64, max: NonZeroUsize, only: Vec<Only>) -> ExitCode {
     }
 }
 
+/// What one try at a wait came to.
+enum Tried {
+    Answered(Result<(Connection, Value)>),
+    /// No daemon is listening, as while louro restarts.
+    Absent(Error),
+    /// A daemon took the request and hung up without answering.
+    Stopped(Error),
+}
+
+async fn try_wait(socket: Option<&Path>, timeout: u64, max: NonZeroUsize, only: &[Only]) -> Tried {
+    match Connection::connect(socket).await {
+        Ok(mut connection) => {
+            let wait = Op::Wait {
+                timeout,
+                max,
+                only: only.to_vec(),
+                follow: false,
+            };
+            match connection.answer(wait).await {
+                Ok(reply) => Tried::Answered(reply.map(|batch| (connection, batch))),
+                Err(stopped) => Tried::Stopped(socket::louro_stopped(stopped)),
+            }
+        }
+        Err(err) if err.code == Code::NoSession => Tried::Absent(err),
+        Err(err) => Tried::Answered(Err(err)),
+    }
+}
+
 /// Sends the wait again, with the time left, to whichever daemon answers at `socket` next.
 async fn wait_through_restarts(
     socket: Option<&Path>,
@@ -68,25 +96,14 @@ async fn wait_through_restarts(
     let mut pause = FIRST_RETRY;
     loop {
         let timeout = time_left().map_or(u64::MAX, whole_seconds);
-        let gone = match Connection::connect(socket).await {
-            Ok(mut connection) => match connection
-                .answer(Op::Wait {
-                    timeout,
-                    max,
-                    only: only.to_vec(),
-                    follow: false,
-                })
-                .await
-            {
-                Ok(reply) => return reply.map(|batch| (connection, batch)),
-                Err(stopped) => {
-                    gone_since = Instant::now();
-                    pause = FIRST_RETRY;
-                    socket::louro_stopped(stopped)
-                }
-            },
-            Err(err) if err.code == Code::NoSession => err,
-            Err(err) => return Err(err),
+        let gone = match try_wait(socket, timeout, max, only).await {
+            Tried::Answered(answer) => return answer,
+            Tried::Absent(gone) => gone,
+            Tried::Stopped(gone) => {
+                gone_since = Instant::now();
+                pause = FIRST_RETRY;
+                gone
+            }
         };
         let left = time_left().unwrap_or(Duration::MAX);
         if left.is_zero() || gone_since.elapsed() >= GIVE_UP {

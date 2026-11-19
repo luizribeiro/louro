@@ -16,6 +16,9 @@ use crate::irc::{HistoryQuery, Outgoing, Typing};
 
 pub const VERSION: u8 = 18;
 
+/// How many events a `wait` returns unless told otherwise.
+pub const DEFAULT_MAX: NonZeroUsize = NonZeroUsize::new(20).unwrap();
+
 pub const RESTART_HINT: &str = "ask your operator to restart louro with `louro connect --replace`";
 
 #[derive(Deserialize, Serialize)]
@@ -49,7 +52,7 @@ pub enum Op {
         #[arg(long, default_value = "60", value_parser = parse_timeout, value_name = "SECS|none")]
         timeout: u64,
         /// Maximum number of events to return
-        #[arg(long, default_value = "20", value_name = "N")]
+        #[arg(long, default_value_t = DEFAULT_MAX, value_name = "N")]
         max: NonZeroUsize,
         /// Only these kinds of events, comma-separated: `dms` (anything in a DM, and invites),
         /// `mentions` (channel chat that mentions the bot), `sent` (the bot's own lines).

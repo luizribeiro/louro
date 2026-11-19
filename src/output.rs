@@ -14,11 +14,16 @@ pub fn emit<T: Serialize>(result: Result<T>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            println!("{}", json!({ "error": error }));
-            let _ = write_error_line(io::stderr(), &error);
+            let _ = report(&mut io::stdout(), &error);
             ExitCode::from(error.code.exit_code())
         }
     }
+}
+
+/// Writes `error` as a JSON line to `out`, and the plain line to stderr.
+pub fn report(out: &mut impl Write, error: &Error) -> io::Result<()> {
+    let _ = write_error_line(io::stderr(), error);
+    writeln!(out, "{}", json!({ "error": error }))
 }
 
 fn write_error_line(mut out: impl Write, error: &Error) -> io::Result<()> {
