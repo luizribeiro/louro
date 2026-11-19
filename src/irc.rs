@@ -4,9 +4,9 @@
 use std::time::{Duration, SystemTime};
 
 use papo::{
-    Account, Away, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events, Fallback,
-    HistoryItem, HistoryReference, HistoryRequest, HistoryTarget, ListFilter, Message, MessageId,
-    MessageKind, Refusal, RegistrationError, Sasl, Source, State, User, event,
+    Account, Away, Casemapping, Client, ConnectErrorKind, DisconnectCause, Endpoint, Event, Events,
+    Fallback, HistoryItem, HistoryReference, HistoryRequest, HistoryTarget, ListFilter, Message,
+    MessageId, MessageKind, Refusal, RegistrationError, Sasl, Source, State, User, event,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -568,9 +568,18 @@ fn is_from_me(state: &State, nick: &str, account: Option<&str>) -> bool {
 }
 
 fn is_my_account(state: &State, account: Option<&str>) -> bool {
-    account
-        .zip(state.account())
-        .is_some_and(|(sender, me)| state.casemapping().eq(sender, me))
+    same_account(
+        state.casemapping(),
+        account,
+        state.account().map(AsRef::as_ref),
+    )
+}
+
+/// A sender with the same nick but another account, or none, is someone else.
+fn same_account(casemapping: Casemapping, sender: Option<&str>, me: Option<&str>) -> bool {
+    sender
+        .zip(me)
+        .is_some_and(|(sender, me)| casemapping.eq(sender, me))
 }
 
 fn to_incoming(message: &Message, state: &State) -> Option<Incoming> {
@@ -1075,6 +1084,20 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn only_the_bots_own_account_counts_as_the_bot() {
+        let case = Casemapping::default();
+        for (sender, me, own) in [
+            (Some("louro"), Some("louro"), true),
+            (Some("Louro"), Some("louro"), true),
+            (Some("mallory"), Some("louro"), false),
+            (None, Some("louro"), false),
+            (Some("louro"), None, false),
+        ] {
+            assert_eq!(same_account(case, sender, me), own, "{sender:?} {me:?}");
+        }
+    }
 
     #[test]
     fn forwards_live_chat_and_others_history_only() {
