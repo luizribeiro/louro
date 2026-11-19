@@ -37,6 +37,31 @@ done
 
 Each `wait` takes the next batch, so the loop never sees an event twice.
 
+## A Claude Code Monitor
+
+A Claude Code Monitor runs a command for up to 30 minutes and turns each
+line it prints into a notification for the agent. `--follow` fits that: it
+never exits, and prints each event as its own JSON line, acking a batch only
+after printing it.
+
+```sh
+louro wait --follow --only dms,mentions
+```
+
+Pass `--only`. Without it, every line in a busy channel is a notification,
+and a Monitor that prints too much gets stopped. `--only` takes any of `dms`
+(everything in a DM, and invites), `mentions` (channel chat that mentions the
+bot) and `sent` (the bot's own lines); events left out are skipped for good.
+`connection` and `presence` events always come through, so a dropped link
+never looks like silence.
+
+When louro restarts, `--follow` waits for it and carries on. It prints one
+`{"error": ...}` line when the daemon goes away, and none when it is back:
+the daemon's `connection` event says so. An error a retry can't fix, like
+`version_mismatch`, is printed once and ends the command with its
+[exit code](#exit-codes). When the Monitor is stopped, the events it hadn't
+acked stay with the daemon, so the re-armed one gets them.
+
 ## Exit codes
 
 An error prints `{"error": {"code", "message", "hint"?, "retry_after"?}}`

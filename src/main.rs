@@ -39,7 +39,9 @@ error: exit 0, `timed_out: true`, and no events, or only `sent` ones. Just \
 call `wait` again. The daemon remembers where you left off, so events are \
 never missed and never replayed. If louro restarts meanwhile, `wait` \
 reconnects on its own; it exits 3 only once louro has been gone for 2 \
-minutes.
+minutes. A long-running monitor can use `wait --follow --only dms,mentions`: \
+it never exits, prints each event as its own line, and skips chat you \
+didn't ask for.
 
 If `status` shows `typing.after_wait` other than `off`, louro shows typing \
 for you to anyone who DMed you (or mentioned you, with `dms+mentions`) in \
