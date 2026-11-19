@@ -13,6 +13,7 @@ use tokio::net::unix::UCred;
 use crate::config::absolute;
 use crate::error::{Code, Error, Result};
 use crate::irc::{HistoryQuery, Outgoing, Typing};
+use crate::timefmt;
 
 pub const VERSION: u8 = 18;
 
@@ -202,9 +203,9 @@ pub struct Question {
 }
 
 fn parse_seconds(raw: &str) -> Result<u64, String> {
-    humantime::parse_duration(raw)
+    timefmt::parse_duration(raw)
         .map(|duration| duration.as_secs())
-        .map_err(|_| format!("expected a duration like `90s` or `5m`, got `{raw}`"))
+        .ok_or_else(|| format!("expected a duration like `90s` or `5m`, got `{raw}`"))
 }
 
 /// `none` is `u64::MAX` seconds, past any `Instant`, so the daemon sets no deadline.

@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{Code, Error, Result};
 use crate::text::MAX_TEXT_CHARS;
+use crate::timefmt;
 
 const EXAMPLE: &str = "a minimal louro.toml:
 [server]
@@ -158,7 +159,7 @@ impl TryFrom<String> for Limit {
         }
         let (count, window) = raw.split_once('/').ok_or(Self::FORMAT)?;
         let count: u32 = count.parse().map_err(|_| Self::FORMAT)?;
-        let window = humantime::parse_duration(window).map_err(|_| Self::FORMAT)?;
+        let window = timefmt::parse_duration(window).ok_or(Self::FORMAT)?;
         if count == 0 || window.subsec_nanos() != 0 {
             return Err(Self::FORMAT);
         }
@@ -252,7 +253,7 @@ impl Filter {
 #[serde(default, deny_unknown_fields)]
 pub struct TypingConfig {
     pub after_wait: AfterWait,
-    #[serde(deserialize_with = "duration", serialize_with = "as_humantime")]
+    #[serde(deserialize_with = "duration", serialize_with = "as_duration")]
     pub timeout: Duration,
 }
 
@@ -277,14 +278,14 @@ pub enum AfterWait {
     DmsAndMentions,
 }
 
-fn as_humantime<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(&humantime::format_duration(*duration))
+fn as_duration<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(&timefmt::format_duration(*duration))
 }
 
 fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     let raw = String::deserialize(deserializer)?;
-    humantime::parse_duration(&raw)
-        .map_err(|_| serde::de::Error::custom(r#"want a duration like "5s""#))
+    timefmt::parse_duration(&raw)
+        .ok_or_else(|| serde::de::Error::custom(r#"want a duration like "5s""#))
 }
 
 /// `true` for everyone, or a list of names, each matched case-insensitively and allowed one

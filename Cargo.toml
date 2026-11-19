@@ -13,7 +13,6 @@ categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 getrandom = "0.4.3"
-humantime = "2.4.0"
 regex = "1.13.1"
 # cargo-deny counts a git dependency without a version as a wildcard.
 papo = { version = "=0.0.0", git = "https://github.com/luizribeiro/papo", rev = "3a09eda902ec634f851a306fbbace284c7ff6073" }
@@ -24,6 +23,7 @@ tokio = { version = "1.53.3", features = ["net", "io-util", "macros", "process",
 rpassword = "7.5.4"
 rustix = { version = "1.1.5", features = ["process"] }
 toml = "1.1.8"
+jiff = "0.2"
 
 [lints.rust]
 unsafe_code = "forbid"

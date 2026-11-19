@@ -34,6 +34,7 @@ use crate::socket::{
     Ack, Op, Question, RESTART_HINT, Request, VERSION, read_line, resolve_socket_path, write_line,
 };
 use crate::text;
+use crate::timefmt;
 
 /// The most a `history` call returns, and Ergo's default page size.
 const MAX_HISTORY: usize = 100;
@@ -143,7 +144,7 @@ impl Seen {
     fn advance(&mut self, batch: &Batch) {
         let Some(newest) = batch
             .chat()
-            .filter_map(|chat| humantime::parse_rfc3339_weak(&chat.time).ok())
+            .filter_map(|chat| timefmt::parse_timestamp(&chat.time))
             .max()
             .filter(|newest| Some(*newest) > self.until)
         else {
@@ -151,7 +152,7 @@ impl Seen {
         };
         self.until = Some(newest);
         let bookmark = Bookmark {
-            until: humantime::format_rfc3339_millis(newest).to_string(),
+            until: timefmt::format_timestamp(newest),
         };
         if let Err(err) = write_state(&self.file, &bookmark) {
             eprintln!(
@@ -166,9 +167,9 @@ fn read_bookmark(file: &Path) -> std::result::Result<Option<SystemTime>, String>
     let Some(Bookmark { until }) = read_state(file)? else {
         return Ok(None);
     };
-    humantime::parse_rfc3339_weak(&until)
+    timefmt::parse_timestamp(&until)
         .map(Some)
-        .map_err(|err| err.to_string())
+        .ok_or_else(|| format!("not an RFC 3339 time: {until}"))
 }
 
 /// The JSON saved at `file`, or `None` if there is no file.
@@ -5112,7 +5113,7 @@ esac"#;
         fs::write(&valid, r#"{"until":"2026-10-16T21:06:30.120Z"}"#).unwrap();
         assert_eq!(
             Seen::load(valid).until,
-            humantime::parse_rfc3339("2026-10-16T21:06:30.120Z").ok()
+            timefmt::parse_timestamp("2026-10-16T21:06:30.120Z")
         );
     }
 
@@ -5167,7 +5168,7 @@ esac"#;
     #[tokio::test]
     async fn a_restart_backfills_what_the_grants_let_it_read_since_the_bookmark() {
         let ten_minutes_ago = SystemTime::now() - Duration::from_mins(10);
-        let daemon = launch_seen(&humantime::format_rfc3339_millis(ten_minutes_ago).to_string());
+        let daemon = launch_seen(&timefmt::format_timestamp(ten_minutes_ago));
         *daemon.irc.missed.lock().unwrap() = vec![
             from_history(dm(from_luiz("did the deploy finish?"))),
             from_history(dm(Incoming {

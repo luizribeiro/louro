@@ -14,6 +14,7 @@ mod output;
 mod password;
 mod socket;
 mod text;
+mod timefmt;
 
 use commands::Command;
 use error::{Code, Error};

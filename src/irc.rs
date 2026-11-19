@@ -17,6 +17,7 @@ use crate::config::Server;
 use crate::error::{Code, Error, Result};
 use crate::socket::Op;
 use crate::text;
+use crate::timefmt;
 
 const UPDATES_CAPACITY: usize = 256;
 /// The most history items [`Irc::missed`] fetches from one conversation, as papo's reconnect
@@ -690,9 +691,7 @@ fn history_reference(raw: &str) -> Result<HistoryReference> {
 
 /// An RFC 3339 time, or a duration like `30m` meaning that long before `now`.
 fn history_time(raw: &str, now: SystemTime) -> Option<SystemTime> {
-    humantime::parse_rfc3339_weak(raw)
-        .ok()
-        .or_else(|| now.checked_sub(humantime::parse_duration(raw).ok()?))
+    timefmt::parse_timestamp(raw).or_else(|| now.checked_sub(timefmt::parse_duration(raw)?))
 }
 
 /// papo marks our own echoes and other sessions only on live messages, so history from this
@@ -1128,8 +1127,8 @@ mod tests {
 
     #[test]
     fn a_history_time_is_absolute_or_that_long_ago() {
-        let now = humantime::parse_rfc3339("2026-10-16T21:34:11Z").unwrap();
-        let earlier = humantime::parse_rfc3339("2026-10-16T21:04:11Z").unwrap();
+        let now = timefmt::parse_timestamp("2026-10-16T21:34:11Z").unwrap();
+        let earlier = timefmt::parse_timestamp("2026-10-16T21:04:11Z").unwrap();
         for raw in ["2026-10-16T21:04:11Z", "30m"] {
             assert_eq!(history_time(raw, now), Some(earlier), "{raw}");
         }

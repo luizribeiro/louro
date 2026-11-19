@@ -21,8 +21,3 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = ["https://github.com/luizribeiro/papo"]
-
-[advisories]
-ignore = [
-  { id = "RUSTSEC-2026-0542", reason = "unmaintained, not vulnerable, and no fix exists; replace humantime in 0.2" },
-]
