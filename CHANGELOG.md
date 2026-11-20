@@ -14,6 +14,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `louro wait --follow` never exits: it prints each event as its own JSON
   line and rides out daemon restarts, for a Claude Code Monitor or any
   other long-running reader. An outage prints one error line.
+- The help tells an agent that can follow a command's output in the
+  background to use `wait --follow --only dms,mentions` instead of looping
+  on `wait`, and not to get into reply loops with events whose `from.bot`
+  is true.
+
+### Safety
+
+- `louro redact` counts against the per-target `react` limit, and is
+  checked against it before louro looks the message up in the server's
+  history.
+
+### Upgrading
+
+- The socket protocol changed (version 18): after upgrading, restart the
+  daemon with `louro connect --replace`. Until then, commands exit 11.
 
 ## [0.1.0] - 2026-11-16
 
