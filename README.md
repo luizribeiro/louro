@@ -31,7 +31,7 @@ daemon that holds the IRC connection and its password; the agent calls
    # with Nix
    nix run github:luizribeiro/louro -- --help
    # from source, with Rust 1.98 or newer
-   cargo install --locked --git https://github.com/luizribeiro/louro --tag v0.1.0
+   cargo install --locked --git https://github.com/luizribeiro/louro --tag v0.2.0
    ```
 
    On macOS, Homebrew and Nix sign louro with the hardened runtime, so

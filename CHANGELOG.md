@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-19
+
 ### Agent commands
 
 - `louro wait --only dms,mentions,sent` skips the other events for good,
@@ -124,5 +126,6 @@ The first release.
 - A Homebrew formula in `luizribeiro/tap` that builds from source and, on
   macOS, signs louro with the hardened runtime too.
 
-[Unreleased]: https://github.com/luizribeiro/louro/compare/v0.1.0...main
+[Unreleased]: https://github.com/luizribeiro/louro/compare/v0.2.0...main
+[0.2.0]: https://github.com/luizribeiro/louro/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/luizribeiro/louro/releases/tag/v0.1.0
